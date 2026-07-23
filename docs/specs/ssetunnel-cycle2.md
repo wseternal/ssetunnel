@@ -41,7 +41,7 @@ that direction is ~10× slower than the downstream.
 
 ## Tech Stack
 
-- Go 1.22+, module `github.com/wseternal/ssetunnel` — unchanged
+- Go 1.26.5, module `github.com/wseternal/ssetunnel` — unchanged
 - **No new dependencies.** gzip is stdlib (`compress/gzip`). yamux
   config unchanged.
 - Wire format changes are additive headers only (`X-SSET-Caps`,
