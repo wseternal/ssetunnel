@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/wseternal/ssetunnel/internal/agent"
+	"github.com/wseternal/ssetunnel/internal/probe"
 	"github.com/wseternal/ssetunnel/internal/server"
 )
 
@@ -25,6 +26,7 @@ const usage = `usage: ssetunnel <command> [flags]
 commands:
   server    run the public tunnel server
   agent     run the agent inside the restricted network
+  probe     measure a server's POST path (body cap, throttling)
 `
 
 func main() {
@@ -41,6 +43,8 @@ func main() {
 		err = runServer(ctx, os.Args[2:])
 	case "agent":
 		err = runAgent(ctx, os.Args[2:])
+	case "probe":
+		err = runProbe(ctx, os.Args[2:])
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command %q\n%s", os.Args[1], usage)
 		os.Exit(2)
@@ -84,13 +88,72 @@ func runAgent(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("agent", flag.ContinueOnError)
 	serverURL := fs.String("server", "", "tunnel server URL, e.g. http://tunnel.example.com")
 	target := fs.String("target", "", "TCP address to forward streams to, e.g. 127.0.0.1:3000")
+	batchSize := fs.Int("batch-size", 16384, "upstream batch ceiling in bytes (1024..1048576)")
+	concurrency := fs.Int("concurrency", 1, "upstream POST sender depth (1..4)")
+	compress := fs.Bool("compress", false, "negotiate gzip-per-batch upstream encoding")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if *serverURL == "" || *target == "" {
 		return errors.New("--server and --target are required")
 	}
-	log.Printf("agent: server %s, target %s", *serverURL, *target)
-	ag := &agent.Agent{ServerURL: *serverURL, Target: *target}
+	batch, conc := clampAgentFlags(*batchSize, *concurrency)
+	log.Printf("agent: server %s, target %s, batch-size %d, concurrency %d, compress %v",
+		*serverURL, *target, batch, conc, *compress)
+	ag := &agent.Agent{
+		ServerURL:   *serverURL,
+		Target:      *target,
+		BatchSize:   batch,
+		Concurrency: conc,
+		Compress:    *compress,
+	}
 	return ag.Run(ctx)
+}
+
+// Agent flag bounds (cycle-2 plan step 7): the batch ceiling matches the
+// negotiated protocol maximum, the sender depth the server's window.
+const (
+	minBatchSize = 1024
+	maxBatchSize = 1 << 20
+	minConc      = 1
+	maxConc      = 4
+)
+
+// clampAgentFlags clamps agent flag values into their valid ranges,
+// logging each clamp.
+func clampAgentFlags(batchSize, concurrency int) (int, int) {
+	if batchSize < minBatchSize {
+		log.Printf("agent: --batch-size %d below minimum, clamped to %d", batchSize, minBatchSize)
+		batchSize = minBatchSize
+	}
+	if batchSize > maxBatchSize {
+		log.Printf("agent: --batch-size %d above maximum, clamped to %d", batchSize, maxBatchSize)
+		batchSize = maxBatchSize
+	}
+	if concurrency < minConc {
+		log.Printf("agent: --concurrency %d below minimum, clamped to %d", concurrency, minConc)
+		concurrency = minConc
+	}
+	if concurrency > maxConc {
+		log.Printf("agent: --concurrency %d above maximum, clamped to %d", concurrency, maxConc)
+		concurrency = maxConc
+	}
+	return batchSize, concurrency
+}
+
+func runProbe(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("probe", flag.ContinueOnError)
+	serverURL := fs.String("server", "", "tunnel server URL, e.g. http://tunnel.example.com")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *serverURL == "" {
+		return errors.New("--server is required")
+	}
+	rep, err := probe.Run(ctx, probe.Config{URL: *serverURL})
+	if err != nil {
+		return err
+	}
+	fmt.Print(rep.String())
+	return nil
 }

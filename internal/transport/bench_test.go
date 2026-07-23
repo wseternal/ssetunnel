@@ -74,7 +74,8 @@ func startEchoTarget(t *testing.T) net.Listener {
 }
 
 // startModeTarget returns a listener whose conns start with a mode byte:
-// 'E' = echo everything, 'D' = discard (counted in the returned counter).
+// 'E' = echo everything, 'D' = discard (counted in the returned counter),
+// 'U' = flood N MiB upstream then close (counted in the returned counter).
 func startModeTarget(t *testing.T) (net.Listener, *atomic.Int64) {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -99,6 +100,28 @@ func startModeTarget(t *testing.T) (net.Listener, *atomic.Int64) {
 					io.Copy(c, c)
 					return
 				}
+					if mode[0] == 'U' {
+						// Flood target→entry (upstream): fill N MiB then close.
+						// Caller sends a 4-byte MiB count header.
+						sz := make([]byte, 4)
+						io.ReadFull(c, sz)
+						total := int64(uint32(sz[0])|uint32(sz[1])<<8|uint32(sz[2])<<16|uint32(sz[3])<<24) << 20
+						chunk := bytes.Repeat([]byte{'u'}, 64<<10)
+						for total > 0 {
+							send := chunk
+							if int64(len(send)) > total {
+								send = send[:total]
+						}
+							nw, err := c.Write(send)
+							discarded.Add(int64(nw))
+							total -= int64(nw)
+							if err != nil {
+							return
+						}
+					}
+						c.Close()
+						return
+					}
 				buf := make([]byte, 32<<10)
 				for {
 					n, err := c.Read(buf)
@@ -424,4 +447,151 @@ func abs(x int) int {
 		return -x
 	}
 	return x
+}
+
+// noiseGen returns n bytes of low-entropy but effectively incompressible
+// data (no long repeats, dense distribution — gzip won't shrink it).
+func noiseGen(n int) []byte {
+	b := make([]byte, n)
+	for i := range b {
+		b[i] = byte(i*31 + i>>8)
+	}
+	return b
+}
+
+// setupBenchTuned is setupBench with agent config tuning (cycle-2).
+func setupBenchTuned(t *testing.T, target net.Listener, tune func(*agent.Agent)) *benchEnv {
+	t.Helper()
+	srv := server.NewServer(15 * time.Second)
+	ts := httptest.NewServer(srv.HTTPHandler())
+	mb, err := testutil.StartMiddlebox(ts.URL, testutil.MiddleboxConfig{
+		Latency: 10 * time.Millisecond,
+		MaxBody: 64 << 10,
+	})
+	if err != nil {
+		t.Fatalf("StartMiddlebox: %v", err)
+	}
+	entryLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen entry: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	go srv.ServeEntry(ctx, entryLn)
+	ag := &agent.Agent{
+		ServerURL:  mb.URL,
+		Target:     target.Addr().String(),
+		MaxBackoff: 50 * time.Millisecond,
+	}
+	if tune != nil {
+		tune(ag)
+	}
+	go ag.Run(ctx)
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(srv.Reg.IDs()) > 0 {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if len(srv.Reg.IDs()) == 0 {
+		t.Fatal("agent never connected")
+	}
+	t.Cleanup(func() {
+		cancel()
+		entryLn.Close()
+		ts.Close()
+		mb.Close()
+	})
+	return &benchEnv{entryAddr: entryLn.Addr().String(), reg: srv.Reg, mb: mb, cancel: cancel}
+}
+
+// TestBenchUpstreamThroughput measures target→entry throughput (the
+// upstream POST path — cycle 2's bottleneck). Serial-16KiB control
+// prints the baseline; the 4/64KiB gate must clear the ≥4 MB/s budget.
+func TestBenchUpstreamThroughput(t *testing.T) {
+	if testing.Short() {
+		t.Skip("bench: manual run only")
+	}
+	target, discarded := startModeTarget(t)
+
+	// Serial baseline (cycle-1 behavior).
+	eSer := setupBench(t, target)
+	cSer := eSer.dialEntry(t)
+	// Tell the flood target to send 64 MiB upstream.
+	cSer.Write([]byte{'U'})
+	sz := make([]byte, 4)
+	total := uint32(64) // 64 MiB
+	sz[0], sz[1], sz[2], sz[3] = byte(total), byte(total>>8), byte(total>>16), byte(total>>24)
+	cSer.Write(sz)
+		go io.Copy(io.Discard, cSer)
+	base := discarded.Load()
+	start := time.Now()
+	waitBytes(t, discarded, base+64<<20, 120*time.Second)
+	serialMBps := 64.0 / time.Since(start).Seconds()
+	cSer.Close()
+
+	// Concurrent (4 senders, 64 KiB batches).
+	eConc := setupBenchTuned(t, target, func(ag *agent.Agent) {
+		ag.BatchSize = 64 << 10
+		ag.Concurrency = 4
+	})
+	cConc := eConc.dialEntry(t)
+	cConc.Write([]byte{'U'})
+	cConc.Write(sz)
+		go io.Copy(io.Discard, cConc)
+	base = discarded.Load()
+	start = time.Now()
+	waitBytes(t, discarded, base+64<<20, 120*time.Second)
+	concurrentMBps := 64.0 / time.Since(start).Seconds()
+	cConc.Close()
+
+	t.Logf("BENCH  upstream serial 16KiB = %.1f MB/s", serialMBps)
+	t.Logf("BENCH  upstream concurrent 4x64KiB = %.1f MB/s (%.1fx)", concurrentMBps, concurrentMBps/serialMBps)
+	report(t, "upstream throughput", fmt.Sprintf("%.1f MB/s", concurrentMBps), ">= 4 MB/s", concurrentMBps >= 4)
+	report(t, "body cap trips (upstream)", fmt.Sprintf("%d", eConc.mb.Resp413s.Load()), "0", eConc.mb.Resp413s.Load() == 0)
+}
+
+// TestBenchUpstreamGzip measures wire-byte reduction for gzip-per-batch.
+func TestBenchUpstreamGzip(t *testing.T) {
+	if testing.Short() {
+		t.Skip("bench: manual run only")
+	}
+	target, _ := startModeTarget(t)
+
+	e := setupBenchTuned(t, target, func(ag *agent.Agent) {
+		ag.BatchSize = 64 << 10
+		ag.Concurrency = 4
+		ag.Compress = true
+	})
+
+	// Compressible payload: repeated 'A' (ratio ≫ 2×)
+	preBytes := e.mb.PostBytes.Load()
+	payload := bytes.Repeat([]byte{'A'}, 256<<10)
+	c := e.dialEntry(t)
+	c.Write(payload)
+	got := make([]byte, len(payload))
+	io.ReadFull(c, got)
+	c.Close()
+	wireBytes := e.mb.PostBytes.Load() - preBytes
+	ratio := float64(len(payload)) / float64(wireBytes)
+	t.Logf("BENCH  gzip: %d payload → %d wire bytes (%.1fx)", len(payload), wireBytes, ratio)
+	report(t, "gzip compression ratio", fmt.Sprintf("%.1fx", ratio), ">= 2x", ratio >= 2)
+
+	// Incompressible payload: random-ish noise — raw, no flag.
+	e2 := setupBenchTuned(t, target, func(ag *agent.Agent) {
+		ag.BatchSize = 64 << 10
+		ag.Concurrency = 4
+		ag.Compress = true
+	})
+	preBytes2 := e2.mb.PostBytes.Load()
+	noise := noiseGen(256 << 10)
+	c2 := e2.dialEntry(t)
+	c2.Write(noise)
+	got2 := make([]byte, len(noise))
+	io.ReadFull(c2, got2)
+	c2.Close()
+	wireBytes2 := e2.mb.PostBytes.Load() - preBytes2
+	overhead := float64(wireBytes2)/float64(len(noise)) - 1
+	t.Logf("BENCH  gzip (incompressible): %d → %d wire bytes (%.2f%% overhead)", len(noise), wireBytes2, overhead*100)
+	report(t, "gzip incompressible overhead", fmt.Sprintf("%.2f%%", overhead*100), "<= 1%", overhead*100 <= 1)
 }

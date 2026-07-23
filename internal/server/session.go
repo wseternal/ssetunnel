@@ -29,8 +29,14 @@ type Session struct {
 	// session. Set before first use; 0 disables.
 	WriteTimeout time.Duration
 
+	// GapTimeout bounds how long the reorder window tolerates an unhealed
+	// seq gap before push fails fast (409 = session death). Applies only
+	// when the window is enabled; 0 → defaultGapTimeout.
+	GapTimeout time.Duration
+
 	mu      sync.Mutex
-	nextSeq uint64 // next upstream seq expected (plan decision 1)
+	nextSeq uint64                   // next upstream seq expected (plan decision 1)
+	window  *transport.ReorderWindow // non-nil only when the agent negotiated concurrency>1
 
 	closeOnce sync.Once
 }
@@ -39,6 +45,10 @@ type Session struct {
 // stalls (spec: every non-SSE request < 30 s).
 const defaultWriteTimeout = 25 * time.Second
 
+// defaultGapTimeout backstops a reassembly gap; yamux keepalive (30 s)
+// guarantees upstream traffic within that span (cycle-2 plan decision 4).
+const defaultGapTimeout = 25 * time.Second
+
 // NewSession creates a session with the given agent-generated ID.
 func NewSession(id string) *Session {
 	return &Session{
@@ -46,8 +56,21 @@ func NewSession(id string) *Session {
 		up:           transport.NewPipe(upPipeCap),
 		down:         transport.NewPipe(downPipeCap),
 		WriteTimeout: defaultWriteTimeout,
+		GapTimeout:   defaultGapTimeout,
 	}
 }
+
+// enableWindow routes push through a reorder window (cycle-2 plan
+// decision 3): called when the agent negotiated concurrency>1. Without
+// it the legacy serial path runs verbatim.
+func (s *Session) enableWindow() {
+	s.window = transport.NewReorderWindow()
+	s.window.GapTimeout = s.GapTimeout
+}
+
+// hasWindow reports whether the session negotiated concurrent upstream
+// POSTs (and therefore accepts window semantics, gzip flags, etc.).
+func (s *Session) hasWindow() bool { return s.window != nil }
 
 // ID returns the agent-generated session ID.
 func (s *Session) ID() string { return s.id }
@@ -58,6 +81,9 @@ func (s *Session) ID() string { return s.id }
 func (s *Session) push(seq uint64, body []byte) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.window != nil {
+		return s.pushWindowed(seq, body)
+	}
 	switch {
 	case seq < s.nextSeq:
 		return 200 // duplicate: ack and discard
@@ -74,6 +100,29 @@ func (s *Session) push(seq uint64, body []byte) int {
 		return 409
 	}
 	s.nextSeq++
+	return 200
+}
+
+// pushWindowed is the negotiated-concurrency push path (cycle-2 plan
+// decisions 3+4): the reorder window buffers out-of-order batches, and
+// each batch that becomes deliverable feeds the up pipe in seq order.
+// Window errors and pipe-write failures share the legacy semantics:
+// 409 = session death.
+func (s *Session) pushWindowed(seq uint64, body []byte) int {
+	ready, err := s.window.Push(seq, body)
+	if err != nil {
+		s.Close()
+		return 409
+	}
+	for _, batch := range ready {
+		if s.WriteTimeout > 0 {
+			s.up.SetWriteDeadline(time.Now().Add(s.WriteTimeout))
+		}
+		if _, err := s.up.Write(batch); err != nil {
+			s.Close()
+			return 409
+		}
+	}
 	return 200
 }
 

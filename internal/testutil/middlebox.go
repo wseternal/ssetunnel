@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -20,6 +21,17 @@ type MiddleboxConfig struct {
 	IdleTimeout time.Duration // close client conns idle this long
 	MaxBody     int64         // 413 when Content-Length exceeds this
 	Latency     time.Duration // fixed delay injected per direction
+	// StripHeaders deletes these response headers before forwarding,
+	// modeling a header-stripping proxy (cycle-2 plan decision 10).
+	StripHeaders []string
+	// PerConnRate throttles request-body forwarding to this many
+	// bytes/sec per proxied request (dumb: sleep proportional to bytes,
+	// no token bucket). Models a per-connection upload cap.
+	PerConnRate int64
+	// GlobalRate throttles request-body forwarding to this many
+	// bytes/sec shared across ALL proxied requests (mutex-guarded
+	// scheduling). Models an aggregate upload cap.
+	GlobalRate int64
 }
 
 // Middlebox is an HTTP reverse proxy that simulates a hostile middlebox
@@ -33,12 +45,16 @@ type Middlebox struct {
 	Posts    atomic.Int64 // /up requests forwarded
 	Resp413s atomic.Int64 // requests rejected by the body cap
 	Killed   atomic.Int64 // client conns closed by the idle killer
+	// PostBytes sums the Content-Length of /up and /probe requests —
+	// the wire-bytes counter for compression measurements.
+	PostBytes atomic.Int64
 
 	cfg      MiddleboxConfig
 	upstream *url.URL
 	rt       *http.Transport
 	srv      *httptest.Server
 	stop     chan struct{}
+	global   *rateLimiter // non-nil when GlobalRate > 0
 
 	mu    sync.Mutex
 	conns map[*trackedConn]struct{}
@@ -71,6 +87,9 @@ func StartMiddlebox(upstreamURL string, cfg MiddleboxConfig) (*Middlebox, error)
 	if cfg.IdleTimeout > 0 {
 		go m.idleKiller()
 	}
+	if cfg.GlobalRate > 0 {
+		m.global = &rateLimiter{rate: cfg.GlobalRate}
+	}
 	return m, nil
 }
 
@@ -92,6 +111,9 @@ func (m *Middlebox) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == "/up" {
 		m.Posts.Add(1)
 	}
+	if r.URL.Path == "/up" || r.URL.Path == "/probe" {
+		m.PostBytes.Add(r.ContentLength)
+	}
 	if m.cfg.Latency > 0 {
 		time.Sleep(m.cfg.Latency) // request direction
 	}
@@ -100,6 +122,14 @@ func (m *Middlebox) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	out.URL.Host = m.upstream.Host
 	out.Host = m.upstream.Host
 	out.RequestURI = ""
+	// Upload throttles (dumb, sleep-proportional-to-bytes): per-request
+	// for PerConnRate, one shared allowance for GlobalRate.
+	if m.cfg.PerConnRate > 0 {
+		out.Body = &rateReadCloser{rc: out.Body, lim: &rateLimiter{rate: m.cfg.PerConnRate}}
+	}
+	if m.global != nil {
+		out.Body = &rateReadCloser{rc: out.Body, lim: m.global}
+	}
 	resp, err := m.rt.RoundTrip(out)
 	if err != nil {
 		http.Error(w, "middlebox: upstream unreachable", http.StatusBadGateway)
@@ -111,6 +141,11 @@ func (m *Middlebox) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		switch k {
 		case "Connection", "Keep-Alive", "Transfer-Encoding", "Content-Length", "Upgrade":
 			continue // hop-by-hop or length-managed
+		}
+		if slices.ContainsFunc(m.cfg.StripHeaders, func(s string) bool {
+			return http.CanonicalHeaderKey(s) == k // k is already canonical
+		}) {
+			continue // stripped by the middlebox (cycle-2 plan decision 10)
 		}
 		for _, v := range vs {
 			h.Add(k, v)
@@ -260,12 +295,55 @@ func (m *Middlebox) idleKiller() {
 			m.mu.Lock()
 			for c := range m.conns {
 				if now.Sub(time.Unix(0, c.last.Load())) >= m.cfg.IdleTimeout {
+					// Count BEFORE closing: the close is what makes the
+					// kill observable to the client, so any observed
+					// death implies the counter already moved.
+					m.Killed.Add(1)
 					c.Conn.Close() // bypass tracked Close; we hold the lock
 					delete(m.conns, c)
-					m.Killed.Add(1)
 				}
 			}
 			m.mu.Unlock()
 		}
 	}
 }
+
+// rateLimiter is a dumb bytes/sec throttle: every chunk waits for a slot
+// sized n/rate. Slots are scheduled back-to-back under the mutex, so a
+// shared limiter caps the aggregate across all users.
+type rateLimiter struct {
+	mu   sync.Mutex
+	rate int64 // bytes/sec
+	next time.Time
+}
+
+// wait blocks until this chunk's slot begins.
+func (l *rateLimiter) wait(n int) {
+	d := time.Duration(float64(n) / float64(l.rate) * float64(time.Second))
+	l.mu.Lock()
+	start := l.next
+	if now := time.Now(); now.After(start) {
+		start = now
+	}
+	l.next = start.Add(d)
+	l.mu.Unlock()
+	if s := time.Until(start); s > 0 {
+		time.Sleep(s)
+	}
+}
+
+// rateReadCloser throttles reads through a rateLimiter.
+type rateReadCloser struct {
+	rc  io.ReadCloser
+	lim *rateLimiter
+}
+
+func (r *rateReadCloser) Read(p []byte) (int, error) {
+	n, err := r.rc.Read(p)
+	if n > 0 {
+		r.lim.wait(n)
+	}
+	return n, err
+}
+
+func (r *rateReadCloser) Close() error { return r.rc.Close() }

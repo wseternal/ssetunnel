@@ -2,9 +2,11 @@ package transport
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -28,6 +30,19 @@ type Config struct {
 	MaxBatchSize   int           // 0 → DefaultMaxBatchSize
 	MaxWait        time.Duration // 0 → DefaultMaxWait
 	MaxQueuedBytes int           // Write blocks past this; 0 → DefaultMaxQueuedBytes
+
+	// DisableCaps is a test-only knob (cycle-2 plan decision 10): when
+	// true the agent sends no X-SSET-Caps request header and ignores the
+	// server's response caps — pure cycle-1 wire behavior.
+	DisableCaps bool
+
+	// Concurrency is the wanted upstream POST sender depth; 0 → 1
+	// (serial cycle-1). Negotiated down to the server's advertisement
+	// (see caps.go); >1 arms the sender pool.
+	Concurrency int
+	// Compress wants gzip-per-batch encoding (decision 5); used only
+	// when negotiated on a windowed (concurrency>1) session.
+	Compress bool
 }
 
 // Conn is the agent side of the tunnel: a net.Conn over SSE-down +
@@ -43,14 +58,30 @@ type Conn struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	batcher *Batcher // Write → batches → single serial POST sender
+	batcher *Batcher // Write → batches → POST sender(s)
 	down    *Pipe    // SSE events → Read
+
+	// Sender pool (cycle-2 plan decisions 1-2): nil unless concurrency>1
+	// was negotiated. submit (batcher's run goroutine only) assigns seqs;
+	// workers POST {seq, body} pairs and never touch c.seq.
+	gzip   bool        // negotiated gzip-per-batch
+	pool   chan upTask // bounded: full channel = backpressure to batcher
+	poolWg sync.WaitGroup
+
+	sendErrMu sync.Mutex
+	sendErr   error // sticky first pool POST failure (decision 1)
 
 	writeMu       sync.Mutex
 	writeDeadline time.Time
 
 	closeOnce sync.Once
 	wg        sync.WaitGroup // readLoop
+}
+
+// upTask is one seq-numbered batch handed to a pool worker.
+type upTask struct {
+	seq  uint64
+	body []byte
 }
 
 // DialAgent opens the SSE downstream, starts the batching POST sender,
@@ -70,10 +101,11 @@ func DialAgent(ctx context.Context, cfg Config) (*Conn, error) {
 	}
 	client := cfg.Client
 	if client == nil {
-		// Plan decision 7: explicit MaxIdleConnsPerHost, no compression
-		// (SSE must not be gzip-buffered by the transport).
+		// Plan decision 9: 8 idle conns cover 4 POST workers + 1 SSE +
+		// reconnect overlap + spare; no compression (SSE must not be
+		// gzip-buffered by the transport).
 		client = &http.Client{Transport: &http.Transport{
-			MaxIdleConnsPerHost: 4, // SSE + serial POST + reconnect headroom
+			MaxIdleConnsPerHost: 8,
 			DisableCompression:  true,
 		}}
 	}
@@ -84,6 +116,10 @@ func DialAgent(ctx context.Context, cfg Config) (*Conn, error) {
 	maxWait := cfg.MaxWait
 	if maxWait <= 0 {
 		maxWait = DefaultMaxWait
+	}
+	conc := cfg.Concurrency
+	if conc <= 0 {
+		conc = 1
 	}
 
 	c := &Conn{
@@ -101,6 +137,13 @@ func DialAgent(ctx context.Context, cfg Config) (*Conn, error) {
 		c.cancel()
 		return nil, fmt.Errorf("build events request: %w", err)
 	}
+	want := Caps{Concurrency: conc, Batch: maxSize, Gzip: cfg.Compress}
+	if !cfg.DisableCaps {
+		// The response (with the server's caps) comes after the request,
+		// so the agent sends its WANTED set here; both sides compute the
+		// per-axis min independently (caps.go contract, decision 3).
+		req.Header.Set("X-SSET-Caps", want.String())
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		c.cancel()
@@ -113,7 +156,32 @@ func DialAgent(ctx context.Context, cfg Config) (*Conn, error) {
 		return nil, fmt.Errorf("open events stream: status %s", resp.Status)
 	}
 
-	c.batcher = NewBatcher(maxSize, maxWait, cfg.MaxQueuedBytes, c.send)
+	// Negotiate against the server's advertisement; absent/malformed caps
+	// (or DisableCaps) fail closed to the zero set = cycle-1 serial.
+	var negotiated Caps
+	if !cfg.DisableCaps {
+		negotiated = NegotiateCaps(want, ParseCaps(resp.Header.Get("X-SSET-Caps")))
+	}
+	if negotiated.Batch > 0 && negotiated.Batch < maxSize {
+		maxSize = negotiated.Batch // negotiation clamps the ceiling (decision 7)
+	}
+	// gzip rides the windowed upstream protocol: the server 400s the
+	// flag on a non-windowed session (caps.go contract point 4).
+	c.gzip = negotiated.Gzip && negotiated.Concurrency > 1
+	if negotiated.Concurrency > 1 {
+		// Sender pool (decision 1): submit blocks on the bounded channel
+		// when saturated, so the batcher's busy flag keeps meaning
+		// "saturated" and eager flush/coalescing behave exactly as at N=1.
+		c.pool = make(chan upTask, negotiated.Concurrency)
+		for i := 0; i < negotiated.Concurrency; i++ {
+			c.poolWg.Add(1)
+			go c.worker()
+		}
+		c.batcher = NewBatcher(maxSize, maxWait, cfg.MaxQueuedBytes, c.submit)
+	} else {
+		// N=1: the cycle-1 serial sender, unchanged.
+		c.batcher = NewBatcher(maxSize, maxWait, cfg.MaxQueuedBytes, c.send)
+	}
 	c.wg.Add(1)
 	go c.readLoop(resp.Body)
 	return c, nil
@@ -157,10 +225,68 @@ func (c *Conn) readLoop(body io.ReadCloser) {
 	}
 }
 
-// send is the batcher's flush func: one serial POST per batch
+// send is the batcher's flush func at N=1: one serial POST per batch
 // (decision 1). The write deadline maps to the POST request context
 // (decision 8). Any POST failure kills the conn (decision 3).
 func (c *Conn) send(batch []byte) error {
+	return c.post(c.seq.Add(1)-1, batch)
+}
+
+// submit is the batcher's flush func with the sender pool (decision 2:
+// seq order == byte order because only the batcher's single run goroutine
+// calls this). A full pool channel blocks — that backpressure is what
+// keeps the batcher's busy/coalescing semantics exact — but Close always
+// unblocks it.
+func (c *Conn) submit(batch []byte) error {
+	t := upTask{seq: c.seq.Add(1) - 1, body: batch}
+	select {
+	case c.pool <- t:
+		return nil
+	case <-c.ctx.Done():
+		return c.ctx.Err()
+	}
+}
+
+// worker POSTs tasks in an infinite loop until the pool channel closes.
+// A POST failure is sticky (post records it) and kills the conn.
+func (c *Conn) worker() {
+	defer c.poolWg.Done()
+	for t := range c.pool {
+		if err := c.post(t.seq, t.body); err != nil {
+			return
+		}
+	}
+}
+
+// fail records the first POST error synchronously — before Close starts
+// tearing down — so a concurrent Write can never observe the teardown
+// without the root error (decision 1's sticky sendErr, at any pool size).
+// Errors caused by our own cancel (Close already in progress) are not
+// recorded: a user-initiated Close keeps its clean semantics.
+func (c *Conn) fail(err error) {
+	if c.ctx.Err() != nil {
+		return
+	}
+	c.sendErrMu.Lock()
+	if c.sendErr == nil {
+		c.sendErr = err
+	}
+	c.sendErrMu.Unlock()
+	go c.Close()
+}
+
+// stickyErr returns the recorded POST failure, if any.
+func (c *Conn) stickyErr() error {
+	c.sendErrMu.Lock()
+	defer c.sendErrMu.Unlock()
+	return c.sendErr
+}
+
+// post sends one upstream batch with the given seq. The write deadline
+// maps to the POST request context (decision 8). Any POST failure kills
+// the conn (decision 3). With negotiated gzip, a batch goes out
+// compressed only when that is strictly smaller (decision 5).
+func (c *Conn) post(seq uint64, batch []byte) error {
 	ctx := c.ctx
 	c.writeMu.Lock()
 	dl := c.writeDeadline
@@ -170,49 +296,101 @@ func (c *Conn) send(batch []byte) error {
 		ctx, cancel = context.WithDeadline(ctx, dl)
 		defer cancel()
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.upURL, bytes.NewReader(batch))
+	body := batch
+	var flags string
+	if c.gzip {
+		if z := gzipBatch(batch); z != nil {
+			body, flags = z, "gzip"
+		}
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.upURL, bytes.NewReader(body))
 	if err != nil {
-		go c.Close()
+		c.fail(err)
 		return fmt.Errorf("build upstream post: %w", err)
 	}
 	req.Header.Set("X-SSET-Session", c.id)
-	req.Header.Set("X-SSET-Seq", strconv.FormatUint(c.seq.Add(1)-1, 10))
+	req.Header.Set("X-SSET-Seq", strconv.FormatUint(seq, 10))
+	if flags != "" {
+		req.Header.Set("X-SSET-Flags", flags)
+	}
 	resp, err := c.client.Do(req)
 	if err != nil {
-		go c.Close()
+		c.fail(err)
 		return fmt.Errorf("post upstream batch: %w", err)
 	}
 	io.Copy(io.Discard, resp.Body) // always drain (decision 7)
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		go c.Close()
-		return fmt.Errorf("post upstream batch: status %s", resp.Status)
+		err := fmt.Errorf("post upstream batch: status %s", resp.Status)
+		c.fail(err)
+		return err
 	}
 	return nil
+}
+
+// gzipBatch returns the gzip.BestSpeed encoding of b, or nil when
+// compression does not shrink it (decision 5: incompressible batches pay
+// only the attempt, ≤1% by construction).
+func gzipBatch(b []byte) []byte {
+	var buf bytes.Buffer
+	zw, err := gzip.NewWriterLevel(&buf, gzip.BestSpeed)
+	if err != nil {
+		return nil
+	}
+	if _, err := zw.Write(b); err != nil {
+		return nil
+	}
+	if err := zw.Close(); err != nil {
+		return nil
+	}
+	if buf.Len() >= len(b) {
+		return nil
+	}
+	return buf.Bytes()
 }
 
 // Read returns downstream bytes from the SSE stream.
 func (c *Conn) Read(b []byte) (int, error) { return c.down.Read(b) }
 
 // Write buffers b for the next upstream POST. A sticky POST failure
-// surfaces here (decision 3: POST failure = session death).
+// surfaces here (decision 3: POST failure = session death) — the
+// batcher's flush error first, then the pool's async send error. If a
+// failure-driven Close won the race and closed the batcher first, the
+// root error still wins over ErrBatcherClosed.
 func (c *Conn) Write(b []byte) (int, error) {
 	if err := c.batcher.Err(); err != nil {
 		return 0, err
 	}
-	return c.batcher.Write(b)
+	if err := c.stickyErr(); err != nil {
+		return 0, err
+	}
+	n, err := c.batcher.Write(b)
+	if errors.Is(err, ErrBatcherClosed) {
+		if ferr := c.batcher.Err(); ferr != nil {
+			return 0, ferr
+		}
+		if ferr := c.stickyErr(); ferr != nil {
+			return 0, ferr
+		}
+	}
+	return n, err
 }
 
 // Close cancels the conn context first — in-flight and queued POSTs
 // abort immediately, so a peer that accepts a POST but never responds
 // cannot hang Close (dropped bytes at Close are consistent with the
 // fail-fast model, plan decision 3/9). Then it stops the read pipe,
-// drains the batcher, and waits for the read goroutine. Idempotent.
+// drains the batcher, closes the pool channel and reaps the workers, and
+// waits for the read goroutine. Idempotent.
 func (c *Conn) Close() error {
 	c.closeOnce.Do(func() {
 		c.cancel()
 		c.down.CloseWithError(net.ErrClosed)
 		c.batcher.Close()
+		if c.pool != nil {
+			close(c.pool) // workers drain remaining tasks (posts fail fast on the canceled ctx)
+			c.poolWg.Wait()
+		}
 		c.wg.Wait()
 		// A client we created owns its transport: reap idle keep-alive
 		// conns or every reconnect leaks their goroutines (plan decision

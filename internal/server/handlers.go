@@ -1,20 +1,36 @@
 package server
 
 import (
+	"bytes"
+	"compress/gzip"
 	"errors"
 	"io"
 	"net"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/wseternal/ssetunnel/internal/transport"
 )
 
-// maxUpBody defensively caps one POST body. The protocol target is one
-// 16 KiB batch (plan decision 4), but a single large Write can make the
-// batcher overshoot, so the guard sits well above that.
-const maxUpBody = 1 << 20
+// maxUpBody defensively caps one POST body at the 1 MiB batch ceiling
+// plus 64 KiB of slack: the batch ceiling must never equal the body cap
+// (cycle-2 plan decision 8), or an exactly-at-ceiling batch would 413 —
+// and 413 means session death.
+const maxUpBody = 1<<20 + 64<<10
+
+// maxProbeBody caps one /probe body (cycle-2 plan decision 6: read and
+// discard, bounded surface).
+const maxProbeBody = 2 << 20
+
+// Server capabilities advertised on the /events 200 response (cycle-2
+// plan decision 3: consts, not config).
+const (
+	capsConcurrency = 4
+	capsBatch       = 1 << 20
+	capsHeaderValue = "concurrency=4;batch=1048576;gzip"
+)
 
 // Handler serves the tunnel endpoints: GET /events?id= streams the
 // downstream SSE for a session, POST /up carries upstream batches with
@@ -27,6 +43,13 @@ type Handler struct {
 	// OnSession, if set, is called after each session registers. Set it
 	// before serving; the server uses it to attach yamux (step 7).
 	OnSession func(*Session)
+
+	// OnUpPush, if set, is called by handleUp just before pushing a
+	// validated body into the session; a non-nil channel it returns is
+	// waited on first. Test-only hook (precedent: OnSession) that lets
+	// tests deterministically shuffle concurrent POST delivery — never
+	// set it in production.
+	OnUpPush func(seq uint64) <-chan struct{}
 }
 
 // NewHandler builds the tunnel handler. heartbeat is the SSE keepalive
@@ -35,6 +58,7 @@ func NewHandler(reg *Registry, heartbeat time.Duration) *Handler {
 	h := &Handler{reg: reg, heartbeat: heartbeat, mux: http.NewServeMux()}
 	h.mux.HandleFunc("/events", h.handleEvents)
 	h.mux.HandleFunc("/up", h.handleUp)
+	h.mux.HandleFunc("/probe", h.handleProbe)
 	return h
 }
 
@@ -58,12 +82,19 @@ func (h *Handler) handleEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sess := NewSession(id)
+	// Two-way negotiation, fail closed (cycle-2 plan decision 3): the
+	// agent echoes its chosen caps on the request; only concurrency>1
+	// arms the reorder window, everything else keeps the legacy path.
+	if parseCapsConcurrency(r.Header.Get("X-SSET-Caps")) > 1 {
+		sess.enableWindow()
+	}
 	h.reg.Replace(sess)
 	defer h.reg.Remove(id, sess) // deregister on death; no-op if replaced
 	if h.OnSession != nil {
 		h.OnSession(sess)
 	}
 
+	w.Header().Set("X-SSET-Caps", capsHeaderValue)
 	transport.WriteHeaders(w)
 	f.Flush()
 
@@ -137,5 +168,78 @@ func (h *Handler) handleUp(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	// X-SSET-Flags (cycle-2 plan decision 5): fail closed — unknown flag
+	// values and gzip on a non-negotiated session are 400, never errors
+	// silently ignored.
+	if flags := r.Header.Get("X-SSET-Flags"); flags != "" {
+		for flag := range strings.SplitSeq(flags, ",") {
+			switch strings.TrimSpace(flag) {
+			case "gzip":
+				if !sess.hasWindow() {
+					http.Error(w, "gzip flag on non-negotiated session", http.StatusBadRequest)
+					return
+				}
+				zr, err := gzip.NewReader(bytes.NewReader(body))
+				if err != nil {
+					http.Error(w, "bad gzip body", http.StatusBadRequest)
+					return
+				}
+				raw, err := io.ReadAll(io.LimitReader(zr, maxUpBody))
+				zr.Close()
+				if err != nil {
+					http.Error(w, "bad gzip body", http.StatusBadRequest)
+					return
+				}
+				body = raw
+			default:
+				http.Error(w, "unknown X-SSET-Flags value", http.StatusBadRequest)
+				return
+			}
+		}
+	}
+	if h.OnUpPush != nil {
+		if gate := h.OnUpPush(seq); gate != nil {
+			<-gate
+		}
+	}
 	w.WriteHeader(sess.push(seq, body))
+}
+
+// handleProbe reads and discards its body and returns 200 (cycle-2 plan
+// decision 6). It registers no session: probing must not hijack the live
+// agent's yamux session the way /events would.
+func (h *Handler) handleProbe(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	_, err := io.Copy(io.Discard, http.MaxBytesReader(w, r.Body, maxProbeBody))
+	if err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			http.Error(w, "body too large", http.StatusRequestEntityTooLarge)
+		} else {
+			http.Error(w, "read body", http.StatusBadRequest)
+		}
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+// parseCapsConcurrency extracts the concurrency value from an X-SSET-Caps
+// header ("concurrency=4;batch=1048576;gzip"). Absent or malformed input
+// yields 0 — negotiation fails closed to cycle-1 behavior, never errors.
+func parseCapsConcurrency(h string) int {
+	for field := range strings.SplitSeq(h, ";") {
+		k, v, ok := strings.Cut(strings.TrimSpace(field), "=")
+		if !ok || k != "concurrency" {
+			continue
+		}
+		n, err := strconv.Atoi(strings.TrimSpace(v))
+		if err != nil || n < 0 {
+			return 0
+		}
+		return n
+	}
+	return 0
 }
