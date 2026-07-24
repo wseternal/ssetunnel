@@ -54,6 +54,7 @@ func TestMain(m *testing.M) {
 
 func runE2E(m *testing.M) int {
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel() // safety net for early returns; idempotent
 
 	// ── Echo target (shared by both servers) ────────────────────────────
 	echoLn, err := net.Listen("tcp", "127.0.0.1:0")

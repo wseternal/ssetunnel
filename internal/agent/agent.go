@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -47,6 +48,12 @@ func (a *Agent) Run(ctx context.Context) error {
 	for {
 		start := time.Now()
 		if err := a.runOnce(ctx); err != nil {
+			// Unrecoverable errors (e.g. bad token) — exit immediately
+			// instead of spinning on retries that will never succeed.
+			if errors.Is(err, transport.ErrUnauthorized) {
+				log.Printf("agent: %v; giving up", err)
+				return err
+			}
 			log.Printf("agent: %v; reconnecting", err)
 		} else {
 			log.Printf("agent: session ended; reconnecting")

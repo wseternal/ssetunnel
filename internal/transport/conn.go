@@ -22,6 +22,11 @@ import (
 // before backpressure stalls the SSE stream.
 const downPipeCap = 256 << 10
 
+// ErrUnauthorized is returned by DialAgent when the server rejects the
+// agent with 401 Unauthorized. This is an unrecoverable error — the
+// token is invalid and retrying will not help.
+var ErrUnauthorized = errors.New("unauthorized: server rejected token with 401")
+
 // Config configures DialAgent.
 type Config struct {
 	URL            string        // tunnel server base URL, e.g. http://host:port
@@ -166,6 +171,9 @@ func DialAgent(ctx context.Context, cfg Config) (*Conn, error) {
 		io.Copy(io.Discard, resp.Body) // always drain (decision 7)
 		resp.Body.Close()
 		c.cancel()
+		if resp.StatusCode == http.StatusUnauthorized {
+			return nil, fmt.Errorf("%w: %s", ErrUnauthorized, resp.Status)
+		}
 		return nil, fmt.Errorf("open events stream: status %s", resp.Status)
 	}
 	if upgraded := resp.Header.Get("X-SSET-Token"); upgraded != "" && cfg.OnTokenUpgrade != nil {
