@@ -661,6 +661,14 @@ func TestServerProbe(t *testing.T) {
 	}
 }
 
+func pattern(n int) []byte {
+	b := make([]byte, n)
+	for i := range b {
+		b[i] = byte(i*31 + i>>8)
+	}
+	return b
+}
+
 func probePost(t *testing.T, baseURL string, body []byte) int {
 	t.Helper()
 	resp, err := http.Post(baseURL+"/probe", "application/octet-stream", bytes.NewReader(body))

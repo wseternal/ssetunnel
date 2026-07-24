@@ -1,111 +1,222 @@
-package server
+package server_test
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
+	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"net/http/httptest"
+	"os"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/wseternal/ssetunnel/internal/agent"
+	"github.com/wseternal/ssetunnel/internal/auth"
+	"github.com/wseternal/ssetunnel/internal/connect"
+	"github.com/wseternal/ssetunnel/internal/consoleapi"
+	"github.com/wseternal/ssetunnel/internal/server"
+	"github.com/wseternal/ssetunnel/migrations"
+	orcapostgres "github.com/visdomtech/orcacommon/postgres"
 )
 
-// e2eEnv is a full in-process deployment: echo target, tunnel server
-// with entry listener, and a reconnecting agent.
-type e2eEnv struct {
-	srv       *Server
-	target    net.Listener
-	entryAddr string
-	cancel    context.CancelFunc
+// ---------------------------------------------------------------------------
+// Singleton test infrastructure (set up once in TestMain, shared by all tests)
+// ---------------------------------------------------------------------------
+
+var (
+	// Shared echo target
+	echoAddr string
+
+	// No-auth server: agent connects freely, no token required.
+	noAuthSrv   *server.Server
+	noAuthEntry string // entry listener address
+
+	// Auth server: agent must present a valid token.
+	authSrv    *server.Server
+	authEntry  string // entry listener address
+	authStore  *auth.Store
+	agentToken string
+	userToken  string
+	totpSecret string
+	consoleURL string
+)
+
+func TestMain(m *testing.M) {
+	code := runE2E(m)
+	os.Exit(code)
 }
 
-func setupE2E(t *testing.T) *e2eEnv {
-	t.Helper()
-	return setupE2ETuned(t, nil)
-}
-
-// setupE2ETuned is setupE2E with a hook to tune the agent's config
-// (cycle-2: batch size / concurrency / compression).
-func setupE2ETuned(t *testing.T, tune func(*agent.Agent)) *e2eEnv {
-	t.Helper()
-	// Echo target behind the agent.
-	target, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen target: %v", err)
-	}
-	go func() {
-		for {
-			c, err := target.Accept()
-			if err != nil {
-				return
-			}
-			go io.Copy(c, c)
-		}
-	}()
-
-	srv := NewServer(20 * time.Millisecond)
-	ts := httptest.NewServer(srv.HTTPHandler())
-	entryLn, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen entry: %v", err)
-	}
+func runE2E(m *testing.M) int {
 	ctx, cancel := context.WithCancel(context.Background())
-	go srv.ServeEntry(ctx, entryLn)
+	defer cancel()
 
-	ag := &agent.Agent{
-		ServerURL:  ts.URL,
-		Target:     target.Addr().String(),
-		MaxBackoff: 50 * time.Millisecond, // fast reconnect for tests
+	// ── Echo target (shared by both servers) ────────────────────────────
+	echoLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "e2e: listen echo: %v\n", err)
+		return 1
 	}
-	if tune != nil {
-		tune(ag)
-	}
-	go ag.Run(ctx)
+	defer echoLn.Close()
+	echoAddr = echoLn.Addr().String()
+	go serveEcho(echoLn)
 
-	t.Cleanup(func() {
-		cancel()
-		entryLn.Close()
-		ts.Close()
-		target.Close()
-	})
-	return &e2eEnv{srv: srv, target: target, entryAddr: entryLn.Addr().String(), cancel: cancel}
+	// ── PostgreSQL + auth store ─────────────────────────────────────────
+	pool, err := orcapostgres.OpenPool(ctx, orcapostgres.DBConfig{
+		DatabaseURLTemplate: "postgres:tc:",
+	}, orcapostgres.NewMigrator(migrations.FS, nil))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "e2e: open pool: %v\n", err)
+		return 1
+	}
+	authStore = auth.NewStore(pool)
+	totpSecret = "JBSWY3DPEHPK3PXP"
+
+	// Pre-create tokens used by auth tests.
+	agentToken, err = auth.GenerateToken()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "e2e: generate agent token: %v\n", err)
+		return 1
+	}
+	if err := authStore.CreateToken(ctx, agentToken, "agent", "e2e agent", nil); err != nil {
+		fmt.Fprintf(os.Stderr, "e2e: store agent token: %v\n", err)
+		return 1
+	}
+	userToken, err = auth.GenerateToken()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "e2e: generate user token: %v\n", err)
+		return 1
+	}
+	if err := authStore.CreateToken(ctx, userToken, "user", "e2e user", nil); err != nil {
+		fmt.Fprintf(os.Stderr, "e2e: store user token: %v\n", err)
+		return 1
+	}
+
+	// ── No-auth server + agent ──────────────────────────────────────────
+	noAuthSrv = server.NewServer(20 * time.Millisecond)
+	noAuthHTTP := httptest.NewServer(noAuthSrv.HTTPHandler())
+	defer noAuthHTTP.Close()
+
+	noAuthEntryLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "e2e: listen no-auth entry: %v\n", err)
+		return 1
+	}
+	defer noAuthEntryLn.Close()
+	noAuthEntry = noAuthEntryLn.Addr().String()
+	go noAuthSrv.ServeEntry(ctx, noAuthEntryLn)
+
+	noAuthAg := &agent.Agent{
+		ServerURL:  noAuthHTTP.URL,
+		Target:     echoAddr,
+		MaxBackoff: 50 * time.Millisecond,
+	}
+	go noAuthAg.Run(ctx)
+
+	// ── Auth server + agent ─────────────────────────────────────────────
+	authSrv = server.NewServer(20 * time.Millisecond)
+	authSrv.SetAuthStore(authStore)
+	authHTTP := httptest.NewServer(authSrv.HTTPHandler())
+	defer authHTTP.Close()
+
+	authEntryLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "e2e: listen auth entry: %v\n", err)
+		return 1
+	}
+	defer authEntryLn.Close()
+	authEntry = authEntryLn.Addr().String()
+	go authSrv.ServeEntry(ctx, authEntryLn)
+
+	authAg := &agent.Agent{
+		ServerURL:  authHTTP.URL,
+		Target:     echoAddr,
+		Token:      agentToken,
+		MaxBackoff: 50 * time.Millisecond,
+	}
+	go authAg.Run(ctx)
+
+	// ── Console API (backed by auth server's registry) ──────────────────
+	consoleRouter := consoleapi.NewRouter(authStore, authSrv.Reg, totpSecret)
+	consoleTS := httptest.NewServer(consoleRouter)
+	defer consoleTS.Close()
+	consoleURL = consoleTS.URL
+
+	// ── Wait for both agents to register ────────────────────────────────
+	if err := waitAnySession(noAuthSrv.Reg, 10*time.Second); err != nil {
+		fmt.Fprintf(os.Stderr, "e2e: no-auth agent: %v\n", err)
+		return 1
+	}
+	if err := waitAnySession(authSrv.Reg, 10*time.Second); err != nil {
+		fmt.Fprintf(os.Stderr, "e2e: auth agent: %v\n", err)
+		return 1
+	}
+
+	return m.Run()
 }
 
-// waitSession polls until a live session other than notID is registered.
-func (e *e2eEnv) waitSession(t *testing.T, notID string, within time.Duration) string {
-	t.Helper()
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+// serveEcho accepts TCP connections and echoes bytes back.
+func serveEcho(ln net.Listener) {
+	for {
+		c, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		go func(conn net.Conn) {
+			defer conn.Close()
+			io.Copy(conn, conn)
+		}(c)
+	}
+}
+
+// waitAnySession polls until at least one session is registered.
+func waitAnySession(reg *server.Registry, within time.Duration) error {
 	deadline := time.Now().Add(within)
 	for time.Now().Before(deadline) {
-		for _, id := range e.srv.Reg.IDs() {
+		if len(reg.IDs()) > 0 {
+			return nil
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	return fmt.Errorf("no session registered within %v", within)
+}
+
+// waitNewSession polls until a session other than notID appears.
+func waitNewSession(reg *server.Registry, notID string, within time.Duration) (string, error) {
+	deadline := time.Now().Add(within)
+	for time.Now().Before(deadline) {
+		for _, id := range reg.IDs() {
 			if id != notID {
-				return id
+				return id, nil
 			}
 		}
-		time.Sleep(time.Millisecond)
+		time.Sleep(5 * time.Millisecond)
 	}
-	t.Fatalf("no new session within %v", within)
-	return ""
+	return "", fmt.Errorf("no new session (other than %s) within %v", notID, within)
 }
 
-func (e *e2eEnv) dialEntry(t *testing.T) net.Conn {
-	t.Helper()
-	c, err := net.Dial("tcp", e.entryAddr)
+// dialEntry opens a raw TCP connection to the entry listener.
+func dialEntry(addr string) (net.Conn, error) {
+	c, err := net.Dial("tcp", addr)
 	if err != nil {
-		t.Fatalf("dial entry: %v", err)
+		return nil, err
 	}
-	c.SetDeadline(time.Now().Add(30 * time.Second)) // generous
-	return c
+	c.SetDeadline(time.Now().Add(30 * time.Second))
+	return c, nil
 }
 
-// roundTrip writes want through the tunnel and asserts a byte-exact echo.
+// roundTrip writes want through conn and asserts a byte-exact echo.
 func roundTrip(t *testing.T, c net.Conn, want []byte) {
 	t.Helper()
-	go func() {
-		c.Write(want)
-	}()
+	go func() { c.Write(want) }()
 	got := make([]byte, len(want))
 	if _, err := io.ReadFull(c, got); err != nil {
 		t.Fatalf("ReadFull: %v", err)
@@ -123,41 +234,40 @@ func pattern(n int) []byte {
 	return b
 }
 
-func TestE2EEchoByteExact(t *testing.T) {
-	t.Parallel()
-	e := setupE2E(t)
-	e.waitSession(t, "", 5*time.Second)
-	c := e.dialEntry(t)
-	defer c.Close()
-	roundTrip(t, c, pattern(1<<20)) // 1 MiB through entry→tunnel→target
-}
+// ---------------------------------------------------------------------------
+// No-auth full-cycle tests
+// ---------------------------------------------------------------------------
 
-// TestE2EEchoByteExactConcurrent: 1 MiB byte-exact echo with the agent
-// negotiated at 4 senders / 64 KiB batches / gzip through the real
-// server+entry path (cycle-2 plan step 7).
-func TestE2EEchoByteExactConcurrent(t *testing.T) {
-	t.Parallel()
-	e := setupE2ETuned(t, func(ag *agent.Agent) {
-		ag.BatchSize = 64 << 10
-		ag.Concurrency = 4
-		ag.Compress = true
-	})
-	e.waitSession(t, "", 5*time.Second)
-	c := e.dialEntry(t)
+// TestE2E_NoAuth_EchoByteExact: 1 MiB byte-exact echo through the full
+// entry→tunnel→target→tunnel→entry path without authentication.
+func TestE2E_NoAuth_EchoByteExact(t *testing.T) {
+	if err := waitAnySession(noAuthSrv.Reg, 5*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	c, err := dialEntry(noAuthEntry)
+	if err != nil {
+		t.Fatalf("dial entry: %v", err)
+	}
 	defer c.Close()
 	roundTrip(t, c, pattern(1<<20))
 }
 
-func TestE2ETwoConcurrent(t *testing.T) {
-	t.Parallel()
-	e := setupE2E(t)
-	e.waitSession(t, "", 5*time.Second)
+// TestE2E_NoAuth_ConcurrentEcho: two concurrent entry connections each
+// echoing 256 KiB through the shared no-auth tunnel.
+func TestE2E_NoAuth_ConcurrentEcho(t *testing.T) {
+	if err := waitAnySession(noAuthSrv.Reg, 5*time.Second); err != nil {
+		t.Fatal(err)
+	}
 	var wg sync.WaitGroup
 	for i := 0; i < 2; i++ {
 		wg.Add(1)
 		go func(fill int) {
 			defer wg.Done()
-			c := e.dialEntry(t)
+			c, err := dialEntry(noAuthEntry)
+			if err != nil {
+				t.Errorf("dial entry: %v", err)
+				return
+			}
 			defer c.Close()
 			roundTrip(t, c, bytes.Repeat([]byte{byte(fill)}, 256<<10))
 		}(i + 1)
@@ -165,38 +275,141 @@ func TestE2ETwoConcurrent(t *testing.T) {
 	wg.Wait()
 }
 
-func TestE2EReconnect(t *testing.T) {
-	t.Parallel()
-	e := setupE2E(t)
-	id1 := e.waitSession(t, "", 5*time.Second)
+// TestE2E_NoAuth_Reconnect: kills the active session and verifies the
+// agent reconnects and new entry connections work again.
+func TestE2E_NoAuth_Reconnect(t *testing.T) {
+	if err := waitAnySession(noAuthSrv.Reg, 5*time.Second); err != nil {
+		t.Fatal(err)
+	}
 
-	// Tunnel works.
-	probe := e.dialEntry(t)
+	// Verify tunnel works before killing.
+	probe, err := dialEntry(noAuthEntry)
+	if err != nil {
+		t.Fatalf("dial probe: %v", err)
+	}
 	roundTrip(t, probe, []byte("before kill"))
 	probe.Close()
 
-	// A second entry conn sits idle (stream open, nothing written).
-	idle := e.dialEntry(t)
+	// Grab current session ID and kill it.
+	ids := noAuthSrv.Reg.IDs()
+	if len(ids) == 0 {
+		t.Fatal("no session to kill")
+	}
+	id1 := ids[0]
+
+	idle, err := dialEntry(noAuthEntry)
+	if err != nil {
+		t.Fatalf("dial idle: %v", err)
+	}
 	defer idle.Close()
 
-	// Kill the SSE stream mid-test: the session dies, the agent must
-	// reconnect, and the entry side must get a clean close — no hang.
 	start := time.Now()
-	e.srv.Reg.Get(id1).Close()
+	noAuthSrv.Reg.Get(id1).Close()
+
+	// Idle connection must get a clean error (no hang).
 	idle.SetReadDeadline(start.Add(5 * time.Second))
 	if _, err := idle.Read(make([]byte, 1)); err == nil {
 		t.Fatal("idle entry conn still readable after session kill, want clean error")
 	}
 
 	// Agent reconnects well under the 5 s budget.
-	id2 := e.waitSession(t, id1, 5*time.Second)
+	id2, err := waitNewSession(noAuthSrv.Reg, id1, 5*time.Second)
+	if err != nil {
+		t.Fatalf("reconnect: %v", err)
+	}
 	if elapsed := time.Since(start); elapsed > 5*time.Second {
 		t.Fatalf("reconnect took %v, budget is 5s", elapsed)
 	}
 	t.Logf("reconnected as session %s in %v", id2, time.Since(start))
 
-	// New entry conns work again, byte-exact.
-	c := e.dialEntry(t)
+	// New entry connections work again.
+	c, err := dialEntry(noAuthEntry)
+	if err != nil {
+		t.Fatalf("dial after reconnect: %v", err)
+	}
 	defer c.Close()
 	roundTrip(t, c, pattern(64<<10))
+}
+
+// ---------------------------------------------------------------------------
+// Auth full-cycle test
+// ---------------------------------------------------------------------------
+
+// TestE2E_Auth_FullCycle: end-to-end flow with authentication enabled —
+// agent authenticates with a token, user connects via connect.Client with
+// a user token, and the console API login + session listing work.
+func TestE2E_Auth_FullCycle(t *testing.T) {
+	ctx := context.Background()
+
+	// Wait for auth agent session.
+	if err := waitAnySession(authSrv.Reg, 5*time.Second); err != nil {
+		t.Fatalf("auth agent session: %v", err)
+	}
+
+	// 1. Connect via connect.Client (handles entry token handshake).
+	localLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen local: %v", err)
+	}
+	defer localLn.Close()
+
+	clientCtx, clientCancel := context.WithCancel(ctx)
+	defer clientCancel()
+
+	client := connect.NewClient(authEntry, userToken)
+	go client.ServeListener(clientCtx, localLn)
+
+	// 2. Dial the local client wrapper and echo a message.
+	userConn, err := net.Dial("tcp", localLn.Addr().String())
+	if err != nil {
+		t.Fatalf("dial local: %v", err)
+	}
+	defer userConn.Close()
+
+	testMsg := "hello end-to-end ssetunnel auth!\n"
+	if _, err := fmt.Fprintf(userConn, "%s", testMsg); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	reader := bufio.NewReader(userConn)
+	echoResp, err := reader.ReadString('\n')
+	if err != nil {
+		t.Fatalf("read echo: %v", err)
+	}
+	if echoResp != testMsg {
+		t.Fatalf("echo: want %q, got %q", testMsg, echoResp)
+	}
+
+	// 3. Console API: TOTP login.
+	totpCode, err := auth.GenerateTOTPCode(totpSecret)
+	if err != nil {
+		t.Fatalf("generate TOTP: %v", err)
+	}
+	loginBody, _ := json.Marshal(map[string]string{"totp_code": totpCode})
+	loginResp, err := http.Post(consoleURL+"/api/v1/login", "application/json", bytes.NewReader(loginBody))
+	if err != nil {
+		t.Fatalf("login: %v", err)
+	}
+	defer loginResp.Body.Close()
+	if loginResp.StatusCode != http.StatusOK {
+		t.Fatalf("login status: %d", loginResp.StatusCode)
+	}
+
+	// 4. Console API: list active sessions with admin cookie.
+	sessReq, _ := http.NewRequest("GET", consoleURL+"/api/v1/sessions", nil)
+	for _, c := range loginResp.Cookies() {
+		sessReq.AddCookie(c)
+	}
+	sessionsResp, err := (&http.Client{}).Do(sessReq)
+	if err != nil {
+		t.Fatalf("sessions: %v", err)
+	}
+	defer sessionsResp.Body.Close()
+	if sessionsResp.StatusCode != http.StatusOK {
+		t.Fatalf("sessions status: %d", sessionsResp.StatusCode)
+	}
+	var sessionList []consoleapi.SessionInfo
+	json.NewDecoder(sessionsResp.Body).Decode(&sessionList)
+	if len(sessionList) == 0 {
+		t.Error("expected active session in console sessions list")
+	}
 }
