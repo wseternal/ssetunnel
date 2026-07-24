@@ -17,6 +17,7 @@ import (
 	"time"
 
 	orcapostgres "github.com/visdomtech/orcacommon/postgres"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/wseternal/ssetunnel/internal/agent"
 	"github.com/wseternal/ssetunnel/internal/auth"
 	"github.com/wseternal/ssetunnel/internal/connect"
@@ -78,7 +79,16 @@ func runServer(ctx context.Context, args []string) error {
 
 	srv := server.NewServer(*heartbeat)
 
+	// Open the entry listener eagerly so address-in-use errors surface
+	// immediately instead of after other resources are allocated.
+	entryLn, err := net.Listen("tcp", *entry)
+	if err != nil {
+		return fmt.Errorf("listen entry %s: %w", *entry, err)
+	}
+
 	var store *auth.Store
+	var consoleLn net.Listener
+	var pool *pgxpool.Pool
 	if !*disableAuth {
 		targetDBURL := *dbURL
 		if targetDBURL == "" {
@@ -87,43 +97,59 @@ func runServer(ctx context.Context, args []string) error {
 		dbcfg := orcapostgres.DBConfig{
 			DatabaseURLTemplate: targetDBURL,
 		}
-		pool, err := orcapostgres.OpenPool(ctx, dbcfg, orcapostgres.NewMigrator(migrations.FS, nil))
+		pool, err = orcapostgres.OpenPool(ctx, dbcfg, orcapostgres.NewMigrator(migrations.FS, nil))
 		if err != nil {
+			entryLn.Close()
 			return fmt.Errorf("open postgres pool: %w", err)
 		}
 		store = auth.NewStore(pool)
 		srv.SetAuthStore(store)
 
 		if *consoleListen != "" {
-			consoleHandler := consoleserver.NewConsoleHandler(ctx, pool, store, srv.Reg, *totpSecret)
-			consoleSrv := &http.Server{
-				Addr:         *consoleListen,
-				Handler:      consoleHandler,
-				ReadTimeout:  15 * time.Second,
-				WriteTimeout: 30 * time.Second,
+			consoleLn, err = net.Listen("tcp", *consoleListen)
+			if err != nil {
+				entryLn.Close()
+				return fmt.Errorf("listen console %s: %w", *consoleListen, err)
 			}
-			go func() {
-				<-ctx.Done()
-				consoleSrv.Shutdown(context.Background())
-			}()
-			go func() {
-				log.Printf("server: admin console http://localhost%s", *consoleListen)
-				if err := consoleSrv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
-					log.Printf("server: console error: %v", err)
-				}
-			}()
 		}
 	}
 
-	entryLn, err := net.Listen("tcp", *entry)
+	// Open the HTTP listener eagerly so address-in-use errors surface
+	// before we start serving on the other listeners.
+	httpLn, err := net.Listen("tcp", *listen)
 	if err != nil {
-		return fmt.Errorf("listen entry %s: %w", *entry, err)
+		entryLn.Close()
+		if consoleLn != nil {
+			consoleLn.Close()
+		}
+		return fmt.Errorf("listen http %s: %w", *listen, err)
 	}
+
+	// All listeners are open; start serving.
 	go func() {
 		if err := srv.ServeEntry(ctx, entryLn); err != nil {
 			log.Printf("server: entry listener: %v", err)
 		}
 	}()
+
+	if consoleLn != nil {
+		consoleHandler := consoleserver.NewConsoleHandler(ctx, pool, store, srv.Reg, *totpSecret)
+		consoleSrv := &http.Server{
+			Handler:      consoleHandler,
+			ReadTimeout:  15 * time.Second,
+			WriteTimeout: 30 * time.Second,
+		}
+		go func() {
+			<-ctx.Done()
+			consoleSrv.Shutdown(context.Background())
+		}()
+		go func() {
+			log.Printf("server: admin console http://localhost%s", *consoleListen)
+			if err := consoleSrv.Serve(consoleLn); !errors.Is(err, http.ErrServerClosed) {
+				log.Printf("server: console error: %v", err)
+			}
+		}()
+	}
 
 	httpSrv := srv.NewHTTPServer(*listen)
 	go func() {
@@ -132,7 +158,7 @@ func runServer(ctx context.Context, args []string) error {
 	}()
 
 	log.Printf("server: http %s, entry %s", *listen, *entry)
-	if err := httpSrv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
+	if err := httpSrv.Serve(httpLn); !errors.Is(err, http.ErrServerClosed) {
 		return fmt.Errorf("serve http: %w", err)
 	}
 	return nil
