@@ -117,6 +117,62 @@ func TestAuthStore_TokenAndPINAndSession(t *testing.T) {
 	}
 }
 
+func TestRedeemPIN(t *testing.T) {
+	ctx := context.Background()
+
+	dbcfg := orcapostgres.DBConfig{
+		DatabaseURLTemplate: "postgres:tc:",
+	}
+	pool, err := orcapostgres.OpenPool(ctx, dbcfg, orcapostgres.NewMigrator(migrations.FS, nil))
+	if err != nil {
+		t.Fatalf("failed to open pool: %v", err)
+	}
+
+	store := auth.NewStore(pool)
+
+	// Create a PIN
+	pinStr, err := auth.GeneratePIN()
+	if err != nil {
+		t.Fatalf("GeneratePIN failed: %v", err)
+	}
+	if err := store.CreatePIN(ctx, pinStr, "agent", 15*time.Minute); err != nil {
+		t.Fatalf("CreatePIN failed: %v", err)
+	}
+
+	// Redeem PIN -> should succeed with a new token
+	newToken, role, err := store.RedeemPIN(ctx, pinStr)
+	if err != nil {
+		t.Fatalf("RedeemPIN failed: %v", err)
+	}
+	if role != "agent" {
+		t.Errorf("expected role 'agent', got %q", role)
+	}
+	if len(newToken) != 64 {
+		t.Errorf("expected 64-char hex token, got %d chars", len(newToken))
+	}
+
+	// Validate the redeemed token
+	tokInfo, err := store.ValidateToken(ctx, newToken)
+	if err != nil {
+		t.Fatalf("ValidateToken on redeemed token failed: %v", err)
+	}
+	if tokInfo.Role != "agent" {
+		t.Errorf("expected redeemed token role 'agent', got %q", tokInfo.Role)
+	}
+
+	// Redeem same PIN again -> should fail (single-use)
+	_, _, err = store.RedeemPIN(ctx, pinStr)
+	if err == nil {
+		t.Errorf("expected second RedeemPIN to fail (single-use), but succeeded")
+	}
+
+	// Redeem non-existent PIN
+	_, _, err = store.RedeemPIN(ctx, "NOTREAL1")
+	if err == nil {
+		t.Errorf("expected RedeemPIN with invalid PIN to fail, but succeeded")
+	}
+}
+
 func TestTOTPVerification(t *testing.T) {
 	secret := "JBSWY3DPEHPK3PXP" // standard base32 test secret
 	code, err := auth.GenerateTOTPCode(secret)

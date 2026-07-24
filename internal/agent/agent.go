@@ -85,6 +85,10 @@ func (a *Agent) runOnce(ctx context.Context) error {
 		MaxBatchSize: a.BatchSize,
 		Concurrency:  a.Concurrency,
 		Compress:     a.Compress,
+		OnTokenUpgrade: func(newToken string) {
+			a.Token = newToken
+			log.Printf("agent: PIN redeemed, upgraded to persistent token")
+		},
 	})
 	if err != nil {
 		return fmt.Errorf("connect: %w", err)

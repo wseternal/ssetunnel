@@ -32,9 +32,6 @@ type Server struct {
 
 	handler *Handler
 	store   *auth.Store
-
-	mu   sync.Mutex
-	sess *yamux.Session // yamux server over the current tunnel session
 }
 
 // NewServer builds a server given an SSE heartbeat interval.
@@ -73,30 +70,21 @@ func (s *Server) AttachConn(conn net.Conn) {
 		conn.Close()
 		return
 	}
-	s.mu.Lock()
-	old := s.sess
-	s.sess = ms
-	s.mu.Unlock()
-	if old != nil {
-		old.Close()
-	}
+	// Create a synthetic session wrapping the conn for test compatibility.
+	sess := NewSession("test-" + conn.LocalAddr().String())
+	sess.SetYamuxSession(ms)
+	s.Reg.Replace(sess)
 }
 
 // attach wraps a newly registered tunnel session in a yamux server and
-// makes it current. Called by the events handler on every connect.
+// stores it on the session. Each session has its own independent yamux.
 func (s *Server) attach(sess *Session) {
 	ms, err := mux.Server(sess)
 	if err != nil {
 		sess.Close()
 		return
 	}
-	s.mu.Lock()
-	old := s.sess
-	s.sess = ms
-	s.mu.Unlock()
-	if old != nil {
-		old.Close()
-	}
+	sess.SetYamuxSession(ms)
 }
 
 // HTTPHandler returns the tunnel endpoint handler (/events, /up).
@@ -158,9 +146,7 @@ func (s *Server) proxyEntry(c net.Conn) {
 		c.SetReadDeadline(time.Time{})
 	}
 
-	s.mu.Lock()
-	ms := s.sess
-	s.mu.Unlock()
+	ms := s.findYamux()
 	if ms == nil || ms.IsClosed() {
 		log.Printf("server: entry conn from %s closed: no active session", c.RemoteAddr())
 		c.Close()
@@ -185,4 +171,17 @@ func (s *Server) proxyEntry(c net.Conn) {
 		_, _ = io.CopyBuffer(c, stream, *buf)
 		c.Close()
 	}()
+}
+
+// findYamux returns the first open yamux session from the registry.
+func (s *Server) findYamux() *yamux.Session {
+	var ms *yamux.Session
+	s.Reg.Range(func(sess *Session) bool {
+		if m := sess.YamuxSession(); m != nil && !m.IsClosed() {
+			ms = m
+			return false // stop at first
+		}
+		return true
+	})
+	return ms
 }

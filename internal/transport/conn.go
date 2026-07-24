@@ -46,6 +46,11 @@ type Config struct {
 
 	// Token is the bearer token for agent authentication
 	Token string
+
+	// OnTokenUpgrade is called when the server returns a new persistent
+	// token via X-SSET-Token (PIN redemption). The agent uses the new
+	// token for subsequent connections.
+	OnTokenUpgrade func(newToken string)
 }
 
 // Conn is the agent side of the tunnel: a net.Conn over SSE-down +
@@ -162,6 +167,9 @@ func DialAgent(ctx context.Context, cfg Config) (*Conn, error) {
 		resp.Body.Close()
 		c.cancel()
 		return nil, fmt.Errorf("open events stream: status %s", resp.Status)
+	}
+	if upgraded := resp.Header.Get("X-SSET-Token"); upgraded != "" && cfg.OnTokenUpgrade != nil {
+		cfg.OnTokenUpgrade(upgraded)
 	}
 
 	// Negotiate against the server's advertisement; absent/malformed caps
