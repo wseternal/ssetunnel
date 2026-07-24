@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -416,4 +417,28 @@ func TestE2E_Auth_FullCycle(t *testing.T) {
 	if len(sessionList) == 0 {
 		t.Error("expected active session in console sessions list")
 	}
+}
+
+// TestE2E_Auth_InvalidTokenRejected: a connect.Client with an invalid
+// token must fail eagerly at startup, not silently accept connections
+// that then fail on first use.
+func TestE2E_Auth_InvalidTokenRejected(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+
+	client := connect.NewClient(authEntry, "invalid-token-should-be-rejected")
+	err = client.ServeListener(ctx, ln)
+	if err == nil {
+		t.Fatal("expected ServeListener to fail with invalid token, got nil")
+	}
+	if !strings.Contains(err.Error(), "token validation failed") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	t.Logf("correctly rejected: %v", err)
 }
