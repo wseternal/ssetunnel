@@ -3,6 +3,7 @@ package server
 import (
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/wseternal/ssetunnel/internal/transport"
@@ -38,6 +39,10 @@ type Session struct {
 	nextSeq uint64                   // next upstream seq expected (plan decision 1)
 	window  *transport.ReorderWindow // non-nil only when the agent negotiated concurrency>1
 
+	createdAt     time.Time
+	bytesSent     atomic.Uint64
+	bytesReceived atomic.Uint64
+
 	closeOnce sync.Once
 }
 
@@ -57,7 +62,13 @@ func NewSession(id string) *Session {
 		down:         transport.NewPipe(downPipeCap),
 		WriteTimeout: defaultWriteTimeout,
 		GapTimeout:   defaultGapTimeout,
+		createdAt:    time.Now().UTC(),
 	}
+}
+
+// Stats returns bytesSent, bytesReceived, and createdAt for the session.
+func (s *Session) Stats() (uint64, uint64, time.Time) {
+	return s.bytesSent.Load(), s.bytesReceived.Load(), s.createdAt
 }
 
 // enableWindow routes push through a reorder window (cycle-2 plan
@@ -210,6 +221,22 @@ func (r *Registry) Remove(id string, s *Session) {
 	defer r.mu.Unlock()
 	if r.sessions[id] == s {
 		delete(r.sessions, id)
+	}
+}
+
+// Range iterates over all live sessions in the registry until fn returns false.
+func (r *Registry) Range(fn func(*Session) bool) {
+	r.mu.Lock()
+	sessions := make([]*Session, 0, len(r.sessions))
+	for _, s := range r.sessions {
+		sessions = append(sessions, s)
+	}
+	r.mu.Unlock()
+
+	for _, s := range sessions {
+		if !fn(s) {
+			break
+		}
 	}
 }
 
