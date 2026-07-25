@@ -679,3 +679,60 @@ func probePost(t *testing.T, baseURL string, body []byte) int {
 	io.Copy(io.Discard, resp.Body)
 	return resp.StatusCode
 }
+
+// TestSessionStats_TracksBytesSentReceived verifies that a session's
+// bytesSent and bytesReceived counters reflect actual data flow.
+func TestSessionStats_TracksBytesSentReceived(t *testing.T) {
+	sess := NewSession("stats-test")
+
+	// Drain the up pipe in the background so push doesn't block.
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			if _, err := sess.Read(buf); err != nil {
+				return
+			}
+		}
+	}()
+
+	// Drain the down pipe in the background so Write doesn't block.
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			if _, err := sess.down.Read(buf); err != nil {
+				return
+			}
+		}
+	}()
+
+	// Push upstream data (agent → server).
+	upstream := []byte("hello from agent")
+	if code := sess.push(0, upstream); code != 200 {
+		t.Fatalf("push: got status %d, want 200", code)
+	}
+	// Give the drain goroutine time to consume.
+	time.Sleep(10 * time.Millisecond)
+
+	// Write downstream data (server → agent).
+	downstream := []byte("hello to agent via SSE")
+	if _, err := sess.Write(downstream); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	time.Sleep(10 * time.Millisecond)
+
+	sent, rec, _ := sess.Stats()
+	if rec == 0 {
+		t.Errorf("bytesReceived = 0, want > 0 (pushed %d bytes upstream)", len(upstream))
+	}
+	if sent == 0 {
+		t.Errorf("bytesSent = 0, want > 0 (wrote %d bytes downstream)", len(downstream))
+	}
+	if rec != uint64(len(upstream)) {
+		t.Errorf("bytesReceived = %d, want %d", rec, len(upstream))
+	}
+	if sent != uint64(len(downstream)) {
+		t.Errorf("bytesSent = %d, want %d", sent, len(downstream))
+	}
+
+	sess.Close()
+}
