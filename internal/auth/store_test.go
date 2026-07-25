@@ -65,6 +65,47 @@ func TestAuthStore_TokenLifecycle(t *testing.T) {
 	}
 }
 
+func TestEnsureAdminUser_SeedsOnEmptyDB(t *testing.T) {
+	ctx := context.Background()
+
+	dbcfg := orcapostgres.DBConfig{
+		DatabaseURLTemplate: "postgres:tc:",
+	}
+	pool, err := orcapostgres.OpenPool(ctx, dbcfg, orcapostgres.NewMigrator(migrations.FS, nil))
+	if err != nil {
+		t.Fatalf("failed to open pool: %v", err)
+	}
+
+	store := auth.NewStore(pool)
+
+	// First call: no admin exists — should seed one.
+	pw, err := store.EnsureAdminUser(ctx)
+	if err != nil {
+		t.Fatalf("EnsureAdminUser first call: %v", err)
+	}
+	if pw == "" {
+		t.Fatal("expected non-empty password on first call, got empty string")
+	}
+
+	// Verify the seeded admin can authenticate.
+	user, err := store.ValidatePassword(ctx, "admin", pw)
+	if err != nil {
+		t.Fatalf("ValidatePassword for seeded admin: %v", err)
+	}
+	if user.Role != "admin" {
+		t.Errorf("expected role 'admin', got %q", user.Role)
+	}
+
+	// Second call: admin already exists — should return empty password.
+	pw2, err := store.EnsureAdminUser(ctx)
+	if err != nil {
+		t.Fatalf("EnsureAdminUser second call: %v", err)
+	}
+	if pw2 != "" {
+		t.Errorf("expected empty password on second call, got %q", pw2)
+	}
+}
+
 func TestTOTPVerification(t *testing.T) {
 	secret := "JBSWY3DPEHPK3PXP" // standard base32 test secret
 	code, err := auth.GenerateTOTPCode(secret)
