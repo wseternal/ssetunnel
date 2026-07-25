@@ -27,13 +27,23 @@ func TestEntryListenerHandshake(t *testing.T) {
 
 	store := auth.NewStore(pool)
 
-	userToken, err := auth.GenerateToken()
+	// Create a user and user session for the handshake test
+	pwHash, err := auth.HashPassword("testpass")
 	if err != nil {
-		t.Fatalf("failed to generate token: %v", err)
+		t.Fatalf("failed to hash password: %v", err)
 	}
-	err = store.CreateToken(ctx, userToken, "user", "test user", nil)
+	user, err := store.CreateUser(ctx, "handshake-user", pwHash, "user")
 	if err != nil {
-		t.Fatalf("failed to create user token: %v", err)
+		t.Fatalf("failed to create user: %v", err)
+	}
+
+	sessionToken, err := auth.GenerateToken()
+	if err != nil {
+		t.Fatalf("failed to generate session token: %v", err)
+	}
+	err = store.CreateUserSession(ctx, user.ID, sessionToken, 24*time.Hour)
+	if err != nil {
+		t.Fatalf("failed to create user session: %v", err)
 	}
 
 	reg := server.NewRegistry()
@@ -69,16 +79,16 @@ func TestEntryListenerHandshake(t *testing.T) {
 	}
 	_ = conn.Close()
 
-	// 2. Connect with valid user token -> expect OK\n
+	// 2. Connect with valid user session -> expect OK\n
 	conn2, err := net.Dial("tcp", entryListener.Addr().String())
 	if err != nil {
 		t.Fatalf("failed to dial entry port: %v", err)
 	}
 	defer conn2.Close()
 
-	_, err = fmt.Fprintf(conn2, "%s\n", userToken)
+	_, err = fmt.Fprintf(conn2, "%s\n", sessionToken)
 	if err != nil {
-		t.Fatalf("failed to write valid token: %v", err)
+		t.Fatalf("failed to write valid session token: %v", err)
 	}
 
 	r2 := bufio.NewReader(conn2)

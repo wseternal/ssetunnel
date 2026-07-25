@@ -178,20 +178,9 @@ func (s *Server) authenticateEntryConn(c net.Conn) bool {
 
 	tokenStr := strings.TrimSpace(tokenLine)
 
-	// Try legacy token first
-	tokInfo, err := s.store.ValidateToken(context.Background(), tokenStr)
-	if err == nil && auth.HasPermission(tokInfo.Role, auth.PermConnect) {
-		if _, err := fmt.Fprintf(c, "OK\n"); err != nil {
-			c.Close()
-			return false
-		}
-		c.SetReadDeadline(time.Time{})
-		return true
-	}
-
-	// Try user session
-	sessInfo, sessErr := s.store.ValidateUserSession(context.Background(), tokenStr)
-	if sessErr == nil && auth.HasPermission(sessInfo.Role, auth.PermConnect) {
+	// Validate user session
+	sessInfo, err := s.store.ValidateUserSession(context.Background(), tokenStr)
+	if err == nil && auth.HasPermission(sessInfo.Role, auth.PermConnect) {
 		if _, err := fmt.Fprintf(c, "OK\n"); err != nil {
 			c.Close()
 			return false

@@ -33,13 +33,23 @@ func TestConnectClient_LocalPortMode(t *testing.T) {
 
 	store := auth.NewStore(pool)
 
+	// Create a user and user session for the connect client.
+	pwHash, err := auth.HashPassword("connecttest")
+	if err != nil {
+		t.Fatalf("failed to hash password: %v", err)
+	}
+	testUser, err := store.CreateUser(ctx, "connectuser", pwHash, "user")
+	if err != nil {
+		t.Fatalf("failed to create user: %v", err)
+	}
+
 	userToken, err := auth.GenerateToken()
 	if err != nil {
 		t.Fatalf("failed to generate token: %v", err)
 	}
-	err = store.CreateToken(ctx, userToken, "user", "test user", nil)
+	err = store.CreateUserSession(ctx, testUser.ID, userToken, 24*time.Hour)
 	if err != nil {
-		t.Fatalf("failed to create user token: %v", err)
+		t.Fatalf("failed to create user session: %v", err)
 	}
 
 	srv := server.NewServer(15 * time.Second)

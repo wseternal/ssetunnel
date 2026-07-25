@@ -34,7 +34,6 @@ import {
 import DeleteIcon from '@mui/icons-material/Delete';
 import RefreshIcon from '@mui/icons-material/Refresh';
 import LockOutlinedIcon from '@mui/icons-material/LockOutlined';
-import VpnKeyIcon from '@mui/icons-material/VpnKey';
 import PersonAddIcon from '@mui/icons-material/PersonAdd';
 import EditIcon from '@mui/icons-material/Edit';
 import BlockIcon from '@mui/icons-material/Block';
@@ -51,14 +50,6 @@ const darkTheme = createTheme({
     fontFamily: '"Inter", "Roboto", "Helvetica", "Arial", sans-serif',
   },
 });
-
-interface Token {
-  id: number;
-  role: string;
-  description: string;
-  created_at: string;
-  revoked_at?: string;
-}
 
 interface Session {
   id: string;
@@ -83,19 +74,9 @@ export default function App() {
   const [password, setPassword] = useState('');
   const [totpCode, setTotpCode] = useState('');
   const [tabIndex, setTabIndex] = useState(0);
-  const [tokens, setTokens] = useState<Token[]>([]);
   const [sessions, setSessions] = useState<Session[]>([]);
   const [users, setUsers] = useState<User[]>([]);
   const [error, setError] = useState('');
-
-  // Token dialog
-  const [openTokenDialog, setOpenTokenDialog] = useState(false);
-  const [newTokenRole, setNewTokenRole] = useState('agent');
-  const [newTokenDesc, setNewTokenDesc] = useState('');
-  const [createdTokenVal, setCreatedTokenVal] = useState('');
-
-  // Enroll result
-  const [enrollData, setEnrollData] = useState<{ pin: string; qr_code_base64?: string } | null>(null);
 
   // User dialog
   const [openUserDialog, setOpenUserDialog] = useState(false);
@@ -105,18 +86,6 @@ export default function App() {
   const [formRole, setFormRole] = useState('user');
 
   const authHeaders = (): HeadersInit => sessionToken ? { Authorization: `Bearer ${sessionToken}` } : {};
-
-  const fetchTokens = async () => {
-    try {
-      const res = await fetch('/api/v1/tokens', { headers: authHeaders() });
-      if (res.ok) {
-        const data = await res.json();
-        setTokens(data);
-      }
-    } catch (e) {
-      console.error(e);
-    }
-  };
 
   const fetchSessions = async () => {
     try {
@@ -141,7 +110,6 @@ export default function App() {
 
   useEffect(() => {
     if (isLoggedIn) {
-      fetchTokens();
       fetchSessions();
       fetchUsers();
       const interval = setInterval(fetchSessions, 3000);
@@ -175,45 +143,6 @@ export default function App() {
     fetch('/api/v1/logout', { method: 'POST', headers: authHeaders() }).catch(() => {});
     setSessionToken('');
     setIsLoggedIn(false);
-  };
-
-  const handleCreateToken = async () => {
-    try {
-      const res = await fetch('/api/v1/tokens', {
-        method: 'POST',
-        headers: { ...authHeaders(), 'Content-Type': 'application/json' },
-        body: JSON.stringify({ role: newTokenRole, description: newTokenDesc }),
-      });
-      if (res.ok) {
-        const data = await res.json();
-        setCreatedTokenVal(data.token);
-        fetchTokens();
-      }
-    } catch {
-      setError('Failed to create token');
-    }
-  };
-
-  const handleRevokeToken = async (id: number) => {
-    try {
-      const res = await fetch(`/api/v1/tokens/${id}`, { method: 'DELETE', headers: authHeaders() });
-      if (res.ok) fetchTokens();
-    } catch {
-      setError('Failed to revoke token');
-    }
-  };
-
-  const handleEnroll = async () => {
-    try {
-      const res = await fetch('/api/v1/enroll', {
-        method: 'POST',
-        headers: { ...authHeaders(), 'Content-Type': 'application/json' },
-        body: JSON.stringify({ role: 'agent' }),
-      });
-      if (res.ok) setEnrollData(await res.json());
-    } catch {
-      setError('Failed to generate PIN');
-    }
   };
 
   const openCreateUserDialog = () => {
@@ -360,10 +289,8 @@ export default function App() {
           <Container maxWidth="lg" sx={{ mt: 4 }}>
             <Box sx={{ borderBottom: 1, borderColor: 'divider', mb: 3 }}>
               <Tabs value={tabIndex} onChange={(_, v) => setTabIndex(v)}>
-                <Tab label="Active Sessions" />
+                <Tab label="Sessions" />
                 <Tab label="Users" />
-                <Tab label="Bearer Tokens" />
-                <Tab label="Enrollment PINs" />
               </Tabs>
             </Box>
 
@@ -473,116 +400,6 @@ export default function App() {
                 </TableContainer>
               </Box>
             )}
-
-            {tabIndex === 2 && (
-              <Box>
-                <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
-                  <Typography variant="h6">Authentication Tokens</Typography>
-                  <Button variant="contained" startIcon={<VpnKeyIcon />} onClick={() => { setCreatedTokenVal(''); setOpenTokenDialog(true); }}>
-                    Generate Token
-                  </Button>
-                </Box>
-                <TableContainer component={Paper} sx={{ borderRadius: 2 }}>
-                  <Table>
-                    <TableHead>
-                      <TableRow>
-                        <TableCell>ID</TableCell>
-                        <TableCell>Role</TableCell>
-                        <TableCell>Description</TableCell>
-                        <TableCell>Created At</TableCell>
-                        <TableCell>Status</TableCell>
-                        <TableCell align="right">Actions</TableCell>
-                      </TableRow>
-                    </TableHead>
-                    <TableBody>
-                      {tokens.map((t) => (
-                        <TableRow key={t.id}>
-                          <TableCell>{t.id}</TableCell>
-                          <TableCell><Chip label={t.role} color={t.role === 'admin' ? 'secondary' : 'primary'} size="small" /></TableCell>
-                          <TableCell>{t.description || '-'}</TableCell>
-                          <TableCell>{new Date(t.created_at).toLocaleString()}</TableCell>
-                          <TableCell>
-                            {t.revoked_at ? <Chip label="Revoked" color="error" size="small" /> : <Chip label="Active" color="success" size="small" />}
-                          </TableCell>
-                          <TableCell align="right">
-                            {!t.revoked_at && (
-                              <IconButton color="error" onClick={() => handleRevokeToken(t.id)}>
-                                <DeleteIcon />
-                              </IconButton>
-                            )}
-                          </TableCell>
-                        </TableRow>
-                      ))}
-                    </TableBody>
-                  </Table>
-                </TableContainer>
-              </Box>
-            )}
-
-            {tabIndex === 3 && (
-              <Box>
-                <Typography variant="h6" gutterBottom>Enroll Agent with Single-Use PIN</Typography>
-                <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
-                  Generate a 15-minute temporary PIN for one-time agent registration. The PIN is redeemed for a persistent token on first connection.
-                </Typography>
-                <Button variant="contained" onClick={handleEnroll} sx={{ mb: 3 }}>
-                  Generate Enrollment PIN
-                </Button>
-
-                {enrollData && (
-                  <Card sx={{ p: 3, maxWidth: 500, borderRadius: 2 }}>
-                    <Typography variant="subtitle2" color="text.secondary">Single-Use Enrollment PIN:</Typography>
-                    <Typography variant="h4" fontWeight="bold" color="primary.main" sx={{ letterSpacing: 4, my: 1 }}>
-                      {enrollData.pin}
-                    </Typography>
-                    <Typography variant="caption" color="text.secondary">Valid for 15 minutes. One-time registration use only.</Typography>
-
-                    {enrollData.qr_code_base64 && (
-                      <Box sx={{ mt: 3, textAlign: 'center' }}>
-                        <Typography variant="subtitle2" gutterBottom>Admin TOTP QR Code:</Typography>
-                        <img src={enrollData.qr_code_base64} alt="TOTP QR Code" style={{ borderRadius: 8 }} />
-                      </Box>
-                    )}
-                  </Card>
-                )}
-              </Box>
-            )}
-
-            {/* Create Token Dialog */}
-            <Dialog open={openTokenDialog} onClose={() => setOpenTokenDialog(false)} maxWidth="xs" fullWidth>
-              <DialogTitle>Generate {newTokenRole.charAt(0).toUpperCase() + newTokenRole.slice(1)} Token</DialogTitle>
-              <DialogContent>
-                <FormControl fullWidth margin="normal">
-                  <InputLabel>Role</InputLabel>
-                  <Select
-                    value={newTokenRole}
-                    label="Role"
-                    onChange={(e) => setNewTokenRole(e.target.value)}
-                  >
-                    <MenuItem value="agent">agent</MenuItem>
-                    <MenuItem value="user">user</MenuItem>
-                    <MenuItem value="admin">admin</MenuItem>
-                  </Select>
-                </FormControl>
-                <TextField
-                  fullWidth
-                  label="Description"
-                  value={newTokenDesc}
-                  onChange={(e) => setNewTokenDesc(e.target.value)}
-                  margin="normal"
-                />
-                {createdTokenVal && (
-                  <Alert severity="success" sx={{ mt: 2, wordBreak: 'break-all' }}>
-                    Token Generated (Copy now, shown once):<br />
-                    <strong>{createdTokenVal}</strong>
-                  </Alert>
-                )}
-              </DialogContent>
-              <DialogActions>
-                <Button onClick={() => setOpenTokenDialog(false)}>Close</Button>
-                {!createdTokenVal && <Button variant="contained" onClick={handleCreateToken}>Generate</Button>}
-              </DialogActions>
-            </Dialog>
 
             {/* Create/Edit User Dialog */}
             <Dialog open={openUserDialog} onClose={() => setOpenUserDialog(false)} maxWidth="xs" fullWidth>

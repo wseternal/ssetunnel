@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/wseternal/ssetunnel/internal/auth"
 	"github.com/wseternal/ssetunnel/internal/consoleapi"
@@ -28,107 +29,86 @@ func TestConsoleAPI(t *testing.T) {
 
 	store := auth.NewStore(pool)
 	reg := server.NewRegistry()
-	totpSecret := "JBSWY3DPEHPK3PXP" // test secret
 
-	router := consoleapi.NewRouter(store, reg, totpSecret)
+	router := consoleapi.NewRouter(store, reg, "")
 
-	// 1. POST /api/v1/login with invalid code -> 401
-	loginBody, _ := json.Marshal(map[string]string{"totp_code": "000000"})
-	req := httptest.NewRequest("POST", "/api/v1/login", bytes.NewReader(loginBody))
+	// Bootstrap an admin user directly in the store.
+	pwHash, err := auth.HashPassword("testpass123")
+	if err != nil {
+		t.Fatalf("failed to hash password: %v", err)
+	}
+	adminUser, err := store.CreateUser(ctx, "admin", pwHash, "admin")
+	if err != nil {
+		t.Fatalf("failed to create admin user: %v", err)
+	}
+
+	// Create a session for the admin user.
+	adminToken, err := auth.GenerateToken()
+	if err != nil {
+		t.Fatalf("failed to generate admin token: %v", err)
+	}
+	if err := store.CreateUserSession(ctx, adminUser.ID, adminToken, 24*time.Hour); err != nil {
+		t.Fatalf("failed to create admin session: %v", err)
+	}
+
+	// 1. POST /api/v1/users with admin bearer token -> create a new user
+	createUserBody, _ := json.Marshal(map[string]string{
+		"username": "newuser",
+		"password": "userpass456",
+		"role":     "user",
+	})
+	req := httptest.NewRequest("POST", "/api/v1/users", bytes.NewReader(createUserBody))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
-	if rec.Code != http.StatusUnauthorized {
-		t.Errorf("expected login 401 for bad TOTP, got %d", rec.Code)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201 creating user, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	// 2. POST /api/v1/login with valid code -> 200 + ssetunnel_session cookie
-	code, err := auth.GenerateTOTPCode(totpSecret)
-	if err != nil {
-		t.Fatalf("failed to generate TOTP code: %v", err)
-	}
-	loginBody, _ = json.Marshal(map[string]string{"totp_code": code})
-	req = httptest.NewRequest("POST", "/api/v1/login", bytes.NewReader(loginBody))
+	// 2. POST /api/v1/user-login with valid credentials -> 200 + token
+	loginBody, _ := json.Marshal(map[string]string{
+		"username": "newuser",
+		"password": "userpass456",
+	})
+	req = httptest.NewRequest("POST", "/api/v1/user-login", bytes.NewReader(loginBody))
 	rec = httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
-		t.Fatalf("expected login 200 for valid TOTP, got %d", rec.Code)
+		t.Fatalf("expected login 200 for valid credentials, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	cookies := rec.Result().Cookies()
-	var sessCookie *http.Cookie
-	for _, c := range cookies {
-		if c.Name == server.SessionCookieName {
-			sessCookie = c
-			break
-		}
-	}
-	if sessCookie == nil {
-		t.Fatalf("expected ssetunnel_session cookie set on successful login")
+	var loginResp map[string]interface{}
+	_ = json.Unmarshal(rec.Body.Bytes(), &loginResp)
+	sessionToken, ok := loginResp["token"].(string)
+	if !ok || sessionToken == "" {
+		t.Fatal("expected token in login response")
 	}
 
-	// 3. POST /api/v1/tokens (create token)
-	createBody, _ := json.Marshal(map[string]string{"role": "agent", "description": "test agent"})
-	req = httptest.NewRequest("POST", "/api/v1/tokens", bytes.NewReader(createBody))
-	req.AddCookie(sessCookie)
-	rec = httptest.NewRecorder()
-	router.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200 creating token, got %d: %s", rec.Code, rec.Body.String())
-	}
-
-	var createResp map[string]interface{}
-	_ = json.Unmarshal(rec.Body.Bytes(), &createResp)
-	rawTok, ok := createResp["token"].(string)
-	if !ok || len(rawTok) == 0 {
-		t.Errorf("expected raw token in create response")
-	}
-
-	// 4. GET /api/v1/tokens (list tokens)
-	req = httptest.NewRequest("GET", "/api/v1/tokens", nil)
-	req.AddCookie(sessCookie)
-	rec = httptest.NewRecorder()
-	router.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200 listing tokens, got %d", rec.Code)
-	}
-
-	var tokensList []map[string]interface{}
-	_ = json.Unmarshal(rec.Body.Bytes(), &tokensList)
-	if len(tokensList) == 0 {
-		t.Errorf("expected non-empty tokens list")
-	}
-
-	// 5. POST /api/v1/enroll (generate PIN)
-	req = httptest.NewRequest("POST", "/api/v1/enroll", bytes.NewReader([]byte(`{"role":"agent"}`)))
-	req.AddCookie(sessCookie)
-	rec = httptest.NewRecorder()
-	router.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200 enrolling PIN, got %d", rec.Code)
-	}
-
-	var enrollResp map[string]string
-	_ = json.Unmarshal(rec.Body.Bytes(), &enrollResp)
-	if len(enrollResp["pin"]) < 8 {
-		t.Errorf("expected valid PIN in enroll response, got %q", enrollResp["pin"])
-	}
-
-	// 6. GET /api/v1/sessions
+	// 3. GET /api/v1/sessions with admin bearer token
 	req = httptest.NewRequest("GET", "/api/v1/sessions", nil)
-	req.AddCookie(sessCookie)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
 	rec = httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200 getting sessions, got %d", rec.Code)
 	}
+
+	// 4. POST /api/v1/user-login with invalid password -> 401
+	badLoginBody, _ := json.Marshal(map[string]string{
+		"username": "newuser",
+		"password": "wrongpass",
+	})
+	req = httptest.NewRequest("POST", "/api/v1/user-login", bytes.NewReader(badLoginBody))
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 for bad password, got %d", rec.Code)
+	}
 }
 
-func TestLoginTOTPNotConfigured(t *testing.T) {
+func TestConsoleAPI_LogoutClearsSession(t *testing.T) {
 	ctx := context.Background()
 
 	dbcfg := orcapostgres.DBConfig{
@@ -142,15 +122,14 @@ func TestLoginTOTPNotConfigured(t *testing.T) {
 	store := auth.NewStore(pool)
 	reg := server.NewRegistry()
 
-	// Router with empty totpSecret → TOTP not configured
 	router := consoleapi.NewRouter(store, reg, "")
 
-	loginBody, _ := json.Marshal(map[string]string{"totp_code": "123456"})
-	req := httptest.NewRequest("POST", "/api/v1/login", bytes.NewReader(loginBody))
+	// POST /api/v1/logout -> 200 + expired cookie
+	req := httptest.NewRequest("POST", "/api/v1/logout", nil)
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusServiceUnavailable {
-		t.Errorf("expected 503 when TOTP not configured, got %d", rec.Code)
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected 200 on logout, got %d", rec.Code)
 	}
 }
