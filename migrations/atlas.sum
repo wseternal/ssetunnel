@@ -1,2 +1,5 @@
-h1:lDI0IhhBqiwPjf/DVSJl5s3pGAF+qtQ4qW6LZHrbLZM=
+h1:SjvlIonPPDKSXXkeEUO+sdGbK5Jhgr2wBldeAHjs/Cs=
 20260724000001_initial_schema.sql h1:9FZAm54p/ipAfxAF8bMIfT1J83W1t5PxnbI5K5P3bUs=
+20260724000002_add_users.sql h1:84E+kuIn4ElyyIEm9bw68yPEgygp1slGFqs49GVVJB4=
+20260724000003_add_user_id_fk.sql h1:Kmi9HTGhl6kh3sk7bJqsnjGBwPQ/IeFu8CKgXcTKBwI=
+20260724000004_add_user_sessions.sql h1:/L61O96cZqtIJ0OoFGOucOMH3YpT4TAQPVLOq70HsW4=
