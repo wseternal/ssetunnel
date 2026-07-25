@@ -26,7 +26,6 @@ import {
   DialogTitle,
   DialogContent,
   DialogActions,
-  Grid,
   Select,
   MenuItem,
   FormControl,
@@ -36,6 +35,10 @@ import DeleteIcon from '@mui/icons-material/Delete';
 import RefreshIcon from '@mui/icons-material/Refresh';
 import LockOutlinedIcon from '@mui/icons-material/LockOutlined';
 import VpnKeyIcon from '@mui/icons-material/VpnKey';
+import PersonAddIcon from '@mui/icons-material/PersonAdd';
+import EditIcon from '@mui/icons-material/Edit';
+import BlockIcon from '@mui/icons-material/Block';
+import CheckCircleIcon from '@mui/icons-material/CheckCircle';
 
 const darkTheme = createTheme({
   palette: {
@@ -65,15 +68,27 @@ interface Session {
   remote_addr: string;
 }
 
+interface User {
+  id: number;
+  username: string;
+  role: string;
+  created_at: string;
+  disabled_at?: string;
+}
+
 export default function App() {
   const [isLoggedIn, setIsLoggedIn] = useState(false);
+  const [sessionToken, setSessionToken] = useState('');
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
   const [totpCode, setTotpCode] = useState('');
   const [tabIndex, setTabIndex] = useState(0);
   const [tokens, setTokens] = useState<Token[]>([]);
   const [sessions, setSessions] = useState<Session[]>([]);
+  const [users, setUsers] = useState<User[]>([]);
   const [error, setError] = useState('');
-  
-  // New token dialog
+
+  // Token dialog
   const [openTokenDialog, setOpenTokenDialog] = useState(false);
   const [newTokenRole, setNewTokenRole] = useState('agent');
   const [newTokenDesc, setNewTokenDesc] = useState('');
@@ -82,9 +97,18 @@ export default function App() {
   // Enroll result
   const [enrollData, setEnrollData] = useState<{ pin: string; qr_code_base64?: string } | null>(null);
 
+  // User dialog
+  const [openUserDialog, setOpenUserDialog] = useState(false);
+  const [editingUserId, setEditingUserId] = useState<number | null>(null);
+  const [formUsername, setFormUsername] = useState('');
+  const [formPassword, setFormPassword] = useState('');
+  const [formRole, setFormRole] = useState('user');
+
+  const authHeaders = (): HeadersInit => sessionToken ? { Authorization: `Bearer ${sessionToken}` } : {};
+
   const fetchTokens = async () => {
     try {
-      const res = await fetch('/api/v1/tokens');
+      const res = await fetch('/api/v1/tokens', { headers: authHeaders() });
       if (res.ok) {
         const data = await res.json();
         setTokens(data);
@@ -96,7 +120,7 @@ export default function App() {
 
   const fetchSessions = async () => {
     try {
-      const res = await fetch('/api/v1/sessions');
+      const res = await fetch('/api/v1/sessions', { headers: authHeaders() });
       if (res.ok) {
         const data = await res.json();
         setSessions(data);
@@ -106,10 +130,20 @@ export default function App() {
     }
   };
 
+  const fetchUsers = async () => {
+    try {
+      const res = await fetch('/api/v1/users', { headers: authHeaders() });
+      if (res.ok) setUsers(await res.json());
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
   useEffect(() => {
     if (isLoggedIn) {
       fetchTokens();
       fetchSessions();
+      fetchUsers();
       const interval = setInterval(fetchSessions, 3000);
       return () => clearInterval(interval);
     }
@@ -119,26 +153,35 @@ export default function App() {
     e.preventDefault();
     setError('');
     try {
-      const res = await fetch('/api/v1/login', {
+      const res = await fetch('/api/v1/user-login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ totp_code: totpCode }),
+        body: JSON.stringify({ username, password, totp_code: totpCode }),
       });
       if (res.ok) {
+        const data = await res.json();
+        setSessionToken(data.token);
         setIsLoggedIn(true);
       } else {
-        setError('Invalid TOTP code or credentials');
+        const text = await res.text();
+        setError(text || 'Login failed');
       }
-    } catch (err) {
+    } catch {
       setError('Failed to connect to server');
     }
+  };
+
+  const handleLogout = () => {
+    fetch('/api/v1/logout', { method: 'POST', headers: authHeaders() }).catch(() => {});
+    setSessionToken('');
+    setIsLoggedIn(false);
   };
 
   const handleCreateToken = async () => {
     try {
       const res = await fetch('/api/v1/tokens', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { ...authHeaders(), 'Content-Type': 'application/json' },
         body: JSON.stringify({ role: newTokenRole, description: newTokenDesc }),
       });
       if (res.ok) {
@@ -146,18 +189,16 @@ export default function App() {
         setCreatedTokenVal(data.token);
         fetchTokens();
       }
-    } catch (err) {
+    } catch {
       setError('Failed to create token');
     }
   };
 
   const handleRevokeToken = async (id: number) => {
     try {
-      const res = await fetch(`/api/v1/tokens/${id}`, { method: 'DELETE' });
-      if (res.ok) {
-        fetchTokens();
-      }
-    } catch (err) {
+      const res = await fetch(`/api/v1/tokens/${id}`, { method: 'DELETE', headers: authHeaders() });
+      if (res.ok) fetchTokens();
+    } catch {
       setError('Failed to revoke token');
     }
   };
@@ -166,15 +207,90 @@ export default function App() {
     try {
       const res = await fetch('/api/v1/enroll', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { ...authHeaders(), 'Content-Type': 'application/json' },
         body: JSON.stringify({ role: 'agent' }),
       });
-      if (res.ok) {
-        const data = await res.json();
-        setEnrollData(data);
-      }
-    } catch (err) {
+      if (res.ok) setEnrollData(await res.json());
+    } catch {
       setError('Failed to generate PIN');
+    }
+  };
+
+  const openCreateUserDialog = () => {
+    setEditingUserId(null);
+    setFormUsername('');
+    setFormPassword('');
+    setFormRole('user');
+    setOpenUserDialog(true);
+  };
+
+  const openEditUserDialog = (user: User) => {
+    setEditingUserId(user.id);
+    setFormUsername(user.username);
+    setFormPassword('');
+    setFormRole(user.role);
+    setOpenUserDialog(true);
+  };
+
+  const handleSaveUser = async () => {
+    if (editingUserId !== null) {
+      try {
+        const body: Record<string, string> = { role: formRole };
+        if (formPassword) body.password = formPassword;
+        const res = await fetch(`/api/v1/users/${editingUserId}`, {
+          method: 'PATCH',
+          headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        if (res.ok) { setOpenUserDialog(false); fetchUsers(); }
+        else setError(await res.text() || 'Failed to update user');
+      } catch {
+        setError('Failed to update user');
+      }
+    } else {
+      try {
+        const res = await fetch('/api/v1/users', {
+          method: 'POST',
+          headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username: formUsername, password: formPassword, role: formRole }),
+        });
+        if (res.ok) { setOpenUserDialog(false); fetchUsers(); }
+        else setError(await res.text());
+      } catch {
+        setError('Failed to create user');
+      }
+    }
+  };
+
+  const handleToggleUser = async (user: User) => {
+    try {
+      const res = await fetch(`/api/v1/users/${user.id}`, {
+        method: 'PATCH',
+        headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ disabled: !user.disabled_at }),
+      });
+      if (res.ok) fetchUsers();
+      else setError(await res.text() || 'Failed to toggle user');
+    } catch {
+      setError('Failed to toggle user');
+    }
+  };
+
+  const handleDeleteUser = async (id: number) => {
+    try {
+      const res = await fetch(`/api/v1/users/${id}`, { method: 'DELETE', headers: authHeaders() });
+      if (res.ok) fetchUsers();
+      else setError(await res.text() || 'Failed to delete user');
+    } catch {
+      setError('Failed to delete user');
+    }
+  };
+
+  const roleColor = (role: string): 'error' | 'warning' | 'primary' | 'default' => {
+    switch (role) {
+      case 'admin': return 'error';
+      case 'agent': return 'warning';
+      default: return 'primary';
     }
   };
 
@@ -187,7 +303,7 @@ export default function App() {
             ssetunnel Console
           </Typography>
           {isLoggedIn && (
-            <Button color="inherit" size="small" onClick={() => setIsLoggedIn(false)}>
+            <Button color="inherit" size="small" onClick={handleLogout}>
               Logout
             </Button>
           )}
@@ -199,13 +315,31 @@ export default function App() {
               <CardContent sx={{ textAlign: 'center' }}>
                 <LockOutlinedIcon sx={{ fontSize: 40, color: 'primary.main', mb: 1 }} />
                 <Typography variant="h5" fontWeight="bold" gutterBottom>
-                  Admin Login
+                  Login
                 </Typography>
                 <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
-                  Enter your 6-digit TOTP authentication code
+                  Sign in with your credentials
                 </Typography>
                 {error && <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>}
                 <form onSubmit={handleLogin}>
+                  <TextField
+                    fullWidth
+                    label="Username"
+                    variant="outlined"
+                    value={username}
+                    onChange={(e) => setUsername(e.target.value)}
+                    sx={{ mb: 2 }}
+                    autoFocus
+                  />
+                  <TextField
+                    fullWidth
+                    label="Password"
+                    type="password"
+                    variant="outlined"
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    sx={{ mb: 2 }}
+                  />
                   <TextField
                     fullWidth
                     label="TOTP Passcode"
@@ -216,7 +350,7 @@ export default function App() {
                     sx={{ mb: 3 }}
                   />
                   <Button fullWidth variant="contained" type="submit" size="large">
-                    Authenticate
+                    Sign In
                   </Button>
                 </form>
               </CardContent>
@@ -227,6 +361,7 @@ export default function App() {
             <Box sx={{ borderBottom: 1, borderColor: 'divider', mb: 3 }}>
               <Tabs value={tabIndex} onChange={(_, v) => setTabIndex(v)}>
                 <Tab label="Active Sessions" />
+                <Tab label="Users" />
                 <Tab label="Bearer Tokens" />
                 <Tab label="Enrollment PINs" />
               </Tabs>
@@ -246,13 +381,14 @@ export default function App() {
                         <TableCell>Bytes Received (Up)</TableCell>
                         <TableCell>Bytes Sent (Down)</TableCell>
                         <TableCell>Connected At</TableCell>
+                        <TableCell>Remote Addr</TableCell>
                         <TableCell>Status</TableCell>
                       </TableRow>
                     </TableHead>
                     <TableBody>
                       {sessions.length === 0 ? (
                         <TableRow>
-                          <TableCell colSpan={5} align="center">No active tunnel sessions</TableCell>
+                          <TableCell colSpan={6} align="center">No active tunnel sessions</TableCell>
                         </TableRow>
                       ) : (
                         sessions.map((s) => (
@@ -261,6 +397,7 @@ export default function App() {
                             <TableCell>{(s.bytes_received / 1024).toFixed(1)} KB</TableCell>
                             <TableCell>{(s.bytes_sent / 1024).toFixed(1)} KB</TableCell>
                             <TableCell>{new Date(s.created_at).toLocaleTimeString()}</TableCell>
+                            <TableCell sx={{ fontFamily: 'monospace', fontSize: '0.85rem' }}>{s.remote_addr}</TableCell>
                             <TableCell><Chip label="Active" color="success" size="small" /></TableCell>
                           </TableRow>
                         ))
@@ -272,6 +409,72 @@ export default function App() {
             )}
 
             {tabIndex === 1 && (
+              <Box>
+                <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
+                  <Typography variant="h6">Users ({users.length})</Typography>
+                  <Box>
+                    <Button startIcon={<RefreshIcon />} onClick={fetchUsers} size="small" sx={{ mr: 1 }}>Refresh</Button>
+                    <Button variant="contained" startIcon={<PersonAddIcon />} onClick={openCreateUserDialog}>
+                      Create User
+                    </Button>
+                  </Box>
+                </Box>
+                <TableContainer component={Paper} sx={{ borderRadius: 2 }}>
+                  <Table>
+                    <TableHead>
+                      <TableRow>
+                        <TableCell>ID</TableCell>
+                        <TableCell>Username</TableCell>
+                        <TableCell>Role</TableCell>
+                        <TableCell>Created At</TableCell>
+                        <TableCell>Status</TableCell>
+                        <TableCell align="right">Actions</TableCell>
+                      </TableRow>
+                    </TableHead>
+                    <TableBody>
+                      {users.length === 0 ? (
+                        <TableRow>
+                          <TableCell colSpan={6} align="center">No users</TableCell>
+                        </TableRow>
+                      ) : (
+                        users.map((u) => (
+                          <TableRow key={u.id}>
+                            <TableCell>{u.id}</TableCell>
+                            <TableCell sx={{ fontWeight: 500 }}>{u.username}</TableCell>
+                            <TableCell><Chip label={u.role} color={roleColor(u.role)} size="small" /></TableCell>
+                            <TableCell>{new Date(u.created_at).toLocaleString()}</TableCell>
+                            <TableCell>
+                              {u.disabled_at
+                                ? <Chip label="Disabled" color="error" size="small" />
+                                : <Chip label="Active" color="success" size="small" />
+                              }
+                            </TableCell>
+                            <TableCell align="right">
+                              <IconButton color="primary" size="small" onClick={() => openEditUserDialog(u)}>
+                                <EditIcon />
+                              </IconButton>
+                              <IconButton
+                                color={u.disabled_at ? 'success' : 'warning'}
+                                size="small"
+                                onClick={() => handleToggleUser(u)}
+                                title={u.disabled_at ? 'Enable user' : 'Disable user'}
+                              >
+                                {u.disabled_at ? <CheckCircleIcon /> : <BlockIcon />}
+                              </IconButton>
+                              <IconButton color="error" size="small" onClick={() => handleDeleteUser(u.id)}>
+                                <DeleteIcon />
+                              </IconButton>
+                            </TableCell>
+                          </TableRow>
+                        ))
+                      )}
+                    </TableBody>
+                  </Table>
+                </TableContainer>
+              </Box>
+            )}
+
+            {tabIndex === 2 && (
               <Box>
                 <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
                   <Typography variant="h6">Authentication Tokens</Typography>
@@ -316,7 +519,7 @@ export default function App() {
               </Box>
             )}
 
-            {tabIndex === 2 && (
+            {tabIndex === 3 && (
               <Box>
                 <Typography variant="h6" gutterBottom>Enroll Agent with Single-Use PIN</Typography>
                 <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
@@ -378,6 +581,48 @@ export default function App() {
               <DialogActions>
                 <Button onClick={() => setOpenTokenDialog(false)}>Close</Button>
                 {!createdTokenVal && <Button variant="contained" onClick={handleCreateToken}>Generate</Button>}
+              </DialogActions>
+            </Dialog>
+
+            {/* Create/Edit User Dialog */}
+            <Dialog open={openUserDialog} onClose={() => setOpenUserDialog(false)} maxWidth="xs" fullWidth>
+              <DialogTitle>{editingUserId !== null ? 'Edit User' : 'Create User'}</DialogTitle>
+              <DialogContent>
+                <TextField
+                  fullWidth
+                  label="Username"
+                  value={formUsername}
+                  onChange={(e) => setFormUsername(e.target.value)}
+                  margin="normal"
+                  disabled={editingUserId !== null}
+                  autoFocus
+                />
+                <TextField
+                  fullWidth
+                  label={editingUserId !== null ? 'New Password (leave blank to keep)' : 'Password'}
+                  type="password"
+                  value={formPassword}
+                  onChange={(e) => setFormPassword(e.target.value)}
+                  margin="normal"
+                />
+                <FormControl fullWidth margin="normal">
+                  <InputLabel>Role</InputLabel>
+                  <Select
+                    value={formRole}
+                    label="Role"
+                    onChange={(e) => setFormRole(e.target.value)}
+                  >
+                    <MenuItem value="user">user</MenuItem>
+                    <MenuItem value="agent">agent</MenuItem>
+                    <MenuItem value="admin">admin</MenuItem>
+                  </Select>
+                </FormControl>
+              </DialogContent>
+              <DialogActions>
+                <Button onClick={() => setOpenUserDialog(false)}>Cancel</Button>
+                <Button variant="contained" onClick={handleSaveUser}>
+                  {editingUserId !== null ? 'Save' : 'Create'}
+                </Button>
               </DialogActions>
             </Dialog>
           </Container>
