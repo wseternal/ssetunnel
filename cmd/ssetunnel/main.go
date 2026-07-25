@@ -166,7 +166,7 @@ func runServer(ctx context.Context, args []string) error {
 
 func runAgent(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("agent", flag.ContinueOnError)
-	serverURL := fs.String("server", "", "tunnel server URL, e.g. http://tunnel.example.com")
+	serverURL := fs.String("server", "http://127.0.0.1:8080", "tunnel server URL")
 	target := fs.String("target", "", "TCP address to forward streams to, e.g. 127.0.0.1:3000")
 	token := fs.String("token", os.Getenv("SSETUNNEL_TOKEN"), "Bearer token or single-use PIN for agent authentication")
 	batchSize := fs.Int("batch-size", 16384, "upstream batch ceiling in bytes (1024..1048576)")
@@ -176,8 +176,8 @@ func runAgent(ctx context.Context, args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if *serverURL == "" || *target == "" {
-		return errors.New("--server and --target are required")
+	if *target == "" {
+		return errors.New("--target is required")
 	}
 	batch, conc := clampAgentFlags(*batchSize, *concurrency)
 	log.Printf("agent: target %s -> server %s (batch-size %d, concurrency %d, compress %v)",
