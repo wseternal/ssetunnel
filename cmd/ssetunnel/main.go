@@ -38,6 +38,7 @@ commands:
   connect   run the user connect client wrapper
   login     authenticate and store a session for agent/connect
   probe     measure a server's POST path (body cap, throttling)
+  version   print the build version and git revision
 `
 
 func main() {
@@ -60,6 +61,9 @@ func main() {
 		err = runLogin(ctx, os.Args[2:])
 	case "probe":
 		err = runProbe(ctx, os.Args[2:])
+	case "version":
+		fmt.Println(BuildVersion())
+		return
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command %q\n%s", os.Args[1], usage)
 		os.Exit(2)
@@ -163,6 +167,7 @@ func runServer(ctx context.Context, args []string) error {
 		httpSrv.Shutdown(context.Background())
 	}()
 
+	log.Printf("server: ssetunnel %s", BuildVersion())
 	log.Printf("server: http %s, entry %s", *listen, *entry)
 	if err := httpSrv.Serve(httpLn); !errors.Is(err, http.ErrServerClosed) {
 		return fmt.Errorf("serve http: %w", err)
@@ -203,6 +208,7 @@ func runAgent(ctx context.Context, args []string) error {
 		}
 	}
 
+	log.Printf("agent: ssetunnel %s", BuildVersion())
 	log.Printf("agent: target %s -> server %s (batch-size %d, concurrency %d, compress %v)",
 		*target, *serverURL, batch, conc, *compress)
 
