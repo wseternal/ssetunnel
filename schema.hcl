@@ -146,3 +146,45 @@ table "user_sessions" {
     ref_columns = [table.users.column.id]
   }
 }
+
+table "agents" {
+  schema = schema.public
+  column "id" {
+    null = false
+    type = bigint
+    identity {
+      generated = BY_DEFAULT
+    }
+  }
+  column "agent_id" {
+    null = true
+    type = text
+  }
+  column "allowed_targets" {
+    null    = false
+    type    = text_array
+    default = sql("'{\"127.0.0.1:*\"}'")
+  }
+  column "description" {
+    null    = false
+    type    = text
+    default = ""
+  }
+  column "created_at" {
+    null    = false
+    type    = timestamptz
+    default = sql("CURRENT_TIMESTAMP")
+  }
+  column "updated_at" {
+    null    = false
+    type    = timestamptz
+    default = sql("CURRENT_TIMESTAMP")
+  }
+  primary_key {
+    columns = [column.id]
+  }
+  index "agents_agent_id_idx" {
+    unique  = true
+    columns = [column.agent_id]
+  }
+}

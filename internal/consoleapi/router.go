@@ -40,6 +40,10 @@ func NewRouter(store *auth.Store, reg *server.Registry, totpSecret string) http.
 	r.Handle("/api/v1/users", adminAuth(http.HandlerFunc(api.handleUsers))).Methods("GET", "POST")
 	r.Handle("/api/v1/users/{id}", adminAuth(http.HandlerFunc(api.handleUserUpdate))).Methods("PATCH", "DELETE")
 
+	// Agent config management routes (admin only)
+	r.Handle("/api/v1/agents", adminAuth(http.HandlerFunc(api.handleAgents))).Methods("GET", "POST")
+	r.Handle("/api/v1/agents/{id}", adminAuth(http.HandlerFunc(api.handleAgentUpdate))).Methods("PATCH", "DELETE")
+
 	// User session routes (authenticated user)
 	userAuth := server.UserSessionMiddleware(store)
 	r.Handle("/api/v1/me", userAuth(http.HandlerFunc(api.handleMe))).Methods("GET")
@@ -293,6 +297,114 @@ func (a *API) handleUserUpdate(w http.ResponseWriter, r *http.Request) {
 	case "DELETE":
 		if err := a.store.DeleteUser(r.Context(), id); err != nil {
 			if errors.Is(err, auth.ErrUserNotFound) {
+				http.Error(w, err.Error(), http.StatusNotFound)
+				return
+			}
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "deleted"})
+	}
+}
+
+func (a *API) handleAgents(w http.ResponseWriter, r *http.Request) {
+	if a.store == nil {
+		http.Error(w, "auth not configured", http.StatusServiceUnavailable)
+		return
+	}
+
+	if r.Method == "GET" {
+		configs, err := a.store.ListAgentConfigs(r.Context())
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if configs == nil {
+			configs = []auth.AgentConfig{}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(configs)
+		return
+	}
+
+	// POST: create agent config
+	var req struct {
+		AgentID        string   `json:"agent_id"`
+		Description    string   `json:"description"`
+		AllowedTargets []string `json:"allowed_targets"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request JSON", http.StatusBadRequest)
+		return
+	}
+	if req.AgentID == "" {
+		http.Error(w, "agent_id is required", http.StatusBadRequest)
+		return
+	}
+
+	cfg, err := a.store.CreateAgentConfig(r.Context(), req.AgentID, req.Description, req.AllowedTargets)
+	if err != nil {
+		if errors.Is(err, auth.ErrDuplicateAgentID) {
+			http.Error(w, err.Error(), http.StatusConflict)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	_ = json.NewEncoder(w).Encode(cfg)
+}
+
+func (a *API) handleAgentUpdate(w http.ResponseWriter, r *http.Request) {
+	if a.store == nil {
+		http.Error(w, "auth not configured", http.StatusServiceUnavailable)
+		return
+	}
+
+	vars := mux.Vars(r)
+	idStr := vars["id"]
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		http.Error(w, "invalid agent config ID", http.StatusBadRequest)
+		return
+	}
+
+	switch r.Method {
+	case "PATCH":
+		var req struct {
+			AgentID        *string  `json:"agent_id"`
+			Description    *string  `json:"description"`
+			AllowedTargets []string `json:"allowed_targets"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid request JSON", http.StatusBadRequest)
+			return
+		}
+
+		cfg, err := a.store.UpdateAgentConfig(r.Context(), id, req.AgentID, req.Description, req.AllowedTargets)
+		if err != nil {
+			if errors.Is(err, auth.ErrDuplicateAgentID) {
+				http.Error(w, err.Error(), http.StatusConflict)
+				return
+			}
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(cfg)
+
+	case "DELETE":
+		if err := a.store.DeleteAgentConfig(r.Context(), id); err != nil {
+			if errors.Is(err, auth.ErrCannotDeleteDefault) {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			if errors.Is(err, auth.ErrAgentNotFound) {
 				http.Error(w, err.Error(), http.StatusNotFound)
 				return
 			}

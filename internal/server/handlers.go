@@ -94,6 +94,13 @@ func (h *Handler) handleEvents(w http.ResponseWriter, r *http.Request) {
 	if parseCapsConcurrency(r.Header.Get("X-SSET-Caps")) > 1 {
 		sess.enableWindow()
 	}
+	// Store agent identity and capabilities for entry routing.
+	if agentID := r.Header.Get("X-SSET-Agent-ID"); agentID != "" {
+		sess.SetAgentID(agentID)
+	}
+	if r.Header.Get("X-SSET-Target") == "true" {
+		sess.SetWantTarget(true)
+	}
 	h.reg.Replace(sess)
 	defer h.reg.Remove(id, sess) // deregister on death; no-op if replaced
 	if h.OnSession != nil {

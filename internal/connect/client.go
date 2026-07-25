@@ -25,12 +25,16 @@ var bufferPool = sync.Pool{
 type Client struct {
 	serverEntryAddr string
 	token           string
+	agentID         string // agent routing key (empty = first-match)
+	target          string // dynamic target address (empty = no dynamic target)
 }
 
-func NewClient(serverEntryAddr string, token string) *Client {
+func NewClient(serverEntryAddr, token, agentID, target string) *Client {
 	return &Client{
 		serverEntryAddr: serverEntryAddr,
 		token:           token,
+		agentID:         agentID,
+		target:          target,
 	}
 }
 
@@ -162,7 +166,16 @@ func (c *Client) dialAndHandshake(ctx context.Context) (net.Conn, error) {
 	}
 
 	if c.token != "" {
-		if _, err := fmt.Fprintf(conn, "%s\n", c.token); err != nil {
+		// Build handshake line: TOKEN [agent_id [target]]
+
+		handshake := c.token
+		if c.agentID != "" {
+			handshake += " " + c.agentID
+			if c.target != "" {
+				handshake += " " + c.target
+			}
+		}
+		if _, err := fmt.Fprintf(conn, "%s\n", handshake); err != nil {
 			conn.Close()
 			return nil, fmt.Errorf("send token: %w", err)
 		}

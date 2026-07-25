@@ -61,6 +61,14 @@ type Config struct {
 	// token via X-SSET-Token (PIN redemption). The agent uses the new
 	// token for subsequent connections.
 	OnTokenUpgrade func(newToken string)
+
+	// AgentID is the human-readable identifier for this agent (e.g. "mydevbox").
+	// Sent as X-SSET-Agent-ID header so the server can route connections.
+	AgentID string
+
+	// WantTargetHeader tells the server to write the target address as the
+	// first line on each yamux stream (for dynamic target mode).
+	WantTargetHeader bool
 }
 
 // Conn is the agent side of the tunnel: a net.Conn over SSE-down +
@@ -170,6 +178,13 @@ func DialAgent(ctx context.Context, cfg Config) (*Conn, error) {
 		// so the agent sends its WANTED set here; both sides compute the
 		// per-axis min independently (caps.go contract, decision 3).
 		req.Header.Set("X-SSET-Caps", want.String())
+	}
+	// Agent ID and target header capability negotiation.
+	if cfg.AgentID != "" {
+		req.Header.Set("X-SSET-Agent-ID", cfg.AgentID)
+	}
+	if cfg.WantTargetHeader {
+		req.Header.Set("X-SSET-Target", "true")
 	}
 	resp, err := client.Do(req)
 	if err != nil {

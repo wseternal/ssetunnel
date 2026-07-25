@@ -44,6 +44,13 @@ type Session struct {
 	bytesSent     atomic.Uint64
 	bytesReceived atomic.Uint64
 
+	// agentID is the human-readable identifier set by the agent via
+	// X-SSET-Agent-ID header. Empty if the agent didn't advertise one.
+	agentID string
+	// wantTarget is true when the agent wants the server to write the
+	// target address as the first line on each yamux stream (dynamic mode).
+	wantTarget bool
+
 	yamuxMu   sync.Mutex
 	yamuxSess *yamux.Session // per-session yamux; set by attach after mux.Server
 
@@ -89,6 +96,18 @@ func (s *Session) hasWindow() bool { return s.window != nil }
 
 // ID returns the agent-generated session ID.
 func (s *Session) ID() string { return s.id }
+
+// AgentID returns the human-readable agent identifier (from X-SSET-Agent-ID).
+func (s *Session) AgentID() string { return s.agentID }
+
+// SetAgentID sets the human-readable agent identifier.
+func (s *Session) SetAgentID(id string) { s.agentID = id }
+
+// WantTarget reports whether the agent wants target headers on yamux streams.
+func (s *Session) WantTarget() bool { return s.wantTarget }
+
+// SetWantTarget sets whether the agent wants target headers on yamux streams.
+func (s *Session) SetWantTarget(v bool) { s.wantTarget = v }
 
 // push accepts one upstream POST body with the given seq (plan decision
 // 1: serial POSTs, monotonic seq). Old seqs are deduped (decision 3: a

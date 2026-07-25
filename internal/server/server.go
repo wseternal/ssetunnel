@@ -126,25 +126,90 @@ func (s *Server) ServeEntry(ctx context.Context, ln net.Listener) error {
 	}
 }
 
-// proxyEntry opens a yamux stream on the current session and copies bidirectionally.
+// entryRequest holds the parsed fields from the entry handshake line.
+type entryRequest struct {
+	token   string // bearer token (always present)
+	agentID string // agent routing key (empty = first-match)
+	target  string // dynamic target address (empty = no dynamic target)
+}
+
+// proxyEntry opens a yamux stream on the agent's session and copies bidirectionally.
+// It handles agent ID routing, target validation, and target header writing.
 func (s *Server) proxyEntry(c net.Conn) {
+	var req *entryRequest
 	if s.store != nil {
-		if !s.authenticateEntryConn(c) {
+		// Auth mode: read TOKEN [agent_id [target]]\n handshake.
+		req = s.parseEntryHandshake(c)
+		if req == nil {
+			return // handshake failed, connection already closed
+		}
+		if !s.validateEntryAuth(c, req.token) {
+			return
+		}
+		// Send OK immediately after auth validation so the client can proceed.
+		if _, err := fmt.Fprintf(c, "OK\n"); err != nil {
+			c.Close()
+			return
+		}
+	} else {
+		// No-auth mode: backward compat — no handshake, data flows directly.
+		req = &entryRequest{}
+	}
+
+	// Find the target agent session.
+	var ms *yamux.Session
+	var sess *Session
+	if req.agentID != "" {
+		ms, sess = s.findYamuxByAgentID(req.agentID)
+		if ms == nil || ms.IsClosed() {
+			log.Printf("server: entry conn from %s: agent %q not found", c.RemoteAddr(), req.agentID)
+			fmt.Fprintf(c, "ERR agent not found\n") //nolint:errcheck
+			c.Close()
+			return
+		}
+	} else {
+		ms = s.findYamux()
+		if ms == nil || ms.IsClosed() {
+			log.Printf("server: entry conn from %s: no active session", c.RemoteAddr())
+			c.Close()
 			return
 		}
 	}
 
-	ms := s.findYamux()
-	if ms == nil || ms.IsClosed() {
-		log.Printf("server: entry conn from %s closed: no active session", c.RemoteAddr())
-		c.Close()
-		return
+	// Validate target if the connect client specified one.
+	if req.target != "" && s.store != nil {
+		// Look up agent config (falls back to NULL default row).
+		agentID := req.agentID
+		cfg, err := s.store.GetAgentConfig(context.Background(), agentID)
+		if err != nil {
+			log.Printf("server: agent config lookup for %q: %v", agentID, err)
+			fmt.Fprintf(c, "ERR agent not found\n") //nolint:errcheck
+			c.Close()
+			return
+		}
+		if !auth.TargetAllowed(cfg.AllowedTargets, req.target) {
+			log.Printf("server: target %s not allowed for agent %q", req.target, agentID)
+			fmt.Fprintf(c, "ERR target not allowed\n") //nolint:errcheck
+			c.Close()
+			return
+		}
 	}
+
 	stream, err := ms.OpenStream()
 	if err != nil {
 		log.Printf("server: open stream for %s: %v", c.RemoteAddr(), err)
 		c.Close()
 		return
+	}
+
+	// Write target header if the agent wants it (dynamic target mode).
+	if req.target != "" && sess != nil && sess.WantTarget() {
+		if _, err := fmt.Fprintf(stream, "%s\n", req.target); err != nil {
+			log.Printf("server: write target header: %v", err)
+			stream.Close()
+			c.Close()
+			return
+		}
 	}
 
 	go func() {
@@ -161,36 +226,49 @@ func (s *Server) proxyEntry(c net.Conn) {
 	}()
 }
 
-// authenticateEntryConn reads the first line from c as a token and validates
-// it. On success it writes "OK\n" and clears the read deadline. On failure it
-// writes "ERR unauthorized\n" before closing c, so clients are not left
-// guessing why the connection was dropped.
-func (s *Server) authenticateEntryConn(c net.Conn) bool {
+// parseEntryHandshake reads the first line from c and parses it as
+// TOKEN [agent_id [target]]\n. Returns nil on failure (connection closed).
+func (s *Server) parseEntryHandshake(c net.Conn) *entryRequest {
 	c.SetReadDeadline(time.Now().Add(5 * time.Second))
 	reader := bufio.NewReader(c)
-	tokenLine, err := reader.ReadString('\n')
+	line, err := reader.ReadString('\n')
 	if err != nil {
 		log.Printf("server: entry handshake failed from %s: %v", c.RemoteAddr(), err)
-		fmt.Fprintf(c, "ERR unauthorized\n") //nolint:errcheck // best-effort
+		fmt.Fprintf(c, "ERR unauthorized\n") //nolint:errcheck
 		c.Close()
-		return false
+		return nil
+	}
+	c.SetReadDeadline(time.Time{})
+
+	line = strings.TrimSpace(line)
+	parts := strings.SplitN(line, " ", 3)
+
+	req := &entryRequest{token: parts[0]}
+	if len(parts) >= 2 {
+		req.agentID = parts[1]
+	}
+	if len(parts) >= 3 {
+		req.target = parts[2]
 	}
 
-	tokenStr := strings.TrimSpace(tokenLine)
+	// NOTE: bufio.Reader may have consumed bytes beyond the \n.
+	// For backward compat (old clients that only send TOKEN\n), this
+	// is fine because no data flows before OK\n. For new clients,
+	// the connect client must not pipeline data before receiving OK\n.
+	// If buffered bytes exist, they belong to the post-handshake data
+	// stream and we need to handle them. For now, the protocol ensures
+	// no pipelining — OK\n must be received before data flows.
+	return req
+}
 
-	// Validate user session
-	sessInfo, err := s.store.ValidateUserSession(context.Background(), tokenStr)
+// validateEntryAuth checks the token against the auth store.
+func (s *Server) validateEntryAuth(c net.Conn, token string) bool {
+	sessInfo, err := s.store.ValidateUserSession(context.Background(), token)
 	if err == nil && auth.UserHasPermission(sessInfo.Role, sessInfo.PermConnect, sessInfo.PermAgent, auth.PermConnect) {
-		if _, err := fmt.Fprintf(c, "OK\n"); err != nil {
-			c.Close()
-			return false
-		}
-		c.SetReadDeadline(time.Time{})
 		return true
 	}
-
 	log.Printf("server: entry handshake rejected invalid token from %s", c.RemoteAddr())
-	fmt.Fprintf(c, "ERR unauthorized\n") //nolint:errcheck // best-effort
+	fmt.Fprintf(c, "ERR unauthorized\n") //nolint:errcheck
 	c.Close()
 	return false
 }
@@ -206,4 +284,22 @@ func (s *Server) findYamux() *yamux.Session {
 		return true
 	})
 	return ms
+}
+
+// findYamuxByAgentID returns the yamux session and Session for an agent with
+// the given agentID. Returns (nil, nil) if no matching agent is found.
+func (s *Server) findYamuxByAgentID(agentID string) (*yamux.Session, *Session) {
+	var ms *yamux.Session
+	var found *Session
+	s.Reg.Range(func(sess *Session) bool {
+		if sess.AgentID() == agentID {
+			if m := sess.YamuxSession(); m != nil && !m.IsClosed() {
+				ms = m
+				found = sess
+				return false
+			}
+		}
+		return true
+	})
+	return ms, found
 }

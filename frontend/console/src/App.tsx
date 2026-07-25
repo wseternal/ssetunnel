@@ -40,6 +40,7 @@ import PersonAddIcon from '@mui/icons-material/PersonAdd';
 import EditIcon from '@mui/icons-material/Edit';
 import BlockIcon from '@mui/icons-material/Block';
 import CheckCircleIcon from '@mui/icons-material/CheckCircle';
+import AddIcon from '@mui/icons-material/Add';
 
 const darkTheme = createTheme({
   palette: {
@@ -71,6 +72,15 @@ interface User {
   disabled_at?: string;
 }
 
+interface AgentConfig {
+  id: number;
+  agent_id: string | null;
+  allowed_targets: string[];
+  description: string;
+  created_at: string;
+  updated_at: string;
+}
+
 export default function App() {
   const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [sessionToken, setSessionToken] = useState('');
@@ -80,6 +90,7 @@ export default function App() {
   const [tabIndex, setTabIndex] = useState(0);
   const [sessions, setSessions] = useState<Session[]>([]);
   const [users, setUsers] = useState<User[]>([]);
+  const [agents, setAgents] = useState<AgentConfig[]>([]);
   const [error, setError] = useState('');
 
   // User dialog
@@ -90,6 +101,13 @@ export default function App() {
   const [formRole, setFormRole] = useState('user');
   const [formPermConnect, setFormPermConnect] = useState(true);
   const [formPermAgent, setFormPermAgent] = useState(true);
+
+  // Agent dialog
+  const [openAgentDialog, setOpenAgentDialog] = useState(false);
+  const [editingAgentId, setEditingAgentId] = useState<number | null>(null);
+  const [formAgentID, setFormAgentID] = useState('');
+  const [formDescription, setFormDescription] = useState('');
+  const [formAllowedTargets, setFormAllowedTargets] = useState('');
 
   const authHeaders = (): HeadersInit => sessionToken ? { Authorization: `Bearer ${sessionToken}` } : {};
 
@@ -114,10 +132,20 @@ export default function App() {
     }
   };
 
+  const fetchAgents = async () => {
+    try {
+      const res = await fetch('/api/v1/agents', { headers: authHeaders() });
+      if (res.ok) setAgents(await res.json());
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
   useEffect(() => {
     if (isLoggedIn) {
       fetchSessions();
       fetchUsers();
+      fetchAgents();
       const interval = setInterval(fetchSessions, 3000);
       return () => clearInterval(interval);
     }
@@ -225,6 +253,63 @@ export default function App() {
     }
   };
 
+  const openCreateAgentDialog = () => {
+    setEditingAgentId(null);
+    setFormAgentID('');
+    setFormDescription('');
+    setFormAllowedTargets('127.0.0.1:*');
+    setOpenAgentDialog(true);
+  };
+
+  const openEditAgentDialog = (cfg: AgentConfig) => {
+    setEditingAgentId(cfg.id);
+    setFormAgentID(cfg.agent_id ?? '');
+    setFormDescription(cfg.description);
+    setFormAllowedTargets(cfg.allowed_targets.join(', '));
+    setOpenAgentDialog(true);
+  };
+
+  const handleSaveAgent = async () => {
+    const targets = formAllowedTargets.split(',').map(s => s.trim()).filter(Boolean);
+    if (editingAgentId !== null) {
+      try {
+        const body: Record<string, unknown> = { description: formDescription, allowed_targets: targets };
+        if (formAgentID) body.agent_id = formAgentID;
+        const res = await fetch(`/api/v1/agents/${editingAgentId}`, {
+          method: 'PATCH',
+          headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        if (res.ok) { setOpenAgentDialog(false); fetchAgents(); }
+        else setError(await res.text() || 'Failed to update agent');
+      } catch {
+        setError('Failed to update agent');
+      }
+    } else {
+      try {
+        const res = await fetch('/api/v1/agents', {
+          method: 'POST',
+          headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+          body: JSON.stringify({ agent_id: formAgentID, description: formDescription, allowed_targets: targets }),
+        });
+        if (res.ok) { setOpenAgentDialog(false); fetchAgents(); }
+        else setError(await res.text());
+      } catch {
+        setError('Failed to create agent');
+      }
+    }
+  };
+
+  const handleDeleteAgent = async (id: number) => {
+    try {
+      const res = await fetch(`/api/v1/agents/${id}`, { method: 'DELETE', headers: authHeaders() });
+      if (res.ok) fetchAgents();
+      else setError(await res.text() || 'Failed to delete agent');
+    } catch {
+      setError('Failed to delete agent');
+    }
+  };
+
   const roleColor = (role: string): 'error' | 'warning' | 'primary' | 'default' => {
     switch (role) {
       case 'admin': return 'error';
@@ -300,6 +385,7 @@ export default function App() {
               <Tabs value={tabIndex} onChange={(_, v) => setTabIndex(v)}>
                 <Tab label="Sessions" />
                 <Tab label="Users" />
+                <Tab label="Agents" />
               </Tabs>
             </Box>
 
@@ -414,6 +500,71 @@ export default function App() {
               </Box>
             )}
 
+            {tabIndex === 2 && (
+              <Box>
+                <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
+                  <Typography variant="h6">Agent Configs ({agents.length})</Typography>
+                  <Box>
+                    <Button startIcon={<RefreshIcon />} onClick={fetchAgents} size="small" sx={{ mr: 1 }}>Refresh</Button>
+                    <Button variant="contained" startIcon={<AddIcon />} onClick={openCreateAgentDialog}>
+                      Add Agent
+                    </Button>
+                  </Box>
+                </Box>
+                <TableContainer component={Paper} sx={{ borderRadius: 2 }}>
+                  <Table>
+                    <TableHead>
+                      <TableRow>
+                        <TableCell>ID</TableCell>
+                        <TableCell>Agent ID</TableCell>
+                        <TableCell>Description</TableCell>
+                        <TableCell>Allowed Targets</TableCell>
+                        <TableCell>Updated At</TableCell>
+                        <TableCell align="right">Actions</TableCell>
+                      </TableRow>
+                    </TableHead>
+                    <TableBody>
+                      {agents.length === 0 ? (
+                        <TableRow>
+                          <TableCell colSpan={6} align="center">No agent configs</TableCell>
+                        </TableRow>
+                      ) : (
+                        agents.map((cfg) => (
+                          <TableRow key={cfg.id} sx={cfg.agent_id === null ? { bgcolor: 'rgba(0, 242, 254, 0.05)' } : undefined}>
+                            <TableCell>{cfg.id}</TableCell>
+                            <TableCell sx={{ fontFamily: 'monospace', fontWeight: 500 }}>
+                              {cfg.agent_id === null ? (
+                                <Chip label="Default" color="secondary" size="small" />
+                              ) : (
+                                cfg.agent_id
+                              )}
+                            </TableCell>
+                            <TableCell>{cfg.description}</TableCell>
+                            <TableCell>
+                              {cfg.allowed_targets.map((t, i) => (
+                                <Chip key={i} label={t} size="small" sx={{ mr: 0.5, mb: 0.5, fontFamily: 'monospace' }} />
+                              ))}
+                            </TableCell>
+                            <TableCell>{new Date(cfg.updated_at).toLocaleString()}</TableCell>
+                            <TableCell align="right">
+                              <IconButton color="primary" size="small" onClick={() => openEditAgentDialog(cfg)}>
+                                <EditIcon />
+                              </IconButton>
+                              {cfg.agent_id !== null && (
+                                <IconButton color="error" size="small" onClick={() => handleDeleteAgent(cfg.id)}>
+                                  <DeleteIcon />
+                                </IconButton>
+                              )}
+                            </TableCell>
+                          </TableRow>
+                        ))
+                      )}
+                    </TableBody>
+                  </Table>
+                </TableContainer>
+              </Box>
+            )}
+
             {/* Create/Edit User Dialog */}
             <Dialog open={openUserDialog} onClose={() => setOpenUserDialog(false)} maxWidth="xs" fullWidth>
               <DialogTitle>{editingUserId !== null ? 'Edit User' : 'Create User'}</DialogTitle>
@@ -459,6 +610,44 @@ export default function App() {
                 <Button onClick={() => setOpenUserDialog(false)}>Cancel</Button>
                 <Button variant="contained" onClick={handleSaveUser}>
                   {editingUserId !== null ? 'Save' : 'Create'}
+                </Button>
+              </DialogActions>
+            </Dialog>
+
+            {/* Create/Edit Agent Dialog */}
+            <Dialog open={openAgentDialog} onClose={() => setOpenAgentDialog(false)} maxWidth="xs" fullWidth>
+              <DialogTitle>{editingAgentId !== null ? 'Edit Agent Config' : 'Add Agent Config'}</DialogTitle>
+              <DialogContent>
+                <TextField
+                  fullWidth
+                  label="Agent ID"
+                  value={formAgentID}
+                  onChange={(e) => setFormAgentID(e.target.value)}
+                  margin="normal"
+                  disabled={editingAgentId !== null && formAgentID === ''}
+                  placeholder="e.g. mydevbox"
+                  autoFocus
+                />
+                <TextField
+                  fullWidth
+                  label="Description"
+                  value={formDescription}
+                  onChange={(e) => setFormDescription(e.target.value)}
+                  margin="normal"
+                />
+                <TextField
+                  fullWidth
+                  label="Allowed Targets (comma-separated)"
+                  value={formAllowedTargets}
+                  onChange={(e) => setFormAllowedTargets(e.target.value)}
+                  margin="normal"
+                  helperText="e.g. 127.0.0.1:*, *:22, *"
+                />
+              </DialogContent>
+              <DialogActions>
+                <Button onClick={() => setOpenAgentDialog(false)}>Cancel</Button>
+                <Button variant="contained" onClick={handleSaveAgent}>
+                  {editingAgentId !== null ? 'Save' : 'Create'}
                 </Button>
               </DialogActions>
             </Dialog>
