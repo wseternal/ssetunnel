@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/cenkalti/backoff/v4"
 )
 
 var bufferPool = sync.Pool{
@@ -107,9 +109,23 @@ func (c *Client) ServeRW(ctx context.Context, r io.Reader, w io.Writer) error {
 func (c *Client) handleLocalConn(ctx context.Context, localConn net.Conn) {
 	defer localConn.Close()
 
-	serverConn, err := c.dialAndHandshake(ctx)
+	// Retry dialAndHandshake with exponential backoff so transient
+	// server outages don't immediately kill the user's connection.
+	var serverConn net.Conn
+	err := backoff.Retry(func() error {
+		if ctx.Err() != nil {
+			return backoff.Permanent(ctx.Err())
+		}
+		var dialErr error
+		serverConn, dialErr = c.dialAndHandshake(ctx)
+		if dialErr != nil {
+			log.Printf("connect: handshake failed (will retry): %v", dialErr)
+			return dialErr
+		}
+		return nil
+	}, backoff.WithContext(clientBackoff(), ctx))
 	if err != nil {
-		log.Printf("connect: handshake failed: %v", err)
+		log.Printf("connect: handshake failed after retries: %v", err)
 		return
 	}
 	defer serverConn.Close()
@@ -124,6 +140,18 @@ func (c *Client) handleLocalConn(ctx context.Context, localConn net.Conn) {
 	buf := bufferPool.Get().(*[]byte)
 	defer bufferPool.Put(buf)
 	_, _ = io.CopyBuffer(localConn, serverConn, *buf)
+}
+
+// clientBackoff builds the exponential backoff strategy for connect
+// client retries: 500 ms initial, 1.5× multiplier, 30 s total cap.
+func clientBackoff() *backoff.ExponentialBackOff {
+	b := backoff.NewExponentialBackOff()
+	b.InitialInterval = 500 * time.Millisecond
+	b.MaxInterval = 10 * time.Second
+	b.MaxElapsedTime = 30 * time.Second
+	b.Multiplier = 1.5
+	b.RandomizationFactor = 0.1
+	return b
 }
 
 func (c *Client) dialAndHandshake(ctx context.Context) (net.Conn, error) {

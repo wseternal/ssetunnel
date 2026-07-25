@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/cenkalti/backoff/v4"
 	"github.com/wseternal/ssetunnel/internal/mux"
 	"github.com/wseternal/ssetunnel/internal/transport"
 )
@@ -22,7 +23,7 @@ type Agent struct {
 	ServerURL  string        // tunnel server base URL
 	Target     string        // TCP address to forward streams to
 	Token      string        // Bearer token or single-use PIN for authentication
-	MaxBackoff time.Duration // reconnect cap; 0 → 1 s
+	MaxBackoff time.Duration // reconnect cap; 0 → 30 s
 	MaxWait    time.Duration // batcher flush ceiling; 0 → default
 	Client     *http.Client  // nil → transport default
 
@@ -33,51 +34,66 @@ type Agent struct {
 	Compress    bool // negotiate gzip-per-batch
 }
 
-// Run connects and reconnects until ctx is canceled. The first retry is
-// immediate (interactive-first profile); backoff then doubles from 50 ms
-// up to MaxBackoff (plan step 7). A session that survived past the
-// health threshold resets the backoff: a drop after long uptime was a
-// network event, not a flapping server, so retry immediately.
+// Run connects and reconnects until ctx is canceled. Reconnect uses
+// exponential backoff (500 ms → 30 s cap with jitter) via cenkalti/backoff.
+// A session that survived past the health threshold resets the backoff:
+// a drop after long uptime was a network event, not a flapping server,
+// so reconnect immediately.
 func (a *Agent) Run(ctx context.Context) error {
-	maxBackoff := a.MaxBackoff
-	if maxBackoff <= 0 {
-		maxBackoff = time.Second
+	b := newAgentBackoff()
+	if a.MaxBackoff > 0 {
+		b.MaxInterval = a.MaxBackoff
 	}
 	const healthThreshold = 10 * time.Second
-	delay := time.Duration(0)
 	for {
 		start := time.Now()
-		if err := a.runOnce(ctx); err != nil {
-			// Unrecoverable errors (e.g. bad token) — exit immediately
-			// instead of spinning on retries that will never succeed.
-			if errors.Is(err, transport.ErrUnauthorized) {
-				log.Printf("agent: %v; giving up", err)
-				return err
-			}
+		err := a.runOnce(ctx)
+
+		// Unrecoverable errors (e.g. bad token) — exit immediately
+		// instead of spinning on retries that will never succeed.
+		if errors.Is(err, transport.ErrUnauthorized) {
+			log.Printf("agent: %v; giving up", err)
+			return err
+		}
+		if err != nil {
 			log.Printf("agent: %v; reconnecting", err)
 		} else {
 			log.Printf("agent: session ended; reconnecting")
 		}
-		if time.Since(start) >= healthThreshold {
-			delay = 0
-		}
 		if ctx.Err() != nil {
 			return nil
+		}
+
+		// A long-lived healthy session resets backoff: reconnect
+		// immediately since the drop was likely transient.
+		if time.Since(start) >= healthThreshold {
+			b.Reset()
+			continue
+		}
+
+		delay := b.NextBackOff()
+		if delay == backoff.Stop {
+			delay = 500 * time.Millisecond
 		}
 		select {
 		case <-time.After(delay):
 		case <-ctx.Done():
 			return nil
 		}
-		if delay == 0 {
-			delay = 50 * time.Millisecond
-		} else {
-			delay *= 2
-		}
-		if delay > maxBackoff {
-			delay = maxBackoff
-		}
 	}
+}
+
+// newAgentBackoff builds the exponential backoff strategy for agent
+// reconnection: 500 ms initial, 2× multiplier, 30 s cap, no elapsed
+// ceiling (retry forever), 10 % jitter.
+func newAgentBackoff() *backoff.ExponentialBackOff {
+	b := backoff.NewExponentialBackOff()
+	b.InitialInterval = 500 * time.Millisecond
+	b.MaxInterval = 30 * time.Second
+	b.MaxElapsedTime = 0 // never stop
+	b.Multiplier = 2.0
+	b.RandomizationFactor = 0.1
+	return b
 }
 
 // runOnce holds one session: connect → yamux client → accept streams →
