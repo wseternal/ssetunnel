@@ -443,3 +443,57 @@ func TestE2E_Auth_InvalidTokenRejected(t *testing.T) {
 	}
 	t.Logf("correctly rejected: %v", err)
 }
+
+// TestE2E_NoAuth_StdioRoundTrip: exercises the connect.Client.ServeRW
+// path (used by --local - / SSH ProxyCommand) without authentication.
+// Verifies bidirectional data flow: write data, read echo, then close.
+func TestE2E_NoAuth_StdioRoundTrip(t *testing.T) {
+	if err := waitAnySession(noAuthSrv.Reg, 5*time.Second); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	stdinR, stdinW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe stdin: %v", err)
+	}
+	stdoutR, stdoutW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe stdout: %v", err)
+	}
+
+	client := connect.NewClient(noAuthEntry, "")
+
+	done := make(chan error, 1)
+	go func() {
+		done <- client.ServeRW(ctx, stdinR, stdoutW)
+	}()
+
+	// Write test data (simulating SSH sending its protocol banner).
+	testData := []byte("SSH-2.0-test\n")
+	stdinW.Write(testData)
+
+	// Read the echo back (simulating SSH receiving the server banner).
+	got := make([]byte, len(testData))
+	_, readErr := io.ReadFull(stdoutR, got)
+	if readErr != nil {
+		t.Fatalf("read echo: %v", readErr)
+	}
+	if !bytes.Equal(got, testData) {
+		t.Fatalf("echo: want %q, got %q", testData, got)
+	}
+
+	// Now close stdin to signal we're done. ServeRW should return.
+	stdinW.Close()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("ServeRW: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("ServeRW did not return after stdin close")
+	}
+}

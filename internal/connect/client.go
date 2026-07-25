@@ -62,34 +62,56 @@ func (c *Client) ServeListener(ctx context.Context, ln net.Listener) error {
 }
 
 func (c *Client) ServeStdio(ctx context.Context) error {
+	return c.ServeRW(ctx, os.Stdin, os.Stdout)
+}
+
+// ServeRW connects to the entry server and copies bidirectionally between
+// the provided reader/writer and the server connection. It handles
+// half-close correctly: when the reader reaches EOF, the server's write
+// side is closed (via TCP half-close) so the remote target sees EOF,
+// and the function waits for both directions to finish before returning.
+func (c *Client) ServeRW(ctx context.Context, r io.Reader, w io.Writer) error {
 	serverConn, err := c.dialAndHandshake(ctx)
 	if err != nil {
 		return fmt.Errorf("stdio connect handshake failed: %w", err)
 	}
 	defer serverConn.Close()
 
+	var wg sync.WaitGroup
 	errCh := make(chan error, 2)
 
+	// stdin → server; half-close on EOF so the remote side sees it.
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		buf := bufferPool.Get().(*[]byte)
 		defer bufferPool.Put(buf)
-		_, err := io.CopyBuffer(serverConn, os.Stdin, *buf)
+		_, err := io.CopyBuffer(serverConn, r, *buf)
+		if tcpConn, ok := serverConn.(*net.TCPConn); ok {
+			_ = tcpConn.CloseWrite()
+		}
 		errCh <- err
 	}()
 
+	// server → stdout
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		buf := bufferPool.Get().(*[]byte)
 		defer bufferPool.Put(buf)
-		_, err := io.CopyBuffer(os.Stdout, serverConn, *buf)
+		_, err := io.CopyBuffer(w, serverConn, *buf)
 		errCh <- err
 	}()
 
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case err := <-errCh:
-		return err
+	// Wait for both directions, return first non-nil error.
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		if err != nil {
+			return err
+		}
 	}
+	return nil
 }
 
 func (c *Client) handleLocalConn(ctx context.Context, localConn net.Conn) {
