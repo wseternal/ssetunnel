@@ -180,7 +180,7 @@ func (s *Server) authenticateEntryConn(c net.Conn) bool {
 
 	// Validate user session
 	sessInfo, err := s.store.ValidateUserSession(context.Background(), tokenStr)
-	if err == nil && auth.HasPermission(sessInfo.Role, auth.PermConnect) {
+	if err == nil && auth.UserHasPermission(sessInfo.Role, sessInfo.PermConnect, sessInfo.PermAgent, auth.PermConnect) {
 		if _, err := fmt.Fprintf(c, "OK\n"); err != nil {
 			c.Close()
 			return false

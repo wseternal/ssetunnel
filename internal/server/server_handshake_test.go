@@ -32,7 +32,7 @@ func TestEntryListenerHandshake(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to hash password: %v", err)
 	}
-	user, err := store.CreateUser(ctx, "handshake-user", pwHash, "user")
+	user, err := store.CreateUser(ctx, "handshake-user", pwHash, "user", true, true)
 	if err != nil {
 		t.Fatalf("failed to create user: %v", err)
 	}

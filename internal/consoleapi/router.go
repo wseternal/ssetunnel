@@ -172,9 +172,11 @@ func (a *API) handleUsers(w http.ResponseWriter, r *http.Request) {
 
 	// POST: create user
 	var req struct {
-		Username string `json:"username"`
-		Password string `json:"password"`
-		Role     string `json:"role"`
+		Username    string `json:"username"`
+		Password    string `json:"password"`
+		Role        string `json:"role"`
+		PermConnect *bool  `json:"perm_connect"`
+		PermAgent   *bool  `json:"perm_agent"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid request JSON", http.StatusBadRequest)
@@ -187,6 +189,20 @@ func (a *API) handleUsers(w http.ResponseWriter, r *http.Request) {
 	if req.Role == "" {
 		req.Role = "user"
 	}
+	if req.Role == "agent" {
+		http.Error(w, "role 'agent' is not supported; use perm_agent toggle instead", http.StatusBadRequest)
+		return
+	}
+
+	// Default both permissions to true.
+	permConnect := true
+	if req.PermConnect != nil {
+		permConnect = *req.PermConnect
+	}
+	permAgent := true
+	if req.PermAgent != nil {
+		permAgent = *req.PermAgent
+	}
 
 	hash, err := auth.HashPassword(req.Password)
 	if err != nil {
@@ -194,7 +210,7 @@ func (a *API) handleUsers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	user, err := a.store.CreateUser(r.Context(), req.Username, hash, req.Role)
+	user, err := a.store.CreateUser(r.Context(), req.Username, hash, req.Role, permConnect, permAgent)
 	if err != nil {
 		if errors.Is(err, auth.ErrDuplicateUser) {
 			http.Error(w, err.Error(), http.StatusConflict)
@@ -226,12 +242,19 @@ func (a *API) handleUserUpdate(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case "PATCH":
 		var req struct {
-			Role     *string `json:"role"`
-			Password *string `json:"password"`
-			Disabled *bool   `json:"disabled"`
+			Role        *string `json:"role"`
+			Password    *string `json:"password"`
+			Disabled    *bool   `json:"disabled"`
+			PermConnect *bool   `json:"perm_connect"`
+			PermAgent   *bool   `json:"perm_agent"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, "invalid request JSON", http.StatusBadRequest)
+			return
+		}
+
+		if req.Role != nil && *req.Role == "agent" {
+			http.Error(w, "role 'agent' is not supported; use perm_agent toggle instead", http.StatusBadRequest)
 			return
 		}
 
@@ -245,7 +268,7 @@ func (a *API) handleUserUpdate(w http.ResponseWriter, r *http.Request) {
 			pwHash = &h
 		}
 
-		if err := a.store.UpdateUser(r.Context(), id, req.Role, pwHash); err != nil {
+		if err := a.store.UpdateUser(r.Context(), id, req.Role, pwHash, req.PermConnect, req.PermAgent); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}

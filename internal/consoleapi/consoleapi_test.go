@@ -37,7 +37,7 @@ func TestConsoleAPI(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to hash password: %v", err)
 	}
-	adminUser, err := store.CreateUser(ctx, "admin", pwHash, "admin")
+	adminUser, err := store.CreateUser(ctx, "admin", pwHash, "admin", true, true)
 	if err != nil {
 		t.Fatalf("failed to create admin user: %v", err)
 	}

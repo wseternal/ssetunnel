@@ -38,7 +38,7 @@ func TestConnectClient_LocalPortMode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to hash password: %v", err)
 	}
-	testUser, err := store.CreateUser(ctx, "connectuser", pwHash, "user")
+	testUser, err := store.CreateUser(ctx, "connectuser", pwHash, "user", true, true)
 	if err != nil {
 		t.Fatalf("failed to create user: %v", err)
 	}
