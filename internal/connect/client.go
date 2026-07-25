@@ -66,10 +66,12 @@ func (c *Client) ServeStdio(ctx context.Context) error {
 }
 
 // ServeRW connects to the entry server and copies bidirectionally between
-// the provided reader/writer and the server connection. It handles
-// half-close correctly: when the reader reaches EOF, the server's write
-// side is closed (via TCP half-close) so the remote target sees EOF,
-// and the function waits for both directions to finish before returning.
+// the provided reader/writer and the server connection. When the server
+// side closes (EOF on read), the connection is torn down immediately so
+// that the writer's consumer (e.g. an SSH client reading from a pipe)
+// also sees EOF and can react. When the reader reaches EOF first, a TCP
+// half-close is used to signal the remote side without killing the read
+// path.
 func (c *Client) ServeRW(ctx context.Context, r io.Reader, w io.Writer) error {
 	serverConn, err := c.dialAndHandshake(ctx)
 	if err != nil {
@@ -77,41 +79,29 @@ func (c *Client) ServeRW(ctx context.Context, r io.Reader, w io.Writer) error {
 	}
 	defer serverConn.Close()
 
-	var wg sync.WaitGroup
-	errCh := make(chan error, 2)
-
-	// stdin → server; half-close on EOF so the remote side sees it.
-	wg.Add(1)
+	// r → server in the background; half-close on reader EOF so the
+	// remote target sees EOF. This goroutine may outlive ServeRW if
+	// the server side closes first (see below), which is fine for
+	// ProxyCommand usage where the process exits on return.
 	go func() {
-		defer wg.Done()
 		buf := bufferPool.Get().(*[]byte)
 		defer bufferPool.Put(buf)
-		_, err := io.CopyBuffer(serverConn, r, *buf)
+		io.CopyBuffer(serverConn, r, *buf)
 		if tcpConn, ok := serverConn.(*net.TCPConn); ok {
 			_ = tcpConn.CloseWrite()
 		}
-		errCh <- err
 	}()
 
-	// server → stdout
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		buf := bufferPool.Get().(*[]byte)
-		defer bufferPool.Put(buf)
-		_, err := io.CopyBuffer(w, serverConn, *buf)
-		errCh <- err
-	}()
-
-	// Wait for both directions, return first non-nil error.
-	wg.Wait()
-	close(errCh)
-	for err := range errCh {
-		if err != nil {
-			return err
-		}
-	}
-	return nil
+	// server → w: when the server side closes (EOF or error), return
+	// immediately. This tears down the process (in ProxyCommand mode),
+	// closing stdout so the parent process (SSH client) sees EOF and
+	// can react. Waiting for r→server here would deadlock when the
+	// reader is a terminal waiting for user input that will never come
+	// because the remote side already closed.
+	buf := bufferPool.Get().(*[]byte)
+	defer bufferPool.Put(buf)
+	_, err = io.CopyBuffer(w, serverConn, *buf)
+	return err
 }
 
 func (c *Client) handleLocalConn(ctx context.Context, localConn net.Conn) {
