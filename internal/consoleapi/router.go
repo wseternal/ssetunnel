@@ -52,11 +52,14 @@ func (a *API) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if a.totpSecret != "" {
-		if !auth.VerifyTOTP(a.totpSecret, req.TOTPCode) {
-			http.Error(w, "invalid TOTP code", http.StatusUnauthorized)
-			return
-		}
+	if a.totpSecret == "" {
+		http.Error(w, "TOTP not configured", http.StatusServiceUnavailable)
+		return
+	}
+
+	if !auth.VerifyTOTP(a.totpSecret, req.TOTPCode) {
+		http.Error(w, "invalid TOTP code", http.StatusUnauthorized)
+		return
 	}
 
 	sessionToken, err := auth.GenerateToken()

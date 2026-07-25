@@ -64,7 +64,7 @@ func TestAuthStore_TokenAndPINAndSession(t *testing.T) {
 		t.Fatalf("CreateToken failed: %v", err)
 	}
 
-	// Validate token (cache miss -> DB lookup -> cache fill)
+	// Validate token (DB lookup)
 	tokInfo, err := store.ValidateToken(ctx, rawToken)
 	if err != nil {
 		t.Fatalf("ValidateToken first call failed: %v", err)
@@ -73,7 +73,7 @@ func TestAuthStore_TokenAndPINAndSession(t *testing.T) {
 		t.Errorf("expected role 'user', got %q", tokInfo.Role)
 	}
 
-	// Validate token again (cache hit)
+	// Validate token again (DB lookup, no cache)
 	tokInfo, err = store.ValidateToken(ctx, rawToken)
 	if err != nil {
 		t.Fatalf("ValidateToken second call failed: %v", err)

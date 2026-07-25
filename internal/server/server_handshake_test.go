@@ -49,7 +49,7 @@ func TestEntryListenerHandshake(t *testing.T) {
 
 	go srv.ServeEntry(ctx, entryListener)
 
-	// 1. Connect without sending token -> connection closed on timeout or invalid token
+	// 1. Connect with invalid token -> expect "ERR unauthorized\n"
 	conn, err := net.Dial("tcp", entryListener.Addr().String())
 	if err != nil {
 		t.Fatalf("failed to dial entry port: %v", err)
@@ -61,8 +61,11 @@ func TestEntryListenerHandshake(t *testing.T) {
 
 	r := bufio.NewReader(conn)
 	resp, err := r.ReadString('\n')
-	if err == nil && resp == "OK\n" {
-		t.Errorf("expected handshake to fail for invalid token, but got OK")
+	if err != nil {
+		t.Fatalf("expected ERR response, got read error: %v", err)
+	}
+	if resp != "ERR unauthorized\n" {
+		t.Errorf("expected \"ERR unauthorized\\n\", got %q", resp)
 	}
 	_ = conn.Close()
 
