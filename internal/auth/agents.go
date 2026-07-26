@@ -6,8 +6,7 @@ import (
 	"fmt"
 	"net"
 	"strings"
-
-	"github.com/lib/pq"
+	"time"
 )
 
 var (
@@ -70,12 +69,13 @@ type scannable interface {
 
 func scanAgentConfig(row scannable) (*AgentConfig, error) {
 	var cfg AgentConfig
-	var targets []string
-	err := row.Scan(&cfg.ID, &cfg.AgentID, pq.Array(&targets), &cfg.Description, &cfg.CreatedAt, &cfg.UpdatedAt)
+	var createdAt, updatedAt time.Time
+	err := row.Scan(&cfg.ID, &cfg.AgentID, &cfg.AllowedTargets, &cfg.Description, &createdAt, &updatedAt)
 	if err != nil {
 		return nil, err
 	}
-	cfg.AllowedTargets = targets
+	cfg.CreatedAt = createdAt.Format(time.RFC3339)
+	cfg.UpdatedAt = updatedAt.Format(time.RFC3339)
 	return &cfg, nil
 }
 
@@ -113,7 +113,7 @@ func (s *Store) CreateAgentConfig(ctx context.Context, agentID, description stri
 		INSERT INTO agents (agent_id, allowed_targets, description)
 		VALUES ($1, $2, $3)
 		RETURNING id, agent_id, allowed_targets, description, created_at, updated_at`,
-		agentID, pq.Array(allowedTargets), description)
+		agentID, allowedTargets, description)
 
 	cfg, err := scanAgentConfig(row)
 	if err != nil {
@@ -156,7 +156,7 @@ func (s *Store) UpdateAgentConfig(ctx context.Context, id int64, agentID *string
 	}
 	if allowedTargets != nil {
 		sets = append(sets, fmt.Sprintf("allowed_targets = $%d", argIdx))
-		args = append(args, pq.Array(allowedTargets))
+		args = append(args, allowedTargets)
 		argIdx++
 	}
 

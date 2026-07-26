@@ -106,6 +106,67 @@ func TestEnsureAdminUser_SeedsOnEmptyDB(t *testing.T) {
 	}
 }
 
+func TestAgentConfig_ArrayScanRoundTrip(t *testing.T) {
+	ctx := context.Background()
+
+	dbcfg := orcapostgres.DBConfig{
+		DatabaseURLTemplate: "postgres:tc:",
+	}
+	pool, err := orcapostgres.OpenPool(ctx, dbcfg, orcapostgres.NewMigrator(migrations.FS, nil))
+	if err != nil {
+		t.Fatalf("failed to open pool: %v", err)
+	}
+
+	store := auth.NewStore(pool)
+
+	// Create a config with allowed_targets array
+	targets := []string{"127.0.0.1:*", "10.0.0.1:22"}
+	cfg, err := store.CreateAgentConfig(ctx, "testbox", "test agent", targets)
+	if err != nil {
+		t.Fatalf("CreateAgentConfig failed: %v", err)
+	}
+	if len(cfg.AllowedTargets) != 2 {
+		t.Fatalf("expected 2 allowed targets, got %d", len(cfg.AllowedTargets))
+	}
+
+	// Read back by agent_id - this is the path that fails in production
+	got, err := store.GetAgentConfig(ctx, "testbox")
+	if err != nil {
+		t.Fatalf("GetAgentConfig by agent_id failed: %v", err)
+	}
+	if len(got.AllowedTargets) != 2 || got.AllowedTargets[0] != "127.0.0.1:*" || got.AllowedTargets[1] != "10.0.0.1:22" {
+		t.Errorf("AllowedTargets round-trip mismatch: got %v, want %v", got.AllowedTargets, targets)
+	}
+
+	// Read back via ListAgentConfigs (includes seeded default row)
+	all, err := store.ListAgentConfigs(ctx)
+	if err != nil {
+		t.Fatalf("ListAgentConfigs failed: %v", err)
+	}
+	if len(all) < 2 {
+		t.Fatalf("expected at least 2 configs (testbox + default), got %d", len(all))
+	}
+	// Find our testbox row and verify its targets
+	var found bool
+	for _, c := range all {
+		if c.AgentID != nil && *c.AgentID == "testbox" {
+			found = true
+			if len(c.AllowedTargets) != 2 {
+				t.Errorf("ListAgentConfigs testbox AllowedTargets length: got %d, want 2", len(c.AllowedTargets))
+			}
+		}
+	}
+	if !found {
+		t.Error("testbox config not found in ListAgentConfigs results")
+	}
+
+	// Read default (NULL) row - the exact scenario from the bug report
+	_, err = store.GetDefaultAgentConfig(ctx)
+	if err != nil {
+		t.Fatalf("GetDefaultAgentConfig failed: %v", err)
+	}
+}
+
 func TestTOTPVerification(t *testing.T) {
 	secret := "JBSWY3DPEHPK3PXP" // standard base32 test secret
 	code, err := auth.GenerateTOTPCode(secret)
