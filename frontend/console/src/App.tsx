@@ -94,6 +94,8 @@ const SESSION_COLUMNS: AdminTableColumn<Session>[] = [
 export default function App() {
   const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [sessionToken, setSessionToken] = useState(() => localStorage.getItem('sessionToken') || '');
+  const [userRole, setUserRole] = useState(() => localStorage.getItem('userRole') || '');
+  const isAdmin = userRole === 'admin';
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [totpCode, setTotpCode] = useState('');
@@ -179,29 +181,37 @@ export default function App() {
   useEffect(() => {
     if (sessionToken) {
       fetch('/api/v1/me', { headers: { Authorization: `Bearer ${sessionToken}` } })
-        .then(res => {
-          if (res.ok) setIsLoggedIn(true);
-          else {
+        .then(async res => {
+          if (res.ok) {
+            const me = await res.json();
+            setUserRole(me.role ?? 'user');
+            localStorage.setItem('userRole', me.role ?? 'user');
+            setIsLoggedIn(true);
+          } else {
             localStorage.removeItem('sessionToken');
+            localStorage.removeItem('userRole');
             setSessionToken('');
+            setUserRole('');
           }
         })
         .catch(() => {
           localStorage.removeItem('sessionToken');
+          localStorage.removeItem('userRole');
           setSessionToken('');
+          setUserRole('');
         });
     }
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
-    if (isLoggedIn) {
+    if (isLoggedIn && isAdmin) {
       fetchSessions();
       fetchUsers();
       fetchAgents();
       const interval = setInterval(fetchSessions, 3000);
       return () => clearInterval(interval);
     }
-  }, [isLoggedIn]);
+  }, [isLoggedIn, isAdmin]);
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -216,6 +226,8 @@ export default function App() {
         const data = await res.json();
         setSessionToken(data.token);
         localStorage.setItem('sessionToken', data.token);
+        setUserRole(data.role ?? 'user');
+        localStorage.setItem('userRole', data.role ?? 'user');
         setIsLoggedIn(true);
         setTotpEnrolled(data.totp_enrolled ?? false);
       } else {
@@ -230,7 +242,9 @@ export default function App() {
   const handleLogout = () => {
     fetch('/api/v1/logout', { method: 'POST', headers: authHeaders() }).catch(() => {});
     localStorage.removeItem('sessionToken');
+    localStorage.removeItem('userRole');
     setSessionToken('');
+    setUserRole('');
     setIsLoggedIn(false);
     setTotpEnrolled(false);
   };
@@ -603,17 +617,19 @@ export default function App() {
             </Card>
           </Container>
         ) : (
-          /* Main content with tabs */
+          /* Main content */
           <Container maxWidth="lg" sx={{ mt: 4 }}>
-            <Paper sx={{ mb: 3 }}>
-              <Tabs value={tabIndex} onChange={(_, v) => setTabIndex(v)}>
-                <Tab label="Sessions" />
-                <Tab label="Users" />
-                <Tab label="Agents" />
-              </Tabs>
-            </Paper>
+            {isAdmin ? (
+              <>
+                <Paper sx={{ mb: 3 }}>
+                  <Tabs value={tabIndex} onChange={(_, v) => setTabIndex(v)}>
+                    <Tab label="Sessions" />
+                    <Tab label="Users" />
+                    <Tab label="Agents" />
+                  </Tabs>
+                </Paper>
 
-            {tabIndex === 0 && (
+                {tabIndex === 0 && (
               <Box>
                 <PageHeader
                   title={`Live Tunnel Sessions (${sessions.length})`}
@@ -637,7 +653,7 @@ export default function App() {
               </Box>
             )}
 
-            {tabIndex === 1 && (
+                {tabIndex === 1 && (
               <Box>
                 <PageHeader
                   title={`Users (${users.length})`}
@@ -666,7 +682,7 @@ export default function App() {
               </Box>
             )}
 
-            {tabIndex === 2 && (
+                {tabIndex === 2 && (
               <Box>
                 <PageHeader
                   title={`Agent Configs (${agents.length})`}
@@ -693,6 +709,26 @@ export default function App() {
                   }
                 />
               </Box>
+                )}
+              </>
+            ) : (
+              <Card sx={{ maxWidth: 480, mx: 'auto', mt: 4 }}>
+                <CardContent sx={{ textAlign: 'center', py: 4 }}>
+                  <CheckCircleIcon sx={{ fontSize: 48, color: 'success.main', mb: 2 }} />
+                  <Typography variant="h5" gutterBottom>
+                    Welcome
+                  </Typography>
+                  <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
+                    You are signed in as <strong>{localStorage.getItem('userRole') || 'user'}</strong>.
+                    {totpEnrolled
+                      ? ' Two-factor authentication is enabled.'
+                      : ' Two-factor authentication is not set up — click the shield icon above to configure it.'}
+                  </Typography>
+                  <Button variant="outlined" startIcon={<SecurityIcon />} onClick={() => setOpenTOTPDialog(true)}>
+                    {totpEnrolled ? 'Manage 2FA' : 'Set Up 2FA'}
+                  </Button>
+                </CardContent>
+              </Card>
             )}
 
             {/* Create/Edit User Dialog */}
