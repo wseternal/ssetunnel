@@ -413,6 +413,116 @@ func (s *Store) RevokeUserSession(ctx context.Context, rawToken string) error {
 	return err
 }
 
+// --- TOTP & Recovery Codes ---
+
+// UserTOTPEnrolled reports whether the named user has a non-empty TOTP secret.
+// Returns false if the user does not exist.
+func (s *Store) UserTOTPEnrolled(ctx context.Context, username string) (bool, error) {
+	var enrolled bool
+	err := s.pool.QueryRow(ctx,
+		`SELECT totp_secret != '' FROM users WHERE username = $1`, username,
+	).Scan(&enrolled)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, nil
+		}
+		return false, fmt.Errorf("user totp enrolled: %w", err)
+	}
+	return enrolled, nil
+}
+
+// GetUserByID returns the UserInfo for a given user ID.
+func (s *Store) GetUserByID(ctx context.Context, id int64) (*UserInfo, error) {
+	query := `SELECT id, username, role, perm_connect, perm_agent, totp_secret, created_at, disabled_at FROM users WHERE id = $1`
+	var u UserInfo
+	err := s.pool.QueryRow(ctx, query, id).Scan(
+		&u.ID, &u.Username, &u.Role, &u.PermConnect, &u.PermAgent, &u.TOTPSecret, &u.CreatedAt, &u.DisabledAt,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrUserNotFound
+		}
+		return nil, fmt.Errorf("get user by id: %w", err)
+	}
+	return &u, nil
+}
+
+// SetTOTPSecret updates the TOTP secret for a user. Pass "" to clear TOTP enrollment.
+func (s *Store) SetTOTPSecret(ctx context.Context, userID int64, secret string) error {
+	tag, err := s.pool.Exec(ctx, `UPDATE users SET totp_secret = $1 WHERE id = $2`, secret, userID)
+	if err != nil {
+		return fmt.Errorf("set totp secret: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrUserNotFound
+	}
+	return nil
+}
+
+// SaveRecoveryCodes replaces all unused recovery codes for a user with new ones.
+// The digests slice should contain SHA-256 hex digests of the plaintext codes.
+func (s *Store) SaveRecoveryCodes(ctx context.Context, userID int64, digests []string) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+
+	// Delete existing unused codes.
+	if _, err := tx.Exec(ctx, `DELETE FROM recovery_codes WHERE user_id = $1 AND used_at IS NULL`, userID); err != nil {
+		return fmt.Errorf("delete old recovery codes: %w", err)
+	}
+
+	// Insert new codes.
+	for _, d := range digests {
+		if _, err := tx.Exec(ctx, `INSERT INTO recovery_codes (user_id, code_digest) VALUES ($1, $2)`, userID, d); err != nil {
+			return fmt.Errorf("insert recovery code: %w", err)
+		}
+	}
+
+	return tx.Commit(ctx)
+}
+
+// ConsumeRecoveryCode atomically marks a recovery code as used for the given user.
+// Returns true if a matching unused code was found and consumed.
+func (s *Store) ConsumeRecoveryCode(ctx context.Context, userID int64, plaintextCode string) (bool, error) {
+	digest := ComputeDigest(plaintextCode)
+	var id int64
+	err := s.pool.QueryRow(ctx,
+		`UPDATE recovery_codes SET used_at = CURRENT_TIMESTAMP
+		 WHERE user_id = $1 AND code_digest = $2 AND used_at IS NULL
+		 RETURNING id`, userID, digest,
+	).Scan(&id)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, nil
+		}
+		return false, fmt.Errorf("consume recovery code: %w", err)
+	}
+	return true, nil
+}
+
+// CountUnusedRecoveryCodes returns the number of unused recovery codes for a user.
+func (s *Store) CountUnusedRecoveryCodes(ctx context.Context, userID int64) (int, error) {
+	var count int
+	err := s.pool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM recovery_codes WHERE user_id = $1 AND used_at IS NULL`, userID,
+	).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("count recovery codes: %w", err)
+	}
+	return count, nil
+}
+
+// DeleteRecoveryCodes removes all recovery codes (used and unused) for a user.
+func (s *Store) DeleteRecoveryCodes(ctx context.Context, userID int64) error {
+	_, err := s.pool.Exec(ctx, `DELETE FROM recovery_codes WHERE user_id = $1`, userID)
+	if err != nil {
+		return fmt.Errorf("delete recovery codes: %w", err)
+	}
+	return nil
+}
+
 // isUniqueViolation checks if an error is a PostgreSQL unique constraint violation.
 func isUniqueViolation(err error) bool {
 	var pgErr *pgconn.PgError

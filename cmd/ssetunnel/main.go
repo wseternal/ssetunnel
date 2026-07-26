@@ -82,11 +82,15 @@ func runServer(ctx context.Context, args []string) error {
 	consoleListen := fs.String("console-listen", ":8081", "HTTP listen address for admin console SPA")
 	heartbeat := fs.Duration("heartbeat", 15*time.Second, "SSE heartbeat interval")
 	dbURL := fs.String("db-url", os.Getenv("DATABASE_URL"), "PostgreSQL DB connection URL (default uses testcontainer if empty)")
-	totpSecret := fs.String("totp-secret", os.Getenv("SSETUNNEL_TOTP_SECRET"), "Admin TOTP secret for console authentication")
 	disableAuth := fs.Bool("disable-auth", false, "Disable authentication enforcement")
 
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+
+	// Deprecation warning for removed global TOTP secret.
+	if os.Getenv("SSETUNNEL_TOTP_SECRET") != "" {
+		log.Println("server: WARNING: SSETUNNEL_TOTP_SECRET is deprecated; per-user TOTP is now used. Set up TOTP via the console.")
 	}
 
 	srv := server.NewServer(*heartbeat)
@@ -157,7 +161,7 @@ func runServer(ctx context.Context, args []string) error {
 	}()
 
 	if consoleLn != nil {
-		consoleHandler := consoleserver.NewConsoleHandler(ctx, pool, store, srv.Reg, *totpSecret)
+		consoleHandler := consoleserver.NewConsoleHandler(ctx, pool, store, srv.Reg)
 		consoleSrv := &http.Server{
 			Handler:      consoleHandler,
 			ReadTimeout:  15 * time.Second,
@@ -349,9 +353,26 @@ func runLogin(_ context.Context, args []string) error {
 		return errors.New("password is required")
 	}
 
-	fmt.Print("TOTP Code (press Enter to skip): ")
-	totpCode, _ := reader.ReadString('\n')
-	totpCode = strings.TrimSpace(totpCode)
+	// Check if TOTP is required for this user.
+	var totpCode string
+	checkBody, _ := json.Marshal(map[string]string{"username": username})
+	checkResp, err := http.Post(*consoleURL+"/api/v1/user-login-check", "application/json", strings.NewReader(string(checkBody)))
+	if err == nil {
+		defer checkResp.Body.Close()
+		var check struct {
+			TOTPRequired bool `json:"totp_required"`
+		}
+		if json.NewDecoder(checkResp.Body).Decode(&check) == nil && check.TOTPRequired {
+			fmt.Print("TOTP or Recovery Code: ")
+			totpCode, _ = reader.ReadString('\n')
+			totpCode = strings.TrimSpace(totpCode)
+		}
+	} else {
+		// If check endpoint is unavailable, still allow login attempt.
+		fmt.Print("TOTP or Recovery Code (press Enter to skip): ")
+		totpCode, _ = reader.ReadString('\n')
+		totpCode = strings.TrimSpace(totpCode)
+	}
 
 	// Build request
 	reqBody, _ := json.Marshal(map[string]string{

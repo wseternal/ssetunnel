@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -30,7 +31,7 @@ func TestConsoleAPI(t *testing.T) {
 	store := auth.NewStore(pool)
 	reg := server.NewRegistry()
 
-	router := consoleapi.NewRouter(store, reg, "")
+	router := consoleapi.NewRouter(store, reg)
 
 	// Bootstrap an admin user directly in the store.
 	pwHash, err := auth.HashPassword("testpass123")
@@ -122,7 +123,7 @@ func TestConsoleAPI_LogoutClearsSession(t *testing.T) {
 	store := auth.NewStore(pool)
 	reg := server.NewRegistry()
 
-	router := consoleapi.NewRouter(store, reg, "")
+	router := consoleapi.NewRouter(store, reg)
 
 	// POST /api/v1/logout -> 200 + expired cookie
 	req := httptest.NewRequest("POST", "/api/v1/logout", nil)
@@ -131,5 +132,274 @@ func TestConsoleAPI_LogoutClearsSession(t *testing.T) {
 
 	if rec.Code != http.StatusOK {
 		t.Errorf("expected 200 on logout, got %d", rec.Code)
+	}
+}
+
+// helper: set up pool, store, router, and a test user with a session.
+// Uses t.Name() to create a unique username per test to avoid collisions
+// when tests share a testcontainer database.
+func setupTestEnv(t *testing.T) (http.Handler, *auth.Store, *auth.UserInfo, string) {
+	t.Helper()
+	ctx := context.Background()
+	dbcfg := orcapostgres.DBConfig{DatabaseURLTemplate: "postgres:tc:"}
+	pool, err := orcapostgres.OpenPool(ctx, dbcfg, orcapostgres.NewMigrator(migrations.FS, nil))
+	if err != nil {
+		t.Fatalf("failed to open pool: %v", err)
+	}
+	store := auth.NewStore(pool)
+	reg := server.NewRegistry()
+	router := consoleapi.NewRouter(store, reg)
+
+	// Derive a unique username from the test name (sanitized for DB).
+	uname := sanitizeUsername(t.Name())
+	pwHash, _ := auth.HashPassword("testpass123")
+	user, err := store.CreateUser(ctx, uname, pwHash, "admin", true, true)
+	if err != nil {
+		t.Fatalf("CreateUser failed: %v", err)
+	}
+
+	token, _ := auth.GenerateToken()
+	_ = store.CreateUserSession(ctx, user.ID, token, 24*time.Hour)
+
+	return router, store, user, token
+}
+
+// sanitizeUsername converts a test name into a valid PostgreSQL username (<=63 chars, lowercase alnum + underscore).
+func sanitizeUsername(name string) string {
+	var b strings.Builder
+	for _, r := range strings.ToLower(name) {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_' {
+			b.WriteRune(r)
+		} else {
+			b.WriteRune('_')
+		}
+	}
+	s := b.String()
+	if len(s) > 60 {
+		s = s[:60]
+	}
+	return s
+}
+
+func TestLoginCheck(t *testing.T) {
+	router, store, user, _ := setupTestEnv(t)
+	ctx := context.Background()
+	uname := sanitizeUsername(t.Name())
+
+	// User without TOTP enrolled.
+	body, _ := json.Marshal(map[string]string{"username": uname})
+	req := httptest.NewRequest("POST", "/api/v1/user-login-check", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	var resp map[string]bool
+	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+	if resp["totp_required"] {
+		t.Error("expected totp_required=false for user without TOTP")
+	}
+
+	// Set TOTP secret and check again.
+	_ = store.SetTOTPSecret(ctx, user.ID, "JBSWY3DPEHPK3PXP")
+	req = httptest.NewRequest("POST", "/api/v1/user-login-check", bytes.NewReader(body))
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+	if !resp["totp_required"] {
+		t.Error("expected totp_required=true for user with TOTP")
+	}
+
+	// Non-existent user should return false.
+	body2, _ := json.Marshal(map[string]string{"username": "nonexistent"})
+	req = httptest.NewRequest("POST", "/api/v1/user-login-check", bytes.NewReader(body2))
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+	if resp["totp_required"] {
+		t.Error("expected totp_required=false for non-existent user")
+	}
+}
+
+func TestLogin_NoTOTP(t *testing.T) {
+	router, _, _, _ := setupTestEnv(t)
+	uname := sanitizeUsername(t.Name())
+
+	// User without TOTP should login without TOTP code.
+	body, _ := json.Marshal(map[string]string{"username": uname, "password": "testpass123"})
+	req := httptest.NewRequest("POST", "/api/v1/user-login", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]interface{}
+	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+	if resp["totp_enrolled"] != false {
+		t.Error("expected totp_enrolled=false")
+	}
+}
+
+func TestLogin_PerUserTOTP(t *testing.T) {
+	router, store, user, _ := setupTestEnv(t)
+	ctx := context.Background()
+	uname := sanitizeUsername(t.Name())
+
+	secret := "JBSWY3DPEHPK3PXP"
+	_ = store.SetTOTPSecret(ctx, user.ID, secret)
+
+	// Login without TOTP code should fail.
+	body, _ := json.Marshal(map[string]string{"username": uname, "password": "testpass123"})
+	req := httptest.NewRequest("POST", "/api/v1/user-login", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 without TOTP code, got %d", rec.Code)
+	}
+
+	// Login with valid TOTP code should succeed.
+	code, _ := auth.GenerateTOTPCode(secret)
+	body, _ = json.Marshal(map[string]string{"username": uname, "password": "testpass123", "totp_code": code})
+	req = httptest.NewRequest("POST", "/api/v1/user-login", bytes.NewReader(body))
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 with valid TOTP, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]interface{}
+	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+	if resp["totp_enrolled"] != true {
+		t.Error("expected totp_enrolled=true")
+	}
+
+	// Login with invalid TOTP code should fail.
+	body, _ = json.Marshal(map[string]string{"username": uname, "password": "testpass123", "totp_code": "000000"})
+	req = httptest.NewRequest("POST", "/api/v1/user-login", bytes.NewReader(body))
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 with bad TOTP, got %d", rec.Code)
+	}
+}
+
+func TestLogin_RecoveryCode(t *testing.T) {
+	router, store, user, _ := setupTestEnv(t)
+	ctx := context.Background()
+	uname := sanitizeUsername(t.Name())
+
+	// Set up TOTP + recovery codes.
+	secret := "JBSWY3DPEHPK3PXP"
+	_ = store.SetTOTPSecret(ctx, user.ID, secret)
+
+	codes, _ := auth.GenerateRecoveryCodes(3)
+	digests := make([]string, len(codes))
+	for i, c := range codes {
+		digests[i] = auth.ComputeDigest(c)
+	}
+	_ = store.SaveRecoveryCodes(ctx, user.ID, digests)
+
+	// Login with recovery code (wrong TOTP but valid recovery).
+	body, _ := json.Marshal(map[string]string{
+		"username": uname, "password": "testpass123", "totp_code": codes[0],
+	})
+	req := httptest.NewRequest("POST", "/api/v1/user-login", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 with recovery code, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Same recovery code should not work again (single-use).
+	body, _ = json.Marshal(map[string]string{
+		"username": uname, "password": "testpass123", "totp_code": codes[0],
+	})
+	req = httptest.NewRequest("POST", "/api/v1/user-login", bytes.NewReader(body))
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 for reused recovery code, got %d", rec.Code)
+	}
+
+	// Second recovery code should still work.
+	body, _ = json.Marshal(map[string]string{
+		"username": uname, "password": "testpass123", "totp_code": codes[1],
+	})
+	req = httptest.NewRequest("POST", "/api/v1/user-login", bytes.NewReader(body))
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 with second recovery code, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestTOTPSetupFlow(t *testing.T) {
+	router, _, _, token := setupTestEnv(t)
+
+	// 1. Check status — not enrolled.
+	req := httptest.NewRequest("GET", "/api/v1/totp/status", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 on status, got %d", rec.Code)
+	}
+	var statusResp map[string]interface{}
+	_ = json.Unmarshal(rec.Body.Bytes(), &statusResp)
+	if statusResp["enrolled"] != false {
+		t.Error("expected enrolled=false initially")
+	}
+
+	// 2. Begin setup — get secret + key_url.
+	req = httptest.NewRequest("POST", "/api/v1/totp/begin-setup", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 on begin-setup, got %d", rec.Code)
+	}
+	var setupResp map[string]string
+	_ = json.Unmarshal(rec.Body.Bytes(), &setupResp)
+	secret := setupResp["secret"]
+	if secret == "" {
+		t.Fatal("expected non-empty secret")
+	}
+
+	// 3. Verify setup with valid code.
+	code, _ := auth.GenerateTOTPCode(secret)
+	body, _ := json.Marshal(map[string]string{"secret": secret, "code": code})
+	req = httptest.NewRequest("POST", "/api/v1/totp/verify-setup", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 on verify-setup, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var verifyResp map[string]interface{}
+	_ = json.Unmarshal(rec.Body.Bytes(), &verifyResp)
+	rc, ok := verifyResp["recovery_codes"].([]interface{})
+	if !ok || len(rc) == 0 {
+		t.Fatal("expected recovery_codes in response")
+	}
+
+	// 4. Check status — now enrolled.
+	req = httptest.NewRequest("GET", "/api/v1/totp/status", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	_ = json.Unmarshal(rec.Body.Bytes(), &statusResp)
+	if statusResp["enrolled"] != true {
+		t.Error("expected enrolled=true after setup")
+	}
+
+	// 5. Verify setup with bad code should fail.
+	body, _ = json.Marshal(map[string]string{"secret": secret, "code": "000000"})
+	req = httptest.NewRequest("POST", "/api/v1/totp/verify-setup", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 on bad verify code, got %d", rec.Code)
 	}
 }

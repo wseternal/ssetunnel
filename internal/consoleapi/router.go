@@ -20,23 +20,28 @@ const minPasswordLength = 8
 var validRoles = map[string]bool{"admin": true, "user": true}
 
 type API struct {
-	store      *auth.Store
-	reg        *server.Registry
-	totpSecret string
+	store *auth.Store
+	reg   *server.Registry
 
-	// Login rate limiting: track failed attempts per IP.
-	rateMu    sync.Mutex
-	rateCount map[string]int
-	rateReset map[string]time.Time
+	// Login rate limiting: password failures per IP.
+	pwRateMu    sync.Mutex
+	pwRateCount map[string]int
+	pwRateReset map[string]time.Time
+
+	// TOTP rate limiting: TOTP failures per IP:username.
+	totpRateMu    sync.Mutex
+	totpRateCount map[string]int
+	totpRateReset map[string]time.Time
 }
 
-func NewRouter(store *auth.Store, reg *server.Registry, totpSecret string) http.Handler {
+func NewRouter(store *auth.Store, reg *server.Registry) http.Handler {
 	api := &API{
-		store:      store,
-		reg:        reg,
-		totpSecret: totpSecret,
-		rateCount:  make(map[string]int),
-		rateReset:  make(map[string]time.Time),
+		store:         store,
+		reg:           reg,
+		pwRateCount:   make(map[string]int),
+		pwRateReset:   make(map[string]time.Time),
+		totpRateCount: make(map[string]int),
+		totpRateReset: make(map[string]time.Time),
 	}
 
 	r := mux.NewRouter()
@@ -46,6 +51,7 @@ func NewRouter(store *auth.Store, reg *server.Registry, totpSecret string) http.
 
 	// Public auth routes
 	r.HandleFunc("/api/v1/user-login", api.handleUserLogin).Methods("POST")
+	r.HandleFunc("/api/v1/user-login-check", api.handleUserLoginCheck).Methods("POST")
 	r.HandleFunc("/api/v1/logout", api.handleLogout).Methods("POST")
 
 	// Protected admin routes
@@ -64,6 +70,12 @@ func NewRouter(store *auth.Store, reg *server.Registry, totpSecret string) http.
 	// User session routes (authenticated user)
 	userAuth := server.UserSessionMiddleware(store)
 	r.Handle("/api/v1/me", userAuth(http.HandlerFunc(api.handleMe))).Methods("GET")
+
+	// TOTP management routes (authenticated user)
+	r.Handle("/api/v1/totp/status", userAuth(http.HandlerFunc(api.handleTOTPStatus))).Methods("GET")
+	r.Handle("/api/v1/totp/begin-setup", userAuth(http.HandlerFunc(api.handleTOTPBeginSetup))).Methods("POST")
+	r.Handle("/api/v1/totp/verify-setup", userAuth(http.HandlerFunc(api.handleTOTPVerifySetup))).Methods("POST")
+	r.Handle("/api/v1/totp", userAuth(http.HandlerFunc(api.handleTOTPDelete))).Methods("DELETE")
 
 	return r
 }
@@ -154,9 +166,9 @@ func (a *API) handleUserLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Rate limiting: max 10 failed attempts per IP per 5-minute window.
+	// Rate limiting: password failures per IP.
 	clientIP := r.RemoteAddr
-	if a.checkRateLimit(clientIP) {
+	if a.checkPWRateLimit(clientIP) {
 		http.Error(w, "too many failed login attempts, try again later", http.StatusTooManyRequests)
 		return
 	}
@@ -166,10 +178,10 @@ func (a *API) handleUserLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validate password first (before TOTP) to avoid leaking TOTP validity.
+	// Validate password.
 	user, err := a.store.ValidatePassword(r.Context(), req.Username, req.Password)
 	if err != nil {
-		a.recordFailedLogin(clientIP)
+		a.recordPWFailure(clientIP)
 		http.Error(w, "invalid credentials", http.StatusUnauthorized)
 		return
 	}
@@ -179,17 +191,30 @@ func (a *API) handleUserLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Verify TOTP after successful password validation.
-	if a.totpSecret != "" {
-		if !auth.VerifyTOTP(a.totpSecret, req.TOTPCode) {
-			a.recordFailedLogin(clientIP)
-			http.Error(w, "invalid TOTP code", http.StatusUnauthorized)
+	// Per-user TOTP verification with recovery code fallback.
+	totpEnrolled := user.TOTPSecret != ""
+	if totpEnrolled {
+		totpKey := clientIP + ":" + req.Username
+		if a.checkTOTPRateLimit(totpKey) {
+			http.Error(w, "too many failed TOTP attempts, try again later", http.StatusTooManyRequests)
 			return
 		}
+
+		if !auth.VerifyTOTP(user.TOTPSecret, req.TOTPCode) {
+			// Try recovery code fallback.
+			ok, err := a.store.ConsumeRecoveryCode(r.Context(), user.ID, req.TOTPCode)
+			if err != nil || !ok {
+				a.recordTOTPFailure(totpKey)
+				http.Error(w, "invalid TOTP or recovery code", http.StatusUnauthorized)
+				return
+			}
+		}
+		// Successful TOTP resets the TOTP rate limit.
+		a.resetTOTPRateLimit(totpKey)
 	}
 
-	// Successful login resets the rate limit for this IP.
-	a.resetRateLimit(clientIP)
+	// Successful login resets the password rate limit for this IP.
+	a.resetPWRateLimit(clientIP)
 
 	// Create user session (30 days)
 	sessionToken, err := auth.GenerateToken()
@@ -205,41 +230,90 @@ func (a *API) handleUserLogin(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]interface{}{
-		"status":   "ok",
-		"token":    sessionToken,
-		"user_id":  user.ID,
-		"username": user.Username,
-		"role":     user.Role,
+		"status":        "ok",
+		"token":         sessionToken,
+		"user_id":       user.ID,
+		"username":      user.Username,
+		"role":          user.Role,
+		"totp_enrolled": totpEnrolled,
 	})
 }
 
-// checkRateLimit returns true if the client IP has exceeded the login attempt limit.
-func (a *API) checkRateLimit(ip string) bool {
-	a.rateMu.Lock()
-	defer a.rateMu.Unlock()
-	if reset, ok := a.rateReset[ip]; ok && time.Now().After(reset) {
-		delete(a.rateCount, ip)
-		delete(a.rateReset, ip)
+// handleUserLoginCheck returns whether a user has TOTP enrolled (pre-login check).
+func (a *API) handleUserLoginCheck(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Username string `json:"username"`
 	}
-	return a.rateCount[ip] >= 10
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request JSON", http.StatusBadRequest)
+		return
+	}
+
+	if a.store == nil {
+		http.Error(w, "auth not configured", http.StatusServiceUnavailable)
+		return
+	}
+
+	enrolled, _ := a.store.UserTOTPEnrolled(r.Context(), req.Username)
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]bool{"totp_required": enrolled})
 }
 
-// recordFailedLogin increments the failed login counter for an IP.
-func (a *API) recordFailedLogin(ip string) {
-	a.rateMu.Lock()
-	defer a.rateMu.Unlock()
-	if _, ok := a.rateReset[ip]; !ok {
-		a.rateReset[ip] = time.Now().Add(5 * time.Minute)
+// --- Password rate limiting (per IP) ---
+
+func (a *API) checkPWRateLimit(ip string) bool {
+	a.pwRateMu.Lock()
+	defer a.pwRateMu.Unlock()
+	if reset, ok := a.pwRateReset[ip]; ok && time.Now().After(reset) {
+		delete(a.pwRateCount, ip)
+		delete(a.pwRateReset, ip)
 	}
-	a.rateCount[ip]++
+	return a.pwRateCount[ip] >= 10
 }
 
-// resetRateLimit clears the rate limit for an IP on successful login.
-func (a *API) resetRateLimit(ip string) {
-	a.rateMu.Lock()
-	defer a.rateMu.Unlock()
-	delete(a.rateCount, ip)
-	delete(a.rateReset, ip)
+func (a *API) recordPWFailure(ip string) {
+	a.pwRateMu.Lock()
+	defer a.pwRateMu.Unlock()
+	if _, ok := a.pwRateReset[ip]; !ok {
+		a.pwRateReset[ip] = time.Now().Add(5 * time.Minute)
+	}
+	a.pwRateCount[ip]++
+}
+
+func (a *API) resetPWRateLimit(ip string) {
+	a.pwRateMu.Lock()
+	defer a.pwRateMu.Unlock()
+	delete(a.pwRateCount, ip)
+	delete(a.pwRateReset, ip)
+}
+
+// --- TOTP rate limiting (per IP:username) ---
+
+func (a *API) checkTOTPRateLimit(key string) bool {
+	a.totpRateMu.Lock()
+	defer a.totpRateMu.Unlock()
+	if reset, ok := a.totpRateReset[key]; ok && time.Now().After(reset) {
+		delete(a.totpRateCount, key)
+		delete(a.totpRateReset, key)
+	}
+	return a.totpRateCount[key] >= 5
+}
+
+func (a *API) recordTOTPFailure(key string) {
+	a.totpRateMu.Lock()
+	defer a.totpRateMu.Unlock()
+	if _, ok := a.totpRateReset[key]; !ok {
+		a.totpRateReset[key] = time.Now().Add(5 * time.Minute)
+	}
+	a.totpRateCount[key]++
+}
+
+func (a *API) resetTOTPRateLimit(key string) {
+	a.totpRateMu.Lock()
+	defer a.totpRateMu.Unlock()
+	delete(a.totpRateCount, key)
+	delete(a.totpRateReset, key)
 }
 
 func (a *API) handleUsers(w http.ResponseWriter, r *http.Request) {
@@ -522,4 +596,152 @@ func (a *API) handleMe(w http.ResponseWriter, r *http.Request) {
 		"role":       sessInfo.Role,
 		"expires_at": sessInfo.ExpiresAt,
 	})
+}
+
+// --- TOTP Enrollment Endpoints ---
+
+func (a *API) handleTOTPStatus(w http.ResponseWriter, r *http.Request) {
+	sessInfo := server.UserSessionFromContext(r)
+	if sessInfo == nil {
+		http.Error(w, "not authenticated", http.StatusUnauthorized)
+		return
+	}
+
+	user, err := a.store.GetUserByID(r.Context(), sessInfo.UserID)
+	if err != nil {
+		http.Error(w, "user not found", http.StatusNotFound)
+		return
+	}
+
+	enrolled := user.TOTPSecret != ""
+	remaining := 0
+	if enrolled {
+		remaining, _ = a.store.CountUnusedRecoveryCodes(r.Context(), user.ID)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"enrolled":               enrolled,
+		"recovery_codes_remaining": remaining,
+	})
+}
+
+func (a *API) handleTOTPBeginSetup(w http.ResponseWriter, r *http.Request) {
+	sessInfo := server.UserSessionFromContext(r)
+	if sessInfo == nil {
+		http.Error(w, "not authenticated", http.StatusUnauthorized)
+		return
+	}
+
+	user, err := a.store.GetUserByID(r.Context(), sessInfo.UserID)
+	if err != nil {
+		http.Error(w, "user not found", http.StatusNotFound)
+		return
+	}
+
+	secret, keyURL, err := auth.GenerateTOTPSecret("ssetunnel", user.Username)
+	if err != nil {
+		http.Error(w, "failed to generate TOTP secret", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{
+		"secret":  secret,
+		"key_url": keyURL,
+	})
+}
+
+func (a *API) handleTOTPVerifySetup(w http.ResponseWriter, r *http.Request) {
+	sessInfo := server.UserSessionFromContext(r)
+	if sessInfo == nil {
+		http.Error(w, "not authenticated", http.StatusUnauthorized)
+		return
+	}
+
+	var req struct {
+		Secret string `json:"secret"`
+		Code   string `json:"code"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request JSON", http.StatusBadRequest)
+		return
+	}
+	if req.Secret == "" || req.Code == "" {
+		http.Error(w, "secret and code are required", http.StatusBadRequest)
+		return
+	}
+
+	if !auth.VerifyTOTP(req.Secret, req.Code) {
+		http.Error(w, "invalid TOTP code", http.StatusBadRequest)
+		return
+	}
+
+	// Persist the TOTP secret.
+	if err := a.store.SetTOTPSecret(r.Context(), sessInfo.UserID, req.Secret); err != nil {
+		http.Error(w, "failed to save TOTP secret", http.StatusInternalServerError)
+		return
+	}
+
+	// Generate and store recovery codes.
+	const recoveryCodeCount = 8
+	codes, err := auth.GenerateRecoveryCodes(recoveryCodeCount)
+	if err != nil {
+		http.Error(w, "failed to generate recovery codes", http.StatusInternalServerError)
+		return
+	}
+
+	digests := make([]string, len(codes))
+	for i, c := range codes {
+		digests[i] = auth.ComputeDigest(c)
+	}
+	if err := a.store.SaveRecoveryCodes(r.Context(), sessInfo.UserID, digests); err != nil {
+		http.Error(w, "failed to save recovery codes", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"recovery_codes": codes,
+	})
+}
+
+func (a *API) handleTOTPDelete(w http.ResponseWriter, r *http.Request) {
+	sessInfo := server.UserSessionFromContext(r)
+	if sessInfo == nil {
+		http.Error(w, "not authenticated", http.StatusUnauthorized)
+		return
+	}
+
+	var req struct {
+		Password string `json:"password"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request JSON", http.StatusBadRequest)
+		return
+	}
+
+	// Require password confirmation to disable TOTP.
+	user, err := a.store.GetUserByID(r.Context(), sessInfo.UserID)
+	if err != nil {
+		http.Error(w, "user not found", http.StatusNotFound)
+		return
+	}
+	if _, err := a.store.ValidatePassword(r.Context(), user.Username, req.Password); err != nil {
+		http.Error(w, "invalid password", http.StatusForbidden)
+		return
+	}
+
+	// Clear TOTP secret and recovery codes.
+	if err := a.store.SetTOTPSecret(r.Context(), sessInfo.UserID, ""); err != nil {
+		http.Error(w, "failed to clear TOTP secret", http.StatusInternalServerError)
+		return
+	}
+	if err := a.store.DeleteRecoveryCodes(r.Context(), sessInfo.UserID); err != nil {
+		http.Error(w, "failed to clear recovery codes", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{"status": "disabled"})
 }
