@@ -393,14 +393,14 @@ func TestTOTPSetupFlow(t *testing.T) {
 		t.Error("expected enrolled=true after setup")
 	}
 
-	// 5. Verify setup with bad code should fail.
+	// 5. Verify setup after enrollment should fail (409 Conflict — must DELETE first).
 	body, _ = json.Marshal(map[string]string{"secret": secret, "code": "000000"})
 	req = httptest.NewRequest("POST", "/api/v1/totp/verify-setup", bytes.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+token)
 	rec = httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
-	if rec.Code != http.StatusBadRequest {
-		t.Errorf("expected 400 on bad verify code, got %d", rec.Code)
+	if rec.Code != http.StatusConflict {
+		t.Errorf("expected 409 on verify-setup while enrolled, got %d", rec.Code)
 	}
 
 	// 6. Begin setup again while enrolled should fail (409 Conflict).

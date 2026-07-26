@@ -33,6 +33,9 @@ type API struct {
 	totpRateMu    sync.Mutex
 	totpRateCount map[string]int
 	totpRateReset map[string]time.Time
+
+	// stopCleanup signals the rate limiter cleanup goroutine to exit.
+	stopCleanup chan struct{}
 }
 
 func NewRouter(store *auth.Store, reg *server.Registry) http.Handler {
@@ -43,6 +46,7 @@ func NewRouter(store *auth.Store, reg *server.Registry) http.Handler {
 		pwRateReset:   make(map[string]time.Time),
 		totpRateCount: make(map[string]int),
 		totpRateReset: make(map[string]time.Time),
+		stopCleanup:   make(chan struct{}),
 	}
 
 	// Periodic cleanup of expired rate limit entries to prevent unbounded memory growth.
@@ -332,10 +336,16 @@ func (a *API) resetTOTPRateLimit(key string) {
 }
 
 // rateLimiterCleanup periodically purges expired rate limit entries to prevent memory leaks.
+// Exits when stopCleanup channel is closed.
 func (a *API) rateLimiterCleanup() {
 	ticker := time.NewTicker(10 * time.Minute)
 	defer ticker.Stop()
-	for range ticker.C {
+	for {
+		select {
+		case <-a.stopCleanup:
+			return
+		case <-ticker.C:
+		}
 		now := time.Now()
 
 		a.pwRateMu.Lock()
@@ -707,6 +717,17 @@ func (a *API) handleTOTPVerifySetup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Reject if user is already enrolled (must DELETE first to re-enroll).
+	user, err := a.store.GetUserByID(r.Context(), sessInfo.UserID)
+	if err != nil {
+		http.Error(w, "user not found", http.StatusNotFound)
+		return
+	}
+	if user.TOTPSecret != "" {
+		http.Error(w, "TOTP is already enrolled; use DELETE /api/v1/totp first to re-enroll", http.StatusConflict)
+		return
+	}
+
 	var req struct {
 		Secret string `json:"secret"`
 		Code   string `json:"code"`
@@ -777,13 +798,9 @@ func (a *API) handleTOTPDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Clear TOTP secret and recovery codes.
-	if err := a.store.SetTOTPSecret(r.Context(), sessInfo.UserID, ""); err != nil {
-		http.Error(w, "failed to clear TOTP secret", http.StatusInternalServerError)
-		return
-	}
-	if err := a.store.DeleteRecoveryCodes(r.Context(), sessInfo.UserID); err != nil {
-		http.Error(w, "failed to clear recovery codes", http.StatusInternalServerError)
+	// Atomically clear TOTP secret and recovery codes in a single transaction.
+	if err := a.store.ClearTOTPAndRecoveryCodes(r.Context(), sessInfo.UserID); err != nil {
+		http.Error(w, "failed to clear TOTP", http.StatusInternalServerError)
 		return
 	}
 

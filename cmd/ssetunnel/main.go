@@ -372,13 +372,20 @@ func runLogin(_ context.Context, args []string) error {
 	var totpCode string
 	checkBody, _ := json.Marshal(map[string]string{"username": username})
 	checkResp, err := http.Post(*consoleURL+"/api/v1/user-login-check", "application/json", strings.NewReader(string(checkBody)))
-	if err == nil && checkResp.StatusCode == http.StatusOK {
+	if err == nil {
 		defer checkResp.Body.Close()
-		var check struct {
-			TOTPRequired bool `json:"totp_required"`
-		}
-		if json.NewDecoder(checkResp.Body).Decode(&check) == nil && check.TOTPRequired {
-			fmt.Print("TOTP or Recovery Code: ")
+		if checkResp.StatusCode == http.StatusOK {
+			var check struct {
+				TOTPRequired bool `json:"totp_required"`
+			}
+			if json.NewDecoder(checkResp.Body).Decode(&check) == nil && check.TOTPRequired {
+				fmt.Print("TOTP or Recovery Code: ")
+				totpCode, _ = reader.ReadString('\n')
+				totpCode = strings.TrimSpace(totpCode)
+			}
+		} else {
+			// Non-200 status: still allow login attempt.
+			fmt.Print("TOTP or Recovery Code (press Enter to skip): ")
 			totpCode, _ = reader.ReadString('\n')
 			totpCode = strings.TrimSpace(totpCode)
 		}

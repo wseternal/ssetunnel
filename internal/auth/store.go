@@ -586,6 +586,29 @@ func (s *Store) AnyTOTPEnrolled(ctx context.Context) (bool, error) {
 	return exists, nil
 }
 
+// ClearTOTPAndRecoveryCodes atomically clears a user's TOTP secret and recovery codes
+// in a single transaction, preventing orphaned recovery codes on partial failure.
+func (s *Store) ClearTOTPAndRecoveryCodes(ctx context.Context, userID int64) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+
+	if _, err := tx.Exec(ctx, `DELETE FROM recovery_codes WHERE user_id = $1 AND used_at IS NULL`, userID); err != nil {
+		return fmt.Errorf("delete recovery codes: %w", err)
+	}
+	tag, err := tx.Exec(ctx, `UPDATE users SET totp_secret = '' WHERE id = $1`, userID)
+	if err != nil {
+		return fmt.Errorf("clear totp secret: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrUserNotFound
+	}
+
+	return tx.Commit(ctx)
+}
+
 // isUniqueViolation checks if an error is a PostgreSQL unique constraint violation.
 func isUniqueViolation(err error) bool {
 	var pgErr *pgconn.PgError
