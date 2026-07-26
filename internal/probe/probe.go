@@ -162,7 +162,10 @@ func timedPost(ctx context.Context, client *http.Client, baseURL string, size in
 	if err != nil {
 		return Measurement{}, fmt.Errorf("probe POST %d bytes: %w", size, err)
 	}
-	io.Copy(io.Discard, resp.Body) // always drain
+	if _, err := io.Copy(io.Discard, resp.Body); err != nil {
+		resp.Body.Close()
+		return Measurement{}, fmt.Errorf("drain probe response: %w", err)
+	}
 	resp.Body.Close()
 	return Measurement{Bytes: size, Status: resp.StatusCode, RTT: time.Since(start)}, nil
 }

@@ -100,28 +100,29 @@ func startModeTarget(t *testing.T) (net.Listener, *atomic.Int64) {
 					io.Copy(c, c)
 					return
 				}
-					if mode[0] == 'U' {
-						// Flood target→entry (upstream): fill N MiB then close.
-						// Caller sends a 4-byte MiB count header.
-						sz := make([]byte, 4)
-						io.ReadFull(c, sz)
-						total := int64(uint32(sz[0])|uint32(sz[1])<<8|uint32(sz[2])<<16|uint32(sz[3])<<24) << 20
-						chunk := bytes.Repeat([]byte{'u'}, 64<<10)
-						for total > 0 {
-							send := chunk
-							if int64(len(send)) > total {
-								send = send[:total]
+				if mode[0] == 'U' {
+					// Flood target→entry (upstream): fill N MiB then close.
+					// Caller sends a 4-byte MiB count header.
+					sz := make([]byte, 4)
+					io.ReadFull(c, sz)
+					total := int64(uint32(sz[0])|uint32(sz[1])<<8|uint32(sz[2])<<16|uint32(sz[3])<<24) << 20
+					chunk := bytes.Repeat([]byte{'u'}, 64<<10)
+					for total > 0 {
+						send := chunk
+						if int64(len(send)) > total {
+							send = send[:total]
 						}
-							nw, err := c.Write(send)
-							discarded.Add(int64(nw))
-							total -= int64(nw)
-							if err != nil {
+						nw, err := c.Write(send)
+						discarded.Add(int64(nw))
+						total -= int64(nw)
+						if err != nil {
 							return
 						}
 					}
-						c.Close()
-						return
-					}
+					c.Close()
+					return
+				}
+				// 'D' = discard mode: count received bytes.
 				buf := make([]byte, 32<<10)
 				for {
 					n, err := c.Read(buf)
@@ -523,7 +524,7 @@ func TestBenchUpstreamThroughput(t *testing.T) {
 	total := uint32(64) // 64 MiB
 	sz[0], sz[1], sz[2], sz[3] = byte(total), byte(total>>8), byte(total>>16), byte(total>>24)
 	cSer.Write(sz)
-		go io.Copy(io.Discard, cSer)
+	go io.Copy(io.Discard, cSer)
 	base := discarded.Load()
 	start := time.Now()
 	waitBytes(t, discarded, base+64<<20, 120*time.Second)
@@ -538,7 +539,7 @@ func TestBenchUpstreamThroughput(t *testing.T) {
 	cConc := eConc.dialEntry(t)
 	cConc.Write([]byte{'U'})
 	cConc.Write(sz)
-		go io.Copy(io.Discard, cConc)
+	go io.Copy(io.Discard, cConc)
 	base = discarded.Load()
 	start = time.Now()
 	waitBytes(t, discarded, base+64<<20, 120*time.Second)

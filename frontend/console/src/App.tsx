@@ -117,10 +117,22 @@ export default function App() {
 
   const authHeaders = (): HeadersInit => sessionToken ? { Authorization: `Bearer ${sessionToken}` } : {};
 
+  // Check for 401 responses on authenticated requests and trigger logout.
+  const checkAuth = (res: Response): boolean => {
+    if (res.status === 401) {
+      localStorage.removeItem('sessionToken');
+      setSessionToken('');
+      setIsLoggedIn(false);
+      setError('Session expired — please log in again');
+      return false;
+    }
+    return true;
+  };
+
   const fetchSessions = async () => {
     try {
       const res = await fetch('/api/v1/sessions', { headers: authHeaders() });
-      if (res.ok) {
+      if (checkAuth(res) && res.ok) {
         const data = await res.json();
         setSessions(data);
       }
@@ -132,7 +144,7 @@ export default function App() {
   const fetchUsers = async () => {
     try {
       const res = await fetch('/api/v1/users', { headers: authHeaders() });
-      if (res.ok) setUsers(await res.json());
+      if (checkAuth(res) && res.ok) setUsers(await res.json());
     } catch (e) {
       console.error(e);
     }
@@ -141,7 +153,7 @@ export default function App() {
   const fetchAgents = async () => {
     try {
       const res = await fetch('/api/v1/agents', { headers: authHeaders() });
-      if (res.ok) setAgents(await res.json());
+      if (checkAuth(res) && res.ok) setAgents(await res.json());
     } catch (e) {
       console.error(e);
     }

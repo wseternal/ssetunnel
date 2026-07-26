@@ -1,10 +1,10 @@
 # Auth
 
-PostgreSQL-backed authentication: bearer tokens, single-use PINs, admin sessions, user sessions, TOTP, agent configs, and user permissions.
+PostgreSQL-backed authentication: bearer tokens, user sessions, TOTP, agent configs, and user permissions.
 
 ## Core Type: `Store`
 
-Backed by `pgxpool.Pool` with a `sync.Map` read-through cache for token validation.
+Backed by `pgxpool.Pool`. All operations hit the database directly (no in-process cache).
 
 ## Token Lifecycle
 
@@ -17,28 +17,6 @@ RevokeToken(rawToken) / RevokeTokenByID(id) → evicts cache
 ```
 
 Roles: `"agent"`, `"user"`, `"admin"`.
-
-## PIN Lifecycle
-
-```
-CreatePIN(rawPIN, role, ttl) → stores digest + expiry
-    ↓
-VerifyAndUsePIN(rawPIN) → role (single-use, marks used_at)
-    ↓
-RedeemPIN(rawPIN) → generates persistent token, returns (rawToken, role)
-```
-
-PINs are consumed by `AgentAuthMiddleware` as fallback when bearer token validation fails. On redemption, the server returns the new token via `X-SSET-Token` response header.
-
-## Admin Sessions
-
-```
-CreateAdminSession(rawSessionToken, ttl) → stored with expiry
-    ↓
-ValidateAdminSession(rawSessionToken) → checks expiry
-```
-
-Used by `AdminSessionMiddleware` (cookie-based auth for console).
 
 ## User Sessions
 
@@ -87,7 +65,5 @@ Users have boolean flags: `can_connect` and `can_create_agent`. Checked during t
 
 ## Rules
 * Tokens are stored as SHA-256 digests — raw tokens are never persisted.
-* Cache is read-through: first `ValidateToken` hits DB, subsequent reads serve from `sync.Map`.
-* Revoked/expired tokens are evicted from cache on revocation.
 * Use native pgx `[]string` scanning for `text[]` columns (not `pq.Array()`).
 * Use `time.Time` for timestamp columns (pgx returns binary timestamps).

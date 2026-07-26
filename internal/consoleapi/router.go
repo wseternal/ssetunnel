@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/gorilla/mux"
@@ -12,10 +13,21 @@ import (
 	"github.com/wseternal/ssetunnel/internal/server"
 )
 
+// minPasswordLength is the minimum allowed password length for user creation and updates.
+const minPasswordLength = 8
+
+// validRoles is the allowlist of valid user roles.
+var validRoles = map[string]bool{"admin": true, "user": true}
+
 type API struct {
 	store      *auth.Store
 	reg        *server.Registry
 	totpSecret string
+
+	// Login rate limiting: track failed attempts per IP.
+	rateMu    sync.Mutex
+	rateCount map[string]int
+	rateReset map[string]time.Time
 }
 
 func NewRouter(store *auth.Store, reg *server.Registry, totpSecret string) http.Handler {
@@ -23,9 +35,14 @@ func NewRouter(store *auth.Store, reg *server.Registry, totpSecret string) http.
 		store:      store,
 		reg:        reg,
 		totpSecret: totpSecret,
+		rateCount:  make(map[string]int),
+		rateReset:  make(map[string]time.Time),
 	}
 
 	r := mux.NewRouter()
+
+	// CORS middleware — restrict to same-origin by default.
+	r.Use(corsMiddleware)
 
 	// Public auth routes
 	r.HandleFunc("/api/v1/user-login", api.handleUserLogin).Methods("POST")
@@ -49,6 +66,28 @@ func NewRouter(store *auth.Store, reg *server.Registry, totpSecret string) http.
 	r.Handle("/api/v1/me", userAuth(http.HandlerFunc(api.handleMe))).Methods("GET")
 
 	return r
+}
+
+// corsMiddleware adds restrictive CORS headers for the console API.
+func corsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		origin := r.Header.Get("Origin")
+		if origin != "" {
+			// Only echo back the origin if it matches the request host (same-origin).
+			if origin == "http://"+r.Host || origin == "https://"+r.Host {
+				w.Header().Set("Access-Control-Allow-Origin", origin)
+				w.Header().Set("Access-Control-Allow-Credentials", "true")
+			}
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+			w.Header().Set("Access-Control-Max-Age", "3600")
+		}
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (a *API) handleLogout(w http.ResponseWriter, r *http.Request) {
@@ -115,12 +154,11 @@ func (a *API) handleUserLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Verify TOTP if configured
-	if a.totpSecret != "" {
-		if !auth.VerifyTOTP(a.totpSecret, req.TOTPCode) {
-			http.Error(w, "invalid TOTP code", http.StatusUnauthorized)
-			return
-		}
+	// Rate limiting: max 10 failed attempts per IP per 5-minute window.
+	clientIP := r.RemoteAddr
+	if a.checkRateLimit(clientIP) {
+		http.Error(w, "too many failed login attempts, try again later", http.StatusTooManyRequests)
+		return
 	}
 
 	if a.store == nil {
@@ -128,8 +166,10 @@ func (a *API) handleUserLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Validate password first (before TOTP) to avoid leaking TOTP validity.
 	user, err := a.store.ValidatePassword(r.Context(), req.Username, req.Password)
 	if err != nil {
+		a.recordFailedLogin(clientIP)
 		http.Error(w, "invalid credentials", http.StatusUnauthorized)
 		return
 	}
@@ -138,6 +178,18 @@ func (a *API) handleUserLogin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "account disabled", http.StatusForbidden)
 		return
 	}
+
+	// Verify TOTP after successful password validation.
+	if a.totpSecret != "" {
+		if !auth.VerifyTOTP(a.totpSecret, req.TOTPCode) {
+			a.recordFailedLogin(clientIP)
+			http.Error(w, "invalid TOTP code", http.StatusUnauthorized)
+			return
+		}
+	}
+
+	// Successful login resets the rate limit for this IP.
+	a.resetRateLimit(clientIP)
 
 	// Create user session (30 days)
 	sessionToken, err := auth.GenerateToken()
@@ -159,6 +211,35 @@ func (a *API) handleUserLogin(w http.ResponseWriter, r *http.Request) {
 		"username": user.Username,
 		"role":     user.Role,
 	})
+}
+
+// checkRateLimit returns true if the client IP has exceeded the login attempt limit.
+func (a *API) checkRateLimit(ip string) bool {
+	a.rateMu.Lock()
+	defer a.rateMu.Unlock()
+	if reset, ok := a.rateReset[ip]; ok && time.Now().After(reset) {
+		delete(a.rateCount, ip)
+		delete(a.rateReset, ip)
+	}
+	return a.rateCount[ip] >= 10
+}
+
+// recordFailedLogin increments the failed login counter for an IP.
+func (a *API) recordFailedLogin(ip string) {
+	a.rateMu.Lock()
+	defer a.rateMu.Unlock()
+	if _, ok := a.rateReset[ip]; !ok {
+		a.rateReset[ip] = time.Now().Add(5 * time.Minute)
+	}
+	a.rateCount[ip]++
+}
+
+// resetRateLimit clears the rate limit for an IP on successful login.
+func (a *API) resetRateLimit(ip string) {
+	a.rateMu.Lock()
+	defer a.rateMu.Unlock()
+	delete(a.rateCount, ip)
+	delete(a.rateReset, ip)
 }
 
 func (a *API) handleUsers(w http.ResponseWriter, r *http.Request) {
@@ -197,11 +278,15 @@ func (a *API) handleUsers(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "username and password required", http.StatusBadRequest)
 		return
 	}
+	if len(req.Password) < minPasswordLength {
+		http.Error(w, "password must be at least 8 characters", http.StatusBadRequest)
+		return
+	}
 	if req.Role == "" {
 		req.Role = "user"
 	}
-	if req.Role == "agent" {
-		http.Error(w, "role 'agent' is not supported; use perm_agent toggle instead", http.StatusBadRequest)
+	if !validRoles[req.Role] {
+		http.Error(w, "invalid role: must be 'admin' or 'user'", http.StatusBadRequest)
 		return
 	}
 
@@ -264,8 +349,13 @@ func (a *API) handleUserUpdate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		if req.Role != nil && *req.Role == "agent" {
-			http.Error(w, "role 'agent' is not supported; use perm_agent toggle instead", http.StatusBadRequest)
+		if req.Role != nil && !validRoles[*req.Role] {
+			http.Error(w, "invalid role: must be 'admin' or 'user'", http.StatusBadRequest)
+			return
+		}
+
+		if req.Password != nil && len(*req.Password) < minPasswordLength {
+			http.Error(w, "password must be at least 8 characters", http.StatusBadRequest)
 			return
 		}
 
@@ -279,23 +369,14 @@ func (a *API) handleUserUpdate(w http.ResponseWriter, r *http.Request) {
 			pwHash = &h
 		}
 
-		if err := a.store.UpdateUser(r.Context(), id, req.Role, pwHash, req.PermConnect, req.PermAgent); err != nil {
+		// Wrap all updates (fields + disable toggle) in a single call to maintain atomicity.
+		if err := a.store.UpdateUserWithDisabled(r.Context(), id, req.Role, pwHash, req.PermConnect, req.PermAgent, req.Disabled); err != nil {
+			if errors.Is(err, auth.ErrUserNotFound) {
+				http.Error(w, err.Error(), http.StatusNotFound)
+				return
+			}
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
-		}
-
-		if req.Disabled != nil {
-			if *req.Disabled {
-				if err := a.store.DisableUser(r.Context(), id); err != nil {
-					http.Error(w, err.Error(), http.StatusInternalServerError)
-					return
-				}
-			} else {
-				if err := a.store.EnableUser(r.Context(), id); err != nil {
-					http.Error(w, err.Error(), http.StatusInternalServerError)
-					return
-				}
-			}
 		}
 
 		w.Header().Set("Content-Type", "application/json")

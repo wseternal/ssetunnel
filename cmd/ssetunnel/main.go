@@ -10,6 +10,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -176,7 +177,9 @@ func runServer(ctx context.Context, args []string) error {
 	httpSrv := srv.NewHTTPServer(*listen)
 	go func() {
 		<-ctx.Done()
-		httpSrv.Shutdown(context.Background())
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		httpSrv.Shutdown(shutdownCtx)
 	}()
 
 	log.Printf("server: ssetunnel %s", BuildVersion())
@@ -362,9 +365,8 @@ func runLogin(_ context.Context, args []string) error {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		body := make([]byte, 1024)
-		n, _ := resp.Body.Read(body)
-		return fmt.Errorf("login failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(body[:n])))
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return fmt.Errorf("login failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 
 	var result struct {
