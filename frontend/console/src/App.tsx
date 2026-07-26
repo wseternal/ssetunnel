@@ -204,10 +204,10 @@ export default function App() {
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
-    if (isLoggedIn && isAdmin) {
+    if (isLoggedIn) {
       fetchSessions();
-      fetchUsers();
       fetchAgents();
+      if (isAdmin) fetchUsers();
       const interval = setInterval(fetchSessions, 3000);
       return () => clearInterval(interval);
     }
@@ -526,6 +526,11 @@ export default function App() {
     )},
   ];
 
+  // Read-only agent columns for non-admin users (no actions).
+  const readOnlyAgentColumns: AdminTableColumn<AgentConfig>[] = agentColumns.filter(
+    (col) => col.key !== 'actions'
+  );
+
   return (
     <ThemeProvider theme={theme}>
       <CssBaseline />
@@ -712,23 +717,62 @@ export default function App() {
                 )}
               </>
             ) : (
-              <Card sx={{ maxWidth: 480, mx: 'auto', mt: 4 }}>
-                <CardContent sx={{ textAlign: 'center', py: 4 }}>
-                  <CheckCircleIcon sx={{ fontSize: 48, color: 'success.main', mb: 2 }} />
-                  <Typography variant="h5" gutterBottom>
-                    Welcome
-                  </Typography>
-                  <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
-                    You are signed in as <strong>{userRole || 'user'}</strong>.
-                    {totpEnrolled
-                      ? ' Two-factor authentication is enabled.'
-                      : ' Two-factor authentication is not set up — click the shield icon above to configure it.'}
-                  </Typography>
-                  <Button variant="outlined" startIcon={<SecurityIcon />} onClick={() => setOpenTOTPDialog(true)}>
-                    {totpEnrolled ? 'Manage 2FA' : 'Set Up 2FA'}
-                  </Button>
-                </CardContent>
-              </Card>
+              <>
+                <Paper sx={{ mb: 3 }}>
+                  <Tabs value={tabIndex} onChange={(_, v) => setTabIndex(v)}>
+                    <Tab label="Sessions" />
+                    <Tab label="Agents" />
+                  </Tabs>
+                </Paper>
+
+                {tabIndex === 0 && (
+                  <Box>
+                    <PageHeader
+                      title={`My Sessions (${sessions.length})`}
+                      actions={
+                        <Button startIcon={<RefreshIcon />} onClick={fetchSessions} size="small">
+                          Refresh
+                        </Button>
+                      }
+                    />
+                    <AdminTable
+                      columns={SESSION_COLUMNS}
+                      rows={sessions}
+                      rowKey="id"
+                      empty={
+                        <EmptyState
+                          icon={<CableIcon sx={{ fontSize: 48, color: 'text.disabled' }} />}
+                          title="No active sessions"
+                        />
+                      }
+                    />
+                  </Box>
+                )}
+
+                {tabIndex === 1 && (
+                  <Box>
+                    <PageHeader
+                      title={`Agents (${agents.length})`}
+                      actions={
+                        <Button startIcon={<RefreshIcon />} onClick={fetchAgents} size="small">
+                          Refresh
+                        </Button>
+                      }
+                    />
+                    <AdminTable
+                      columns={readOnlyAgentColumns}
+                      rows={agents}
+                      rowKey="id"
+                      empty={
+                        <EmptyState
+                          icon={<RouterIcon sx={{ fontSize: 48, color: 'text.disabled' }} />}
+                          title="No agent configs"
+                        />
+                      }
+                    />
+                  </Box>
+                )}
+              </>
             )}
 
             {/* Create/Edit User Dialog */}

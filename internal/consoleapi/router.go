@@ -62,21 +62,23 @@ func NewRouter(store *auth.Store, reg *server.Registry) http.Handler {
 	r.HandleFunc("/api/v1/user-login-check", api.handleUserLoginCheck).Methods("POST")
 	r.HandleFunc("/api/v1/logout", api.handleLogout).Methods("POST")
 
-	// Protected admin routes
+	// Middleware
 	adminAuth := server.AdminSessionMiddleware(store)
+	userAuth := server.UserSessionMiddleware(store)
 
-	r.Handle("/api/v1/sessions", adminAuth(http.HandlerFunc(api.handleSessions))).Methods("GET")
+	// Session listing: any authenticated user (filtered by role in handler)
+	r.Handle("/api/v1/sessions", userAuth(http.HandlerFunc(api.handleSessions))).Methods("GET")
 
 	// User management routes (admin only)
 	r.Handle("/api/v1/users", adminAuth(http.HandlerFunc(api.handleUsers))).Methods("GET", "POST")
 	r.Handle("/api/v1/users/{id}", adminAuth(http.HandlerFunc(api.handleUserUpdate))).Methods("PATCH", "DELETE")
 
-	// Agent config management routes (admin only)
-	r.Handle("/api/v1/agents", adminAuth(http.HandlerFunc(api.handleAgents))).Methods("GET", "POST")
+	// Agent config routes: read for any authenticated user, write for admin only
+	r.Handle("/api/v1/agents", userAuth(http.HandlerFunc(api.handleAgents))).Methods("GET")
+	r.Handle("/api/v1/agents", adminAuth(http.HandlerFunc(api.handleAgents))).Methods("POST")
 	r.Handle("/api/v1/agents/{id}", adminAuth(http.HandlerFunc(api.handleAgentUpdate))).Methods("PATCH", "DELETE")
 
 	// User session routes (authenticated user)
-	userAuth := server.UserSessionMiddleware(store)
 	r.Handle("/api/v1/me", userAuth(http.HandlerFunc(api.handleMe))).Methods("GET")
 
 	// TOTP management routes (authenticated user)
@@ -138,10 +140,17 @@ type SessionInfo struct {
 }
 
 func (a *API) handleSessions(w http.ResponseWriter, r *http.Request) {
+	sessInfo := server.UserSessionFromContext(r)
+	isAdmin := sessInfo != nil && auth.HasPermission(sessInfo.Role, auth.PermAdmin)
+
 	sessions := []SessionInfo{}
 
 	if a.reg != nil {
 		a.reg.Range(func(s *server.Session) bool {
+			// Non-admin users only see sessions attributed to their own user ID.
+			if !isAdmin && (sessInfo == nil || s.UserID() != sessInfo.UserID) {
+				return true
+			}
 			sent, rec, created := s.Stats()
 			sessions = append(sessions, SessionInfo{
 				ID:            s.ID(),
