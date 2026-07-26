@@ -11,7 +11,7 @@ vars:
     -X main.GitSHA={{.GIT_SHA}}
 
 tasks:
-  default:
+  ci:
     desc: Full CI pipeline (build, vet, test)
     cmds:
       - task: go:build
