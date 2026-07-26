@@ -51,9 +51,9 @@ go build -o ssetunnel ./cmd/ssetunnel
 
 ### 2. Basic Local Demonstration
 
-**Start Server** (using local embedded TestContainer PostgreSQL):
+**Start Server** (dev mode, authentication disabled):
 ```bash
-./ssetunnel server --listen :8080 --entry :9090 --console-listen :8081
+./ssetunnel server --listen :8080 --entry :9090 --console-listen :8081 --disable-auth
 ```
 
 **Run Agent** (forwarding to a local web server at `127.0.0.1:3000`):
@@ -67,6 +67,8 @@ go build -o ssetunnel ./cmd/ssetunnel
 ```
 
 Now accessing `http://127.0.0.1:8000` routes directly to the private target at `127.0.0.1:3000`!
+
+> **With authentication enabled** (default), start the server without `--disable-auth`, note the auto-generated admin password from the log output, then run `ssetunnel login` to store a session token before starting the agent and connect.
 
 ---
 
@@ -165,11 +167,21 @@ ssetunnel probe --server http://localhost:8080
 
 ---
 
+### `ssetunnel version`
+
+Prints the build version and embedded git short SHA.
+
+```bash
+ssetunnel version
+```
+
+---
+
 ## Local Development & Testing
 
 ### Prerequisites
 
-- **Go**: 1.22 or newer
+- **Go**: 1.26.5 or newer
 - **Node.js**: 18+ and `npm` (for frontend console build)
 - **Docker**: Required if using the default `postgres:tc:` local TestContainers database
 - **Atlas CLI** *(Optional)*: For schema management (`atlas.hcl`)
