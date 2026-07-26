@@ -13,10 +13,10 @@ func TestRunServer_AddressAlreadyBound(t *testing.T) {
 
 	tests := []struct {
 		name     string
-		bindFlag string // "listen", "entry", or "console-listen"
+		bindFlag string // "listen", "agent", or "console-listen"
 	}{
 		{"listen address bound", "listen"},
-		{"entry address bound", "entry"},
+		{"agent address bound", "agent"},
 		{"console-listen address bound", "console-listen"},
 	}
 	for _, tt := range tests {
@@ -37,15 +37,15 @@ func TestRunServer_AddressAlreadyBound(t *testing.T) {
 			args := []string{"--disable-auth"}
 			switch tt.bindFlag {
 			case "listen":
-				args = append(args, "--listen", addr, "--entry", "127.0.0.1:0")
-			case "entry":
-				args = append(args, "--listen", "127.0.0.1:0", "--entry", addr)
+				args = append(args, "--listen", addr, "--agent", "127.0.0.1:0")
+			case "agent":
+				args = append(args, "--listen", "127.0.0.1:0", "--agent", addr)
 			case "console-listen":
 				// console-listen only opens when auth is enabled; use
 				// --db-url with testcontainer to enable the console path.
 				args = []string{
 					"--listen", "127.0.0.1:0",
-					"--entry", "127.0.0.1:0",
+					"--agent", "127.0.0.1:0",
 					"--console-listen", addr,
 				}
 			}

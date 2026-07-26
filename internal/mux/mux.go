@@ -18,7 +18,7 @@ func config() *yamux.Config {
 	// (15 s) already keep middleboxes from going idle, so this only
 	// needs to catch dead agents, not preserve the connection.
 	cfg.KeepAliveInterval = 30 * time.Second
-	// AcceptBacklog 256: absorb entry-listener accept bursts without
+	// AcceptBacklog 256: absorb agent-listener accept bursts without
 	// dropping SYNs; far above the 32-stream concurrency target.
 	cfg.AcceptBacklog = 256
 	return cfg

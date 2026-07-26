@@ -1,15 +1,15 @@
 # Server
 
-The public side of the tunnel. Accepts agent HTTP connections (SSE downstream, POST upstream), user TCP connections on the entry listener, and admin console requests.
+The public side of the tunnel. Accepts agent HTTP connections (SSE downstream, POST upstream), user TCP connections on the agent listener, and admin console requests.
 
 ## Architecture
 
 ```
 HTTP :8080                TCP :9090              HTTP :8081
   │                         │                      │
-Handler (mux.ServeMux)  ServeEntry()          ConsoleHandler
+Handler (mux.ServeMux)  ServeAgent()          ConsoleHandler
   │                         │                      │
-├── /events (SSE)       proxyEntry()          ├── /api/v1/* (consoleapi)
+├── /events (SSE)       proxyAgent()          ├── /api/v1/* (consoleapi)
 ├── /up   (POST)            │                  └── /* (SPA)
 └── /probe                  │
   │                         │
@@ -17,7 +17,7 @@ Registry ←──── Session ←───┘
   │
 yamux.Server(session)
   │
-OpenStream() → bidirectional io.Copy ↔ entry conn
+OpenStream() → bidirectional io.Copy ↔ agent conn
 ```
 
 ## Core Types
@@ -42,7 +42,7 @@ One tunnel session: a `net.Conn` whose `Read` yields upstream POST bytes and `Wr
 ### `Registry`
 Thread-safe `map[string]*Session`. `Replace` closes stale sessions on reconnect. `Range` iterates under a copy.
 
-### `proxyEntry`
+### `proxyAgent`
 Opens a yamux stream via `findYamux().OpenStream()`, then runs two goroutines for bidirectional `io.CopyBuffer`. Performs token handshake with optional agent routing:
 
 **Handshake protocol**: `TOKEN [agent_id [target]]\n`

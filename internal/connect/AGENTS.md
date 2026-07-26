@@ -1,6 +1,6 @@
 # Connect Client
 
-The connect client is the user-side component that bridges local applications (SSH clients, DB tools) to the tunnel server's entry listener.
+The connect client is the user-side component that bridges local applications (SSH clients, DB tools) to the tunnel server's agent listener.
 
 ## Architecture
 
@@ -17,7 +17,7 @@ SSH ProxyCommand (--local -)          Local Port Mode (--local 127.0.0.1:3306)
 ## Core Types
 
 ### `Client`
-Holds `serverEntryAddr`, `token`, `agentID` (for routing), and `target` (for dynamic target mode). Created via `NewClient(addr, token, agentID, target)`.
+Holds `agentAddr`, `token`, `agentID` (for routing), and `target` (for dynamic target mode). Created via `NewClient(addr, token, agentID, target)`.
 
 ### `ServeRW(ctx, r, w)`
 The critical function for SSH ProxyCommand support. Copies bidirectionally between `r`/`w` (typically stdin/stdout pipes) and the server connection.
@@ -35,7 +35,7 @@ When the reader reaches EOF first (user finishes typing), a TCP half-close (`Clo
 Accepts local TCP connections and proxies each to a fresh server connection. Each connection gets its own `dialAndHandshake`. Closes the server connection when either direction hits EOF.
 
 ### `dialAndHandshake(ctx)`
-Dials the entry listener TCP, optionally sends a handshake line `TOKEN [agent_id [target]]\n`, waits for "OK\n" response. Uses a 10 s dial timeout and 5 s handshake read deadline. Strips the `ERR ` prefix from error responses for cleaner user-facing messages.
+Dials the agent listener TCP, optionally sends a handshake line `TOKEN [agent_id [target]]\n`, waits for "OK\n" response. Uses a 10 s dial timeout and 5 s handshake read deadline. Strips the `ERR ` prefix from error responses for cleaner user-facing messages.
 
 ## Testing
 

@@ -34,7 +34,7 @@ import (
 
 // benchEnv is a full in-process deployment behind the middlebox.
 type benchEnv struct {
-	entryAddr string
+	agentAddr string
 	reg       *server.Registry
 	mb        *testutil.Middlebox
 	cancel    context.CancelFunc
@@ -101,7 +101,7 @@ func startModeTarget(t *testing.T) (net.Listener, *atomic.Int64) {
 					return
 				}
 				if mode[0] == 'U' {
-					// Flood target→entry (upstream): fill N MiB then close.
+					// Flood target→agent (upstream): fill N MiB then close.
 					// Caller sends a 4-byte MiB count header.
 					sz := make([]byte, 4)
 					io.ReadFull(c, sz)
@@ -148,12 +148,12 @@ func setupBench(t *testing.T, target net.Listener) *benchEnv {
 	if err != nil {
 		t.Fatalf("StartMiddlebox: %v", err)
 	}
-	entryLn, err := net.Listen("tcp", "127.0.0.1:0")
+	agentLn, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		t.Fatalf("listen entry: %v", err)
+		t.Fatalf("listen agent: %v", err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	go srv.ServeEntry(ctx, entryLn)
+	go srv.ServeAgent(ctx, agentLn)
 	ag := &agent.Agent{
 		ServerURL:  mb.URL,
 		Target:     target.Addr().String(),
@@ -172,18 +172,18 @@ func setupBench(t *testing.T, target net.Listener) *benchEnv {
 	}
 	t.Cleanup(func() {
 		cancel()
-		entryLn.Close()
+		agentLn.Close()
 		ts.Close()
 		mb.Close()
 	})
-	return &benchEnv{entryAddr: entryLn.Addr().String(), reg: srv.Reg, mb: mb, cancel: cancel}
+	return &benchEnv{agentAddr: agentLn.Addr().String(), reg: srv.Reg, mb: mb, cancel: cancel}
 }
 
-func (e *benchEnv) dialEntry(t *testing.T) net.Conn {
+func (e *benchEnv) dialAgent(t *testing.T) net.Conn {
 	t.Helper()
-	c, err := net.Dial("tcp", e.entryAddr)
+	c, err := net.Dial("tcp", e.agentAddr)
 	if err != nil {
-		t.Fatalf("dial entry: %v", err)
+		t.Fatalf("dial agent: %v", err)
 	}
 	return c
 }
@@ -234,7 +234,7 @@ func TestBenchAddedLatency(t *testing.T) {
 		return ds
 	}
 
-	tunnel := measure(e.dialEntry(t))
+	tunnel := measure(e.dialAgent(t))
 	direct := measure(func() net.Conn {
 		c, err := net.Dial("tcp", target.Addr().String())
 		if err != nil {
@@ -258,8 +258,8 @@ func TestBenchThroughput(t *testing.T) {
 	target, discarded := startModeTarget(t)
 	e := setupBench(t, target)
 
-	const total = 256 << 20 // 256 MiB single stream, entry → target
-	c := e.dialEntry(t)
+	const total = 256 << 20 // 256 MiB single stream, agent → target
+	c := e.dialAgent(t)
 	defer c.Close()
 	c.SetDeadline(time.Now().Add(5 * time.Minute))
 	start := time.Now()
@@ -300,7 +300,7 @@ func TestBenchConcurrency(t *testing.T) {
 
 	// Single-stream baseline.
 	base := discarded.Load()
-	c := e.dialEntry(t)
+	c := e.dialAgent(t)
 	t0 := time.Now()
 	c.Write([]byte{'D'})
 	go c.Write(bytes.Repeat([]byte{'b'}, payload))
@@ -311,7 +311,7 @@ func TestBenchConcurrency(t *testing.T) {
 	// Stalled stream (plan step 9: "one stalled after 64 KiB"): 'E' echo
 	// mode, sends 64 KiB, never reads — its echo backs up in its stream
 	// buffers and it never makes progress again.
-	stall := e.dialEntry(t)
+	stall := e.dialAgent(t)
 	defer stall.Close()
 	stall.Write([]byte{'E'})
 	stall.Write(bytes.Repeat([]byte{'s'}, 64<<10))
@@ -325,7 +325,7 @@ func TestBenchConcurrency(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			sc := e.dialEntry(t)
+			sc := e.dialAgent(t)
 			defer sc.Close()
 			sc.SetDeadline(time.Now().Add(2 * time.Minute))
 			sc.Write([]byte{'D'})
@@ -472,12 +472,12 @@ func setupBenchTuned(t *testing.T, target net.Listener, tune func(*agent.Agent))
 	if err != nil {
 		t.Fatalf("StartMiddlebox: %v", err)
 	}
-	entryLn, err := net.Listen("tcp", "127.0.0.1:0")
+	agentLn, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		t.Fatalf("listen entry: %v", err)
+		t.Fatalf("listen agent: %v", err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	go srv.ServeEntry(ctx, entryLn)
+	go srv.ServeAgent(ctx, agentLn)
 	ag := &agent.Agent{
 		ServerURL:  mb.URL,
 		Target:     target.Addr().String(),
@@ -499,14 +499,14 @@ func setupBenchTuned(t *testing.T, target net.Listener, tune func(*agent.Agent))
 	}
 	t.Cleanup(func() {
 		cancel()
-		entryLn.Close()
+		agentLn.Close()
 		ts.Close()
 		mb.Close()
 	})
-	return &benchEnv{entryAddr: entryLn.Addr().String(), reg: srv.Reg, mb: mb, cancel: cancel}
+	return &benchEnv{agentAddr: agentLn.Addr().String(), reg: srv.Reg, mb: mb, cancel: cancel}
 }
 
-// TestBenchUpstreamThroughput measures target→entry throughput (the
+// TestBenchUpstreamThroughput measures target→agent throughput (the
 // upstream POST path — cycle 2's bottleneck). Serial-16KiB control
 // prints the baseline; the 4/64KiB gate must clear the ≥4 MB/s budget.
 func TestBenchUpstreamThroughput(t *testing.T) {
@@ -517,7 +517,7 @@ func TestBenchUpstreamThroughput(t *testing.T) {
 
 	// Serial baseline (cycle-1 behavior).
 	eSer := setupBench(t, target)
-	cSer := eSer.dialEntry(t)
+	cSer := eSer.dialAgent(t)
 	// Tell the flood target to send 64 MiB upstream.
 	cSer.Write([]byte{'U'})
 	sz := make([]byte, 4)
@@ -536,7 +536,7 @@ func TestBenchUpstreamThroughput(t *testing.T) {
 		ag.BatchSize = 64 << 10
 		ag.Concurrency = 4
 	})
-	cConc := eConc.dialEntry(t)
+	cConc := eConc.dialAgent(t)
 	cConc.Write([]byte{'U'})
 	cConc.Write(sz)
 	go io.Copy(io.Discard, cConc)
@@ -568,7 +568,7 @@ func TestBenchUpstreamGzip(t *testing.T) {
 	// Compressible payload: repeated 'A' (ratio ≫ 2×)
 	preBytes := e.mb.PostBytes.Load()
 	payload := bytes.Repeat([]byte{'A'}, 256<<10)
-	c := e.dialEntry(t)
+	c := e.dialAgent(t)
 	c.Write(payload)
 	got := make([]byte, len(payload))
 	io.ReadFull(c, got)
@@ -586,7 +586,7 @@ func TestBenchUpstreamGzip(t *testing.T) {
 	})
 	preBytes2 := e2.mb.PostBytes.Load()
 	noise := noiseGen(256 << 10)
-	c2 := e2.dialEntry(t)
+	c2 := e2.dialAgent(t)
 	c2.Write(noise)
 	got2 := make([]byte, len(noise))
 	io.ReadFull(c2, got2)
