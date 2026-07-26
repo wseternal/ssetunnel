@@ -1,7 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import {
   ThemeProvider,
-  createTheme,
   CssBaseline,
   Box,
   Container,
@@ -12,12 +11,6 @@ import {
   Button,
   Tabs,
   Tab,
-  Table,
-  TableBody,
-  TableCell,
-  TableContainer,
-  TableHead,
-  TableRow,
   Paper,
   Chip,
   IconButton,
@@ -41,18 +34,18 @@ import EditIcon from '@mui/icons-material/Edit';
 import BlockIcon from '@mui/icons-material/Block';
 import CheckCircleIcon from '@mui/icons-material/CheckCircle';
 import AddIcon from '@mui/icons-material/Add';
-
-const darkTheme = createTheme({
-  palette: {
-    mode: 'dark',
-    primary: { main: '#00f2fe' },
-    secondary: { main: '#4facfe' },
-    background: { default: '#0B0F19', paper: '#111827' },
-  },
-  typography: {
-    fontFamily: '"Inter", "Roboto", "Helvetica", "Arial", sans-serif',
-  },
-});
+import CableIcon from '@mui/icons-material/Cable';
+import GroupIcon from '@mui/icons-material/Group';
+import RouterIcon from '@mui/icons-material/Router';
+import {
+  AdminTable,
+  type AdminTableColumn,
+  PageHeader,
+  StatusPill,
+  EmptyState,
+  type StatusPillTone,
+} from '@doublefin/orca-ui';
+import { theme } from './theme/theme';
 
 interface Session {
   id: string;
@@ -80,6 +73,19 @@ interface AgentConfig {
   created_at: string;
   updated_at: string;
 }
+
+const SESSION_COLUMNS: AdminTableColumn<Session>[] = [
+  { key: 'id', label: 'Session ID', render: (r) => (
+    <Typography sx={{ fontFamily: 'monospace', fontSize: '0.8125rem' }}>{r.id}</Typography>
+  )},
+  { key: 'up', label: 'Bytes Received (Up)', render: (r) => `${(r.bytes_received / 1024).toFixed(1)} KB` },
+  { key: 'down', label: 'Bytes Sent (Down)', render: (r) => `${(r.bytes_sent / 1024).toFixed(1)} KB` },
+  { key: 'at', label: 'Connected At', render: (r) => new Date(r.created_at).toLocaleTimeString() },
+  { key: 'addr', label: 'Remote Addr', render: (r) => (
+    <Typography sx={{ fontFamily: 'monospace', fontSize: '0.75rem' }}>{r.remote_addr}</Typography>
+  )},
+  { key: 'status', label: 'Status', render: () => <StatusPill tone="success" label="Active" /> },
+];
 
 export default function App() {
   const [isLoggedIn, setIsLoggedIn] = useState(false);
@@ -330,19 +336,98 @@ export default function App() {
     }
   };
 
-  const roleColor = (role: string): 'error' | 'warning' | 'primary' | 'default' => {
-    switch (role) {
-      case 'admin': return 'error';
-      default: return 'primary';
-    }
-  };
+  // Column definitions (close over handlers, defined inside component)
+  const userColumns: AdminTableColumn<User>[] = [
+    { key: 'id', label: 'ID', width: 60, render: (r) => String(r.id) },
+    { key: 'username', label: 'Username', render: (r) => (
+      <Typography sx={{ fontWeight: 500 }}>{r.username}</Typography>
+    )},
+    { key: 'role', label: 'Role', render: (r) => (
+      <Box sx={{ display: 'flex', gap: 0.5, alignItems: 'center', flexWrap: 'wrap' }}>
+        <StatusPill
+          tone={r.role === 'admin' ? 'error' : 'neutral'}
+          label={r.role}
+        />
+        {r.perm_connect && <Chip label="connect" size="small" variant="outlined" />}
+        {r.perm_agent && <Chip label="agent" size="small" variant="outlined" />}
+      </Box>
+    )},
+    { key: 'created', label: 'Created At', render: (r) => new Date(r.created_at).toLocaleString() },
+    { key: 'status', label: 'Status', render: (r) => (
+      <StatusPill
+        tone={r.disabled_at ? 'error' : 'success'}
+        label={r.disabled_at ? 'Disabled' : 'Active'}
+      />
+    )},
+    { key: 'actions', label: '', align: 'right', render: (r) => (
+      <Box sx={{ display: 'flex', justifyContent: 'flex-end', gap: 0.5 }} onClick={(e) => e.stopPropagation()}>
+        <IconButton color="primary" size="small" onClick={() => openEditUserDialog(r)}>
+          <EditIcon />
+        </IconButton>
+        <IconButton
+          color={r.disabled_at ? 'success' : 'warning'}
+          size="small"
+          onClick={() => handleToggleUser(r)}
+          title={r.disabled_at ? 'Enable user' : 'Disable user'}
+        >
+          {r.disabled_at ? <CheckCircleIcon /> : <BlockIcon />}
+        </IconButton>
+        <IconButton color="error" size="small" onClick={() => handleDeleteUser(r.id)}>
+          <DeleteIcon />
+        </IconButton>
+      </Box>
+    )},
+  ];
+
+  const agentColumns: AdminTableColumn<AgentConfig>[] = [
+    { key: 'id', label: 'ID', width: 60, render: (r) => String(r.id) },
+    { key: 'agent_id', label: 'Agent ID', render: (r) => (
+      r.agent_id === null
+        ? <StatusPill tone="info" label="Default" />
+        : <Typography sx={{ fontFamily: 'monospace', fontWeight: 500 }}>{r.agent_id}</Typography>
+    )},
+    { key: 'description', label: 'Description', render: (r) => r.description },
+    { key: 'targets', label: 'Allowed Targets', render: (r) => (
+      <Box sx={{ display: 'flex', gap: 0.5, flexWrap: 'wrap' }}>
+        {r.allowed_targets.map((t, i) => (
+          <Chip key={i} label={t} size="small" variant="outlined" sx={{ fontFamily: 'monospace' }} />
+        ))}
+      </Box>
+    )},
+    { key: 'updated', label: 'Updated At', render: (r) => new Date(r.updated_at).toLocaleString() },
+    { key: 'actions', label: '', align: 'right', render: (r) => (
+      <Box sx={{ display: 'flex', justifyContent: 'flex-end', gap: 0.5 }} onClick={(e) => e.stopPropagation()}>
+        <IconButton color="primary" size="small" onClick={() => openEditAgentDialog(r)}>
+          <EditIcon />
+        </IconButton>
+        {r.agent_id !== null && (
+          <IconButton color="error" size="small" onClick={() => handleDeleteAgent(r.id)}>
+            <DeleteIcon />
+          </IconButton>
+        )}
+      </Box>
+    )},
+  ];
 
   return (
-    <ThemeProvider theme={darkTheme}>
+    <ThemeProvider theme={theme}>
       <CssBaseline />
       <Box sx={{ minHeight: '100vh', pb: 6 }}>
-        <Box sx={{ borderBottom: 1, borderColor: 'divider', px: 4, py: 2, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <Typography variant="h6" fontWeight="bold" sx={{ background: 'linear-gradient(45deg, #00f2fe, #4facfe)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>
+        {/* Top header bar */}
+        <Box
+          component="header"
+          sx={{
+            borderBottom: 1,
+            borderColor: 'divider',
+            bgcolor: 'background.paper',
+            px: 4,
+            py: 1.5,
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+          }}
+        >
+          <Typography variant="h6" sx={{ color: 'text.primary' }}>
             ssetunnel Console
           </Typography>
           {isLoggedIn && (
@@ -353,11 +438,12 @@ export default function App() {
         </Box>
 
         {!isLoggedIn ? (
+          /* Login form */
           <Container maxWidth="xs" sx={{ mt: 10 }}>
-            <Card sx={{ p: 2, borderRadius: 3, boxShadow: '0 8px 32px rgba(0,0,0,0.5)' }}>
+            <Card sx={{ p: 2, borderRadius: 3 }}>
               <CardContent sx={{ textAlign: 'center' }}>
                 <LockOutlinedIcon sx={{ fontSize: 40, color: 'primary.main', mb: 1 }} />
-                <Typography variant="h5" fontWeight="bold" gutterBottom>
+                <Typography variant="h5" gutterBottom>
                   Login
                 </Typography>
                 <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
@@ -400,188 +486,95 @@ export default function App() {
             </Card>
           </Container>
         ) : (
+          /* Main content with tabs */
           <Container maxWidth="lg" sx={{ mt: 4 }}>
-            <Box sx={{ borderBottom: 1, borderColor: 'divider', mb: 3 }}>
+            <Paper sx={{ mb: 3 }}>
               <Tabs value={tabIndex} onChange={(_, v) => setTabIndex(v)}>
                 <Tab label="Sessions" />
                 <Tab label="Users" />
                 <Tab label="Agents" />
               </Tabs>
-            </Box>
+            </Paper>
 
             {tabIndex === 0 && (
               <Box>
-                <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
-                  <Typography variant="h6">Live Tunnel Sessions ({sessions.length})</Typography>
-                  <Button startIcon={<RefreshIcon />} onClick={fetchSessions} size="small">Refresh</Button>
-                </Box>
-                <TableContainer component={Paper} sx={{ borderRadius: 2 }}>
-                  <Table>
-                    <TableHead>
-                      <TableRow>
-                        <TableCell>Session ID</TableCell>
-                        <TableCell>Bytes Received (Up)</TableCell>
-                        <TableCell>Bytes Sent (Down)</TableCell>
-                        <TableCell>Connected At</TableCell>
-                        <TableCell>Remote Addr</TableCell>
-                        <TableCell>Status</TableCell>
-                      </TableRow>
-                    </TableHead>
-                    <TableBody>
-                      {sessions.length === 0 ? (
-                        <TableRow>
-                          <TableCell colSpan={6} align="center">No active tunnel sessions</TableCell>
-                        </TableRow>
-                      ) : (
-                        sessions.map((s) => (
-                          <TableRow key={s.id}>
-                            <TableCell sx={{ fontFamily: 'monospace' }}>{s.id}</TableCell>
-                            <TableCell>{(s.bytes_received / 1024).toFixed(1)} KB</TableCell>
-                            <TableCell>{(s.bytes_sent / 1024).toFixed(1)} KB</TableCell>
-                            <TableCell>{new Date(s.created_at).toLocaleTimeString()}</TableCell>
-                            <TableCell sx={{ fontFamily: 'monospace', fontSize: '0.85rem' }}>{s.remote_addr}</TableCell>
-                            <TableCell><Chip label="Active" color="success" size="small" /></TableCell>
-                          </TableRow>
-                        ))
-                      )}
-                    </TableBody>
-                  </Table>
-                </TableContainer>
+                <PageHeader
+                  title={`Live Tunnel Sessions (${sessions.length})`}
+                  actions={
+                    <Button startIcon={<RefreshIcon />} onClick={fetchSessions} size="small">
+                      Refresh
+                    </Button>
+                  }
+                />
+                <AdminTable
+                  columns={SESSION_COLUMNS}
+                  rows={sessions}
+                  rowKey="id"
+                  empty={
+                    <EmptyState
+                      icon={<CableIcon sx={{ fontSize: 48, color: 'text.disabled' }} />}
+                      title="No active tunnel sessions"
+                    />
+                  }
+                />
               </Box>
             )}
 
             {tabIndex === 1 && (
               <Box>
-                <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
-                  <Typography variant="h6">Users ({users.length})</Typography>
-                  <Box>
-                    <Button startIcon={<RefreshIcon />} onClick={fetchUsers} size="small" sx={{ mr: 1 }}>Refresh</Button>
-                    <Button variant="contained" startIcon={<PersonAddIcon />} onClick={openCreateUserDialog}>
-                      Create User
-                    </Button>
-                  </Box>
-                </Box>
-                <TableContainer component={Paper} sx={{ borderRadius: 2 }}>
-                  <Table>
-                    <TableHead>
-                      <TableRow>
-                        <TableCell>ID</TableCell>
-                        <TableCell>Username</TableCell>
-                        <TableCell>Role</TableCell>
-                        <TableCell>Created At</TableCell>
-                        <TableCell>Status</TableCell>
-                        <TableCell align="right">Actions</TableCell>
-                      </TableRow>
-                    </TableHead>
-                    <TableBody>
-                      {users.length === 0 ? (
-                        <TableRow>
-                          <TableCell colSpan={6} align="center">No users</TableCell>
-                        </TableRow>
-                      ) : (
-                        users.map((u) => (
-                          <TableRow key={u.id}>
-                            <TableCell>{u.id}</TableCell>
-                            <TableCell sx={{ fontWeight: 500 }}>{u.username}</TableCell>
-                            <TableCell>
-                              <Chip label={u.role} color={roleColor(u.role)} size="small" />
-                              {u.perm_connect && <Chip label="connect" size="small" sx={{ ml: 0.5 }} />}
-                              {u.perm_agent && <Chip label="agent" size="small" sx={{ ml: 0.5 }} />}
-                            </TableCell>
-                            <TableCell>{new Date(u.created_at).toLocaleString()}</TableCell>
-                            <TableCell>
-                              {u.disabled_at
-                                ? <Chip label="Disabled" color="error" size="small" />
-                                : <Chip label="Active" color="success" size="small" />
-                              }
-                            </TableCell>
-                            <TableCell align="right">
-                              <IconButton color="primary" size="small" onClick={() => openEditUserDialog(u)}>
-                                <EditIcon />
-                              </IconButton>
-                              <IconButton
-                                color={u.disabled_at ? 'success' : 'warning'}
-                                size="small"
-                                onClick={() => handleToggleUser(u)}
-                                title={u.disabled_at ? 'Enable user' : 'Disable user'}
-                              >
-                                {u.disabled_at ? <CheckCircleIcon /> : <BlockIcon />}
-                              </IconButton>
-                              <IconButton color="error" size="small" onClick={() => handleDeleteUser(u.id)}>
-                                <DeleteIcon />
-                              </IconButton>
-                            </TableCell>
-                          </TableRow>
-                        ))
-                      )}
-                    </TableBody>
-                  </Table>
-                </TableContainer>
+                <PageHeader
+                  title={`Users (${users.length})`}
+                  actions={
+                    <Box sx={{ display: 'flex', gap: 1 }}>
+                      <Button startIcon={<RefreshIcon />} onClick={fetchUsers} size="small">
+                        Refresh
+                      </Button>
+                      <Button variant="contained" startIcon={<PersonAddIcon />} onClick={openCreateUserDialog}>
+                        Create User
+                      </Button>
+                    </Box>
+                  }
+                />
+                <AdminTable
+                  columns={userColumns}
+                  rows={users}
+                  rowKey="id"
+                  empty={
+                    <EmptyState
+                      icon={<GroupIcon sx={{ fontSize: 48, color: 'text.disabled' }} />}
+                      title="No users"
+                    />
+                  }
+                />
               </Box>
             )}
 
             {tabIndex === 2 && (
               <Box>
-                <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
-                  <Typography variant="h6">Agent Configs ({agents.length})</Typography>
-                  <Box>
-                    <Button startIcon={<RefreshIcon />} onClick={fetchAgents} size="small" sx={{ mr: 1 }}>Refresh</Button>
-                    <Button variant="contained" startIcon={<AddIcon />} onClick={openCreateAgentDialog}>
-                      Add Agent
-                    </Button>
-                  </Box>
-                </Box>
-                <TableContainer component={Paper} sx={{ borderRadius: 2 }}>
-                  <Table>
-                    <TableHead>
-                      <TableRow>
-                        <TableCell>ID</TableCell>
-                        <TableCell>Agent ID</TableCell>
-                        <TableCell>Description</TableCell>
-                        <TableCell>Allowed Targets</TableCell>
-                        <TableCell>Updated At</TableCell>
-                        <TableCell align="right">Actions</TableCell>
-                      </TableRow>
-                    </TableHead>
-                    <TableBody>
-                      {agents.length === 0 ? (
-                        <TableRow>
-                          <TableCell colSpan={6} align="center">No agent configs</TableCell>
-                        </TableRow>
-                      ) : (
-                        agents.map((cfg) => (
-                          <TableRow key={cfg.id} sx={cfg.agent_id === null ? { bgcolor: 'rgba(0, 242, 254, 0.05)' } : undefined}>
-                            <TableCell>{cfg.id}</TableCell>
-                            <TableCell sx={{ fontFamily: 'monospace', fontWeight: 500 }}>
-                              {cfg.agent_id === null ? (
-                                <Chip label="Default" color="secondary" size="small" />
-                              ) : (
-                                cfg.agent_id
-                              )}
-                            </TableCell>
-                            <TableCell>{cfg.description}</TableCell>
-                            <TableCell>
-                              {cfg.allowed_targets.map((t, i) => (
-                                <Chip key={i} label={t} size="small" sx={{ mr: 0.5, mb: 0.5, fontFamily: 'monospace' }} />
-                              ))}
-                            </TableCell>
-                            <TableCell>{new Date(cfg.updated_at).toLocaleString()}</TableCell>
-                            <TableCell align="right">
-                              <IconButton color="primary" size="small" onClick={() => openEditAgentDialog(cfg)}>
-                                <EditIcon />
-                              </IconButton>
-                              {cfg.agent_id !== null && (
-                                <IconButton color="error" size="small" onClick={() => handleDeleteAgent(cfg.id)}>
-                                  <DeleteIcon />
-                                </IconButton>
-                              )}
-                            </TableCell>
-                          </TableRow>
-                        ))
-                      )}
-                    </TableBody>
-                  </Table>
-                </TableContainer>
+                <PageHeader
+                  title={`Agent Configs (${agents.length})`}
+                  actions={
+                    <Box sx={{ display: 'flex', gap: 1 }}>
+                      <Button startIcon={<RefreshIcon />} onClick={fetchAgents} size="small">
+                        Refresh
+                      </Button>
+                      <Button variant="contained" startIcon={<AddIcon />} onClick={openCreateAgentDialog}>
+                        Add Agent
+                      </Button>
+                    </Box>
+                  }
+                />
+                <AdminTable
+                  columns={agentColumns}
+                  rows={agents}
+                  rowKey="id"
+                  empty={
+                    <EmptyState
+                      icon={<RouterIcon sx={{ fontSize: 48, color: 'text.disabled' }} />}
+                      title="No agent configs"
+                    />
+                  }
+                />
               </Box>
             )}
 
