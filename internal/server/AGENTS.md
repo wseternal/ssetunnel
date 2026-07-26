@@ -43,7 +43,18 @@ One tunnel session: a `net.Conn` whose `Read` yields upstream POST bytes and `Wr
 Thread-safe `map[string]*Session`. `Replace` closes stale sessions on reconnect. `Range` iterates under a copy.
 
 ### `proxyEntry`
-Opens a yamux stream via `findYamux().OpenStream()`, then runs two goroutines for bidirectional `io.CopyBuffer`. Optionally performs token handshake (read line, validate, write "OK\n").
+Opens a yamux stream via `findYamux().OpenStream()`, then runs two goroutines for bidirectional `io.CopyBuffer`. Performs token handshake with optional agent routing:
+
+**Handshake protocol**: `TOKEN [agent_id [target]]\n`
+
+1. Read handshake line, parse token/agent_id/target
+2. Validate token via `ValidateToken`
+3. Look up session by `agent_id` (if provided) or first-match
+4. Validate target against agent config's `allowed_targets`
+5. Send `OK\n` or `ERR <message>\n`
+6. Open yamux stream with target header (if dynamic target mode)
+
+All validation happens **before** sending OK, so errors are reported during handshake rather than corrupting the data stream.
 
 ## Middleware
 - **`AgentAuthMiddleware`**: Bearer token → `ValidateToken` → fallback PIN redemption → `X-SSET-Token` response header on upgrade.
@@ -53,3 +64,5 @@ Opens a yamux stream via `findYamux().OpenStream()`, then runs two goroutines fo
 * **`WriteTimeout: 0`** on the HTTP server — must not kill SSE streams.
 * **`maxUpBody = 1 MiB + 64 KiB`**: Defensive cap above the batch ceiling so exactly-at-ceiling batches don't 413.
 * Session `Close()` must NOT call `yamux.Close()` — yamux's `Close()` calls `s.conn.Close()` (the Session), causing a deadlock.
+* **Validation before OK**: All auth/session/target checks must complete before sending `OK\n` to prevent error messages from corrupting the data stream.
+* **Agent routing**: When `agent_id` is provided, use `findYamuxByAgentID` for exact match; otherwise first-match via `findYamux`.

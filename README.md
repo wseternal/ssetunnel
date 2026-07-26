@@ -97,17 +97,19 @@ ssetunnel server [flags]
 Runs inside the restricted network to forward traffic from the server to local TCP services.
 
 ```bash
-ssetunnel agent --server <URL> --target <TCP_ADDR> [flags]
+ssetunnel agent [--server <URL>] [--target <TCP_ADDR>] [--id <AGENT_ID>] [flags]
 ```
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--server` | *(Required)* | Tunnel server base URL (e.g. `https://tunnel.example.com`) |
-| `--target` | *(Required)* | Target TCP address to forward streams to (e.g. `127.0.0.1:3000`) |
-| `--token` | `SSETUNNEL_TOKEN` | Bearer token or single-use enrollment PIN |
+| `--server` | `http://127.0.0.1:8080` | Tunnel server base URL |
+| `--target` | *(empty)* | Target TCP address (empty = dynamic target mode, reads from stream header) |
+| `--id` | *(empty)* | Agent identifier for server-side routing |
 | `--batch-size` | `16384` | Upstream POST batch ceiling in bytes (`1024` to `1048576`) |
 | `--concurrency` | `1` | Upstream POST parallel sender depth (`1` to `4`) |
 | `--compress` | `false` | Negotiate gzip compression per batch |
+
+Uses session token from `~/.ssetunnel/session` (created by `ssetunnel login`) if available.
 
 ---
 
@@ -116,21 +118,40 @@ ssetunnel agent --server <URL> --target <TCP_ADDR> [flags]
 User-side client wrapper that injects authentication token handshakes and bridges local TCP/Stdio to the server entry listener.
 
 ```bash
-ssetunnel connect --server-entry <TCP_ADDR> --local <LISTEN_ADDR> [flags]
+ssetunnel connect --server-entry <TCP_ADDR> --local <LISTEN_ADDR> [--agent <ID>] [--target <ADDR>] [flags]
 ```
 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--server-entry` | `127.0.0.1:9090` | Tunnel server entry TCP address |
-| `--token` | `SSETUNNEL_TOKEN` | User authentication bearer token |
+| `--agent` | *(empty)* | Agent identifier to route to (for multi-agent setups) |
+| `--target` | *(empty)* | Target address on the agent (for dynamic target mode) |
 | `--local` | *(Required)* | Local TCP listen address (e.g. `127.0.0.1:3306`) or `-` for Stdio mode |
+
+Uses session token from `~/.ssetunnel/session` (created by `ssetunnel login`) if available.
 
 #### Stdio Mode Example (SSH ProxyCommand / Git Integration)
 ```bash
 # In ~/.ssh/config:
 Host private-server
-    ProxyCommand ssetunnel connect --server-entry tunnel.example.com:9090 --token my-user-token --local -
+    ProxyCommand ssetunnel connect --server-entry tunnel.example.com:9090 --agent dev --target 127.0.0.1:22 --local -
 ```
+
+---
+
+### `ssetunnel login`
+
+Interactive username/password authentication with optional TOTP. Saves session token for agent and connect commands.
+
+```bash
+ssetunnel login [--console <URL>]
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--console` | `http://127.0.0.1:8081` | Console API URL |
+
+Saves session token to `~/.ssetunnel/session`.
 
 ---
 
@@ -209,6 +230,35 @@ Schema changes are managed using Atlas. To validate or apply schema definitions:
 # Validate schema against migration directory
 atlas migrate validate --env local
 ```
+
+---
+
+## Agent Routing and Dynamic Target
+
+When multiple agents are registered, use `--agent <id>` to route to a specific agent:
+
+```bash
+# Agent identifies itself
+./ssetunnel agent --server http://localhost:8080 --id devbox
+
+# User connects to specific agent
+./ssetunnel connect --server-entry 127.0.0.1:9090 --agent devbox --target 127.0.0.1:22 --local -
+```
+
+**Dynamic target mode**: When the agent runs without `--target`, it reads the target address from each stream's header. This allows one agent to proxy to multiple services:
+
+```bash
+# Agent in dynamic target mode
+./ssetunnel agent --server http://localhost:8080 --id devbox
+
+# Connect to SSH
+./ssetunnel connect --agent devbox --target 127.0.0.1:22 --local -
+
+# Connect to database
+./ssetunnel connect --agent devbox --target 127.0.0.1:5432 --local 127.0.0.1:15432
+```
+
+Agent configs in the console define allowed targets per agent (e.g., `127.0.0.1:*` allows any port on localhost).
 
 ---
 

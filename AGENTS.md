@@ -45,15 +45,15 @@ User (SSH, DB client, ...)
 * **Path**: `cmd/ssetunnel/`
 
 ### 2. [Server](internal/server/AGENTS.md)
-* **Responsibility**: Public tunnel server — HTTP endpoints (`/events`, `/up`, `/probe`), TCP entry listener, session registry, yamux attachment, auth middleware, and bidirectional proxy between entry connections and yamux streams.
+* **Responsibility**: Public tunnel server — HTTP endpoints (`/events`, `/up`, `/probe`), TCP entry listener, session registry, yamux attachment, auth middleware, agent routing by `agent_id`, and bidirectional proxy between entry connections and yamux streams.
 * **Path**: `internal/server/`
 
 ### 3. [Agent](internal/agent/AGENTS.md)
-* **Responsibility**: Restricted-network agent — dials out to server, accepts yamux streams, proxies to local TCP target, auto-reconnects with exponential backoff.
+* **Responsibility**: Restricted-network agent — dials out to server, accepts yamux streams, proxies to local TCP target (static or dynamic from stream header), auto-reconnects with exponential backoff. Identifies itself with `agent_id` for routing.
 * **Path**: `internal/agent/`
 
 ### 4. [Connect Client](internal/connect/AGENTS.md)
-* **Responsibility**: User-side connection wrapper — `ServeRW` for stdio (SSH ProxyCommand) and `ServeListener` for local TCP port forwarding. Dials the entry listener and proxies bidirectionally.
+* **Responsibility**: User-side connection wrapper — `ServeRW` for stdio (SSH ProxyCommand) and `ServeListener` for local TCP port forwarding. Dials the entry listener with agent routing and optional dynamic target, proxies bidirectionally.
 * **Path**: `internal/connect/`
 
 ### 5. [Transport](internal/transport/AGENTS.md)
@@ -65,11 +65,11 @@ User (SSH, DB client, ...)
 * **Path**: `internal/mux/`
 
 ### 7. [Auth](internal/auth/AGENTS.md)
-* **Responsibility**: PostgreSQL-backed token and PIN management — bearer tokens, single-use PINs with redemption, admin sessions, TOTP verification, read-through token cache.
+* **Responsibility**: PostgreSQL-backed token and PIN management — bearer tokens, single-use PINs with redemption, admin sessions, user sessions with revocation, TOTP verification, agent config management (allowed targets), user permissions, read-through token cache.
 * **Path**: `internal/auth/`
 
 ### 8. [Console API](internal/consoleapi/AGENTS.md)
-* **Responsibility**: JSON management API (`/api/v1/...`) — TOTP login/logout, token CRUD, PIN enrollment with QR code, live session listing.
+* **Responsibility**: JSON management API (`/api/v1/...`) — TOTP login/logout, token CRUD, PIN enrollment with QR code, live session listing, agent config CRUD, user management.
 * **Path**: `internal/consoleapi/`
 
 ### 9. [Console Server](internal/consoleserver/AGENTS.md)
@@ -85,7 +85,7 @@ User (SSH, DB client, ...)
 * **Path**: `migrations/`
 
 ### 12. [Frontend](frontend/AGENTS.md)
-* **Responsibility**: React admin console SPA (Vite + TypeScript), embedded via `go:embed` for the `litespaserver`.
+* **Responsibility**: React admin console SPA (Vite + TypeScript + MUI v9 + orca-ui), embedded via `go:embed` for the `litespaserver`. Mercury Console light theme design system.
 * **Path**: `frontend/`
 
 ---
@@ -126,6 +126,23 @@ ssh -o ProxyCommand="./local.sh connect --local -" user@127.0.0.1   # SSH throug
 
 ### yamux Stream Close Semantics
 yamux `stream.Close()` kills both directions — there is no half-close. This means you cannot signal "done writing" while still reading. The connect client uses TCP `CloseWrite()` on the entry connection instead.
+
+### Agent Routing and Dynamic Target
+**Entry handshake protocol**: `TOKEN [agent_id [target]]\n` (space-separated, optional fields).
+
+When `agent_id` is provided, the server routes to that specific agent via `findYamuxByAgentID`. When `target` is also provided, the agent reads it from the yamux stream header and connects to that address (dynamic target mode).
+
+**Agent configs** in the `agents` table define allowed targets per agent. A NULL `agent_id` row serves as the default config for all agents. The `TargetAllowed` function matches patterns like `*`, `host:*`, or `host:port`.
+
+### SSH ProxyCommand Error Messages
+**Problem**: When handshake fails, SSH only shows "Connection closed by UNKNOWN port 65535".
+
+**Fix**: Write the error to both `os.Stderr` and `w` (stdout pipe) in `ServeRW` so SSH displays the actual error message before its generic message.
+
+### pgx Array Scanning
+**Problem**: The store uses pgx/v5 but `pq.Array()` from lib/pq is incompatible with pgx's binary protocol.
+
+**Fix**: Scan `[]string` directly (pgx handles `text[]` natively) and use `time.Time` for timestamps (pgx returns binary timestamps, not text).
 
 ### Agent Reconnect Backoff
 Sessions that survived past the 10 s health threshold reset the backoff to 0 — a drop after long uptime is a network event, not a flapping server, so retry immediately.
