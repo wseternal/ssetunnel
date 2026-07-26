@@ -53,7 +53,8 @@ type Session struct {
 
 	// userID is the user who authenticated the agent connection.
 	// 0 means unattributed (standalone token without user_id).
-	userID int64
+	// Accessed atomically — set before Replace, read concurrently by Range.
+	userID atomic.Int64
 
 	yamuxMu   sync.Mutex
 	yamuxSess *yamux.Session // per-session yamux; set by attach after mux.Server
@@ -114,10 +115,10 @@ func (s *Session) WantTarget() bool { return s.wantTarget }
 func (s *Session) SetWantTarget(v bool) { s.wantTarget = v }
 
 // UserID returns the user ID associated with this session's agent connection.
-func (s *Session) UserID() int64 { return s.userID }
+func (s *Session) UserID() int64 { return s.userID.Load() }
 
 // SetUserID associates a user with this session (captured from auth context).
-func (s *Session) SetUserID(id int64) { s.userID = id }
+func (s *Session) SetUserID(id int64) { s.userID.Store(id) }
 
 // push accepts one upstream POST body with the given seq (plan decision
 // 1: serial POSTs, monotonic seq). Old seqs are deduped (decision 3: a
