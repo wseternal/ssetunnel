@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hashicorp/yamux"
 	"github.com/wseternal/ssetunnel/internal/auth"
 	"github.com/wseternal/ssetunnel/internal/server"
 	"github.com/wseternal/ssetunnel/migrations"
@@ -79,7 +80,7 @@ func TestEntryListenerHandshake(t *testing.T) {
 	}
 	_ = conn.Close()
 
-	// 2. Connect with valid user session -> expect OK\n
+	// 2. Connect with valid user session but no active agent session -> expect ERR
 	conn2, err := net.Dial("tcp", entryListener.Addr().String())
 	if err != nil {
 		t.Fatalf("failed to dial entry port: %v", err)
@@ -93,7 +94,44 @@ func TestEntryListenerHandshake(t *testing.T) {
 
 	r2 := bufio.NewReader(conn2)
 	resp2, err := r2.ReadString('\n')
-	if err != nil || resp2 != "OK\n" {
-		t.Fatalf("expected OK\\n, got resp=%q, err=%v", resp2, err)
+	if err != nil {
+		t.Fatalf("expected ERR response, got read error: %v", err)
+	}
+	if resp2 != "ERR no active agent session\n" {
+		t.Errorf("expected \"ERR no active agent session\\n\", got %q", resp2)
+	}
+	_ = conn2.Close()
+
+	// 3. Register an agent session, then connect with valid token -> expect OK
+	agentSess := server.NewSession("test-agent-1")
+	agentSess.SetAgentID("dev")
+	reg.Replace(agentSess)
+
+	// Create a real yamux session by connecting a local TCP pair
+	clientConn, srvConn := net.Pipe()
+	defer clientConn.Close()
+	defer srvConn.Close()
+
+	yamuxServer, err := yamux.Server(srvConn, nil)
+	if err != nil {
+		t.Fatalf("failed to create yamux server: %v", err)
+	}
+	agentSess.SetYamuxSession(yamuxServer)
+
+	conn3, err := net.Dial("tcp", entryListener.Addr().String())
+	if err != nil {
+		t.Fatalf("failed to dial entry port: %v", err)
+	}
+	defer conn3.Close()
+
+	_, err = fmt.Fprintf(conn3, "%s dev\n", sessionToken)
+	if err != nil {
+		t.Fatalf("failed to write token with agent_id: %v", err)
+	}
+
+	r3 := bufio.NewReader(conn3)
+	resp3, err := r3.ReadString('\n')
+	if err != nil || resp3 != "OK\n" {
+		t.Fatalf("expected OK\\n, got resp=%q, err=%v", resp3, err)
 	}
 }
