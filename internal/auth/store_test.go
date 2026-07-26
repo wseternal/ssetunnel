@@ -217,9 +217,12 @@ func TestSetTOTPSecret(t *testing.T) {
 	}
 
 	// UserTOTPEnrolled should return true.
-	enrolled, err := store.UserTOTPEnrolled(ctx, "totpuser")
+	enrolled, found, err := store.UserTOTPEnrolled(ctx, "totpuser")
 	if err != nil {
 		t.Fatalf("UserTOTPEnrolled failed: %v", err)
+	}
+	if !found {
+		t.Error("expected found=true for existing user")
 	}
 	if !enrolled {
 		t.Error("expected UserTOTPEnrolled to return true")
@@ -268,7 +271,7 @@ func TestRecoveryCodesRoundTrip(t *testing.T) {
 	// Compute digests and store.
 	digests := make([]string, len(codes))
 	for i, c := range codes {
-		digests[i] = auth.ComputeDigest(c)
+		digests[i] = store.RecoveryCodeDigest(c)
 	}
 	if err := store.SaveRecoveryCodes(ctx, user.ID, digests); err != nil {
 		t.Fatalf("SaveRecoveryCodes failed: %v", err)

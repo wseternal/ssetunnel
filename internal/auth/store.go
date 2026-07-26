@@ -52,13 +52,30 @@ type UserSessionInfo struct {
 }
 
 type Store struct {
-	pool *pgxpool.Pool
+	pool   *pgxpool.Pool
+	pepper string // HMAC key for recovery code digests (empty = SHA-256 fallback)
 }
 
 func NewStore(pool *pgxpool.Pool) *Store {
 	return &Store{
 		pool: pool,
 	}
+}
+
+// SetRecoveryCodePepper sets the HMAC key used for recovery code digests.
+// When set, recovery codes are stored as HMAC-SHA256 instead of plain SHA-256,
+// making offline brute-force attacks infeasible.
+func (s *Store) SetRecoveryCodePepper(pepper string) {
+	s.pepper = pepper
+}
+
+// RecoveryCodeDigest computes the digest for a recovery code using HMAC if a pepper
+// is configured, or SHA-256 as a fallback.
+func (s *Store) RecoveryCodeDigest(plaintextCode string) string {
+	if s.pepper != "" {
+		return ComputeHMACDigest(plaintextCode, s.pepper)
+	}
+	return ComputeDigest(plaintextCode)
 }
 
 func (s *Store) CreateToken(ctx context.Context, rawToken, role, description string, expiresAt *time.Time) error {
@@ -416,19 +433,22 @@ func (s *Store) RevokeUserSession(ctx context.Context, rawToken string) error {
 // --- TOTP & Recovery Codes ---
 
 // UserTOTPEnrolled reports whether the named user has a non-empty TOTP secret.
-// Returns false if the user does not exist.
-func (s *Store) UserTOTPEnrolled(ctx context.Context, username string) (bool, error) {
-	var enrolled bool
-	err := s.pool.QueryRow(ctx,
-		`SELECT totp_secret != '' FROM users WHERE username = $1`, username,
-	).Scan(&enrolled)
+// Returns (enrolled, found, err) — found is false when the user does not exist,
+// allowing callers to handle anti-enumeration in constant time (single query).
+func (s *Store) UserTOTPEnrolled(ctx context.Context, username string) (enrolled, found bool, err error) {
+	var val *bool
+	err = s.pool.QueryRow(ctx,
+		`SELECT CASE WHEN EXISTS(SELECT 1 FROM users WHERE username = $1)
+		  THEN (SELECT totp_secret != '' FROM users WHERE username = $1)
+		  ELSE NULL END`, username,
+	).Scan(&val)
 	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return false, nil
-		}
-		return false, fmt.Errorf("user totp enrolled: %w", err)
+		return false, false, fmt.Errorf("user totp enrolled: %w", err)
 	}
-	return enrolled, nil
+	if val == nil {
+		return false, false, nil // user not found
+	}
+	return *val, true, nil
 }
 
 // GetUserByID returns the UserInfo for a given user ID.
@@ -460,7 +480,7 @@ func (s *Store) SetTOTPSecret(ctx context.Context, userID int64, secret string) 
 }
 
 // SaveRecoveryCodes replaces all unused recovery codes for a user with new ones.
-// The digests slice should contain SHA-256 hex digests of the plaintext codes.
+// The digests slice should contain digests (HMAC-SHA256 or SHA-256) of the plaintext codes.
 func (s *Store) SaveRecoveryCodes(ctx context.Context, userID int64, digests []string) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -486,7 +506,7 @@ func (s *Store) SaveRecoveryCodes(ctx context.Context, userID int64, digests []s
 // ConsumeRecoveryCode atomically marks a recovery code as used for the given user.
 // Returns true if a matching unused code was found and consumed.
 func (s *Store) ConsumeRecoveryCode(ctx context.Context, userID int64, plaintextCode string) (bool, error) {
-	digest := ComputeDigest(plaintextCode)
+	digest := s.RecoveryCodeDigest(plaintextCode)
 	var id int64
 	err := s.pool.QueryRow(ctx,
 		`UPDATE recovery_codes SET used_at = CURRENT_TIMESTAMP
@@ -521,6 +541,49 @@ func (s *Store) DeleteRecoveryCodes(ctx context.Context, userID int64) error {
 		return fmt.Errorf("delete recovery codes: %w", err)
 	}
 	return nil
+}
+
+// SetTOTPSecretAndRecoveryCodes atomically sets the TOTP secret and saves recovery codes
+// in a single transaction. If either operation fails, both are rolled back.
+func (s *Store) SetTOTPSecretAndRecoveryCodes(ctx context.Context, userID int64, secret string, digests []string) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+
+	// Save recovery codes first (so failure leaves user unenrolled, not half-enrolled).
+	if _, err := tx.Exec(ctx, `DELETE FROM recovery_codes WHERE user_id = $1 AND used_at IS NULL`, userID); err != nil {
+		return fmt.Errorf("delete old recovery codes: %w", err)
+	}
+	for _, d := range digests {
+		if _, err := tx.Exec(ctx, `INSERT INTO recovery_codes (user_id, code_digest) VALUES ($1, $2)`, userID, d); err != nil {
+			return fmt.Errorf("insert recovery code: %w", err)
+		}
+	}
+
+	// Set TOTP secret last.
+	tag, err := tx.Exec(ctx, `UPDATE users SET totp_secret = $1 WHERE id = $2`, secret, userID)
+	if err != nil {
+		return fmt.Errorf("set totp secret: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrUserNotFound
+	}
+
+	return tx.Commit(ctx)
+}
+
+// AnyTOTPEnrolled reports whether any user in the system has TOTP configured.
+func (s *Store) AnyTOTPEnrolled(ctx context.Context) (bool, error) {
+	var exists bool
+	err := s.pool.QueryRow(ctx,
+		`SELECT EXISTS(SELECT 1 FROM users WHERE totp_secret != '')`,
+	).Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf("any totp enrolled: %w", err)
+	}
+	return exists, nil
 }
 
 // isUniqueViolation checks if an error is a PostgreSQL unique constraint violation.

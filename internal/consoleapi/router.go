@@ -3,6 +3,7 @@ package consoleapi
 import (
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"strconv"
 	"sync"
@@ -43,6 +44,9 @@ func NewRouter(store *auth.Store, reg *server.Registry) http.Handler {
 		totpRateCount: make(map[string]int),
 		totpRateReset: make(map[string]time.Time),
 	}
+
+	// Periodic cleanup of expired rate limit entries to prevent unbounded memory growth.
+	go api.rateLimiterCleanup()
 
 	r := mux.NewRouter()
 
@@ -240,6 +244,7 @@ func (a *API) handleUserLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleUserLoginCheck returns whether a user has TOTP enrolled (pre-login check).
+// Returns totp_required=true for non-existent users to prevent username enumeration.
 func (a *API) handleUserLoginCheck(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Username string `json:"username"`
@@ -254,7 +259,17 @@ func (a *API) handleUserLoginCheck(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	enrolled, _ := a.store.UserTOTPEnrolled(r.Context(), req.Username)
+	// Single constant-time query: returns enrolled status and whether user exists.
+	// Returns totp_required=true for non-existent users to prevent username enumeration.
+	enrolled, found, err := a.store.UserTOTPEnrolled(r.Context(), req.Username)
+	if err != nil {
+		// Fail closed: if DB is unavailable, assume TOTP is required.
+		log.Printf("user-login-check: DB error for %q: %v", req.Username, err)
+		enrolled = true
+	} else if !found {
+		// User does not exist — return true to prevent enumeration.
+		enrolled = true
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]bool{"totp_required": enrolled})
@@ -314,6 +329,33 @@ func (a *API) resetTOTPRateLimit(key string) {
 	defer a.totpRateMu.Unlock()
 	delete(a.totpRateCount, key)
 	delete(a.totpRateReset, key)
+}
+
+// rateLimiterCleanup periodically purges expired rate limit entries to prevent memory leaks.
+func (a *API) rateLimiterCleanup() {
+	ticker := time.NewTicker(10 * time.Minute)
+	defer ticker.Stop()
+	for range ticker.C {
+		now := time.Now()
+
+		a.pwRateMu.Lock()
+		for ip, reset := range a.pwRateReset {
+			if now.After(reset) {
+				delete(a.pwRateCount, ip)
+				delete(a.pwRateReset, ip)
+			}
+		}
+		a.pwRateMu.Unlock()
+
+		a.totpRateMu.Lock()
+		for key, reset := range a.totpRateReset {
+			if now.After(reset) {
+				delete(a.totpRateCount, key)
+				delete(a.totpRateReset, key)
+			}
+		}
+		a.totpRateMu.Unlock()
+	}
 }
 
 func (a *API) handleUsers(w http.ResponseWriter, r *http.Request) {
@@ -639,6 +681,12 @@ func (a *API) handleTOTPBeginSetup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Check if user is already enrolled.
+	if user.TOTPSecret != "" {
+		http.Error(w, "TOTP is already enrolled; use DELETE /api/v1/totp first to re-enroll", http.StatusConflict)
+		return
+	}
+
 	secret, keyURL, err := auth.GenerateTOTPSecret("ssetunnel", user.Username)
 	if err != nil {
 		http.Error(w, "failed to generate TOTP secret", http.StatusInternalServerError)
@@ -677,13 +725,7 @@ func (a *API) handleTOTPVerifySetup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Persist the TOTP secret.
-	if err := a.store.SetTOTPSecret(r.Context(), sessInfo.UserID, req.Secret); err != nil {
-		http.Error(w, "failed to save TOTP secret", http.StatusInternalServerError)
-		return
-	}
-
-	// Generate and store recovery codes.
+	// Generate recovery codes.
 	const recoveryCodeCount = 8
 	codes, err := auth.GenerateRecoveryCodes(recoveryCodeCount)
 	if err != nil {
@@ -693,10 +735,13 @@ func (a *API) handleTOTPVerifySetup(w http.ResponseWriter, r *http.Request) {
 
 	digests := make([]string, len(codes))
 	for i, c := range codes {
-		digests[i] = auth.ComputeDigest(c)
+		digests[i] = a.store.RecoveryCodeDigest(c)
 	}
-	if err := a.store.SaveRecoveryCodes(r.Context(), sessInfo.UserID, digests); err != nil {
-		http.Error(w, "failed to save recovery codes", http.StatusInternalServerError)
+
+	// Atomically persist TOTP secret + recovery codes in a single transaction.
+	// Recovery codes are saved first so failure leaves user unenrolled, not half-enrolled.
+	if err := a.store.SetTOTPSecretAndRecoveryCodes(r.Context(), sessInfo.UserID, req.Secret, digests); err != nil {
+		http.Error(w, "failed to save TOTP setup", http.StatusInternalServerError)
 		return
 	}
 
@@ -728,7 +773,7 @@ func (a *API) handleTOTPDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if _, err := a.store.ValidatePassword(r.Context(), user.Username, req.Password); err != nil {
-		http.Error(w, "invalid password", http.StatusForbidden)
+		http.Error(w, "invalid password", http.StatusUnauthorized)
 		return
 	}
 

@@ -83,6 +83,8 @@ func runServer(ctx context.Context, args []string) error {
 	heartbeat := fs.Duration("heartbeat", 15*time.Second, "SSE heartbeat interval")
 	dbURL := fs.String("db-url", os.Getenv("DATABASE_URL"), "PostgreSQL DB connection URL (default uses testcontainer if empty)")
 	disableAuth := fs.Bool("disable-auth", false, "Disable authentication enforcement")
+	// Accept --totp-secret for backward compatibility (silently ignored).
+	_ = fs.String("totp-secret", "", "DEPRECATED: per-user TOTP is now used; this flag is ignored")
 
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -119,6 +121,14 @@ func runServer(ctx context.Context, args []string) error {
 			return fmt.Errorf("open postgres pool: %w", err)
 		}
 		store = auth.NewStore(pool)
+
+		// Configure HMAC pepper for recovery code digests (if set).
+		if pepper := os.Getenv("SSETUNNEL_RECOVERY_CODE_PEPPER"); pepper != "" {
+			store.SetRecoveryCodePepper(pepper)
+		} else {
+			log.Println("server: WARNING: SSETUNNEL_RECOVERY_CODE_PEPPER is not set; recovery codes use SHA-256 digests. Set this env var for stronger security.")
+		}
+
 		srv.SetAuthStore(store)
 
 		// Seed an admin user on first startup so the console is accessible.
@@ -131,6 +141,11 @@ func runServer(ctx context.Context, args []string) error {
 		} else if adminPW != "" {
 			log.Printf("server: no admin user found — created 'admin' with password: %s", adminPW)
 			log.Printf("server: ⚠  change this password immediately via the console")
+		}
+
+		// Warn if no users have TOTP enrolled (global TOTP was removed).
+		if anyTOTP, err := store.AnyTOTPEnrolled(ctx); err == nil && !anyTOTP {
+			log.Println("server: no users have TOTP enrolled — per-user TOTP must be set up via the console for two-factor authentication")
 		}
 
 		if *consoleListen != "" {
@@ -357,7 +372,7 @@ func runLogin(_ context.Context, args []string) error {
 	var totpCode string
 	checkBody, _ := json.Marshal(map[string]string{"username": username})
 	checkResp, err := http.Post(*consoleURL+"/api/v1/user-login-check", "application/json", strings.NewReader(string(checkBody)))
-	if err == nil {
+	if err == nil && checkResp.StatusCode == http.StatusOK {
 		defer checkResp.Body.Close()
 		var check struct {
 			TOTPRequired bool `json:"totp_required"`
