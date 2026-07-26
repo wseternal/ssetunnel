@@ -82,7 +82,7 @@ interface AgentConfig {
 }
 
 export default function App() {
-  const [isLoggedIn, setIsLoggedIn] = useState(() => !!localStorage.getItem('sessionToken'));
+  const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [sessionToken, setSessionToken] = useState(() => localStorage.getItem('sessionToken') || '');
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
@@ -143,7 +143,7 @@ export default function App() {
 
   // Validate restored token on mount
   useEffect(() => {
-    if (sessionToken && !isLoggedIn) {
+    if (sessionToken) {
       fetch('/api/v1/me', { headers: { Authorization: `Bearer ${sessionToken}` } })
         .then(res => {
           if (res.ok) setIsLoggedIn(true);
@@ -152,7 +152,10 @@ export default function App() {
             setSessionToken('');
           }
         })
-        .catch(() => {});
+        .catch(() => {
+          localStorage.removeItem('sessionToken');
+          setSessionToken('');
+        });
     }
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 

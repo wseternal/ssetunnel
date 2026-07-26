@@ -11,9 +11,10 @@ import (
 )
 
 var (
-	ErrAgentNotFound      = errors.New("agent not found")
-	ErrDuplicateAgentID   = errors.New("agent_id already exists")
+	ErrAgentNotFound       = errors.New("agent not found")
+	ErrDuplicateAgentID    = errors.New("agent_id already exists")
 	ErrCannotDeleteDefault = errors.New("cannot delete the default agent config (NULL row)")
+	ErrCannotRenameDefault = errors.New("cannot rename the default agent config (NULL row)")
 )
 
 // AgentConfig represents a row in the agents table.
@@ -125,7 +126,20 @@ func (s *Store) CreateAgentConfig(ctx context.Context, agentID, description stri
 }
 
 // UpdateAgentConfig updates an existing agent config by its primary key.
+// The default row (agent_id IS NULL) cannot be renamed to a non-null agent_id.
 func (s *Store) UpdateAgentConfig(ctx context.Context, id int64, agentID *string, description *string, allowedTargets []string) (*AgentConfig, error) {
+	// Guard: prevent renaming the default (NULL) row to a named agent_id.
+	if agentID != nil {
+		var currentAgentID *string
+		checkRow := s.pool.QueryRow(ctx, `SELECT agent_id FROM agents WHERE id = $1`, id)
+		if err := checkRow.Scan(&currentAgentID); err != nil {
+			return nil, ErrAgentNotFound
+		}
+		if currentAgentID == nil {
+			return nil, ErrCannotRenameDefault
+		}
+	}
+
 	var sets []string
 	var args []any
 	argIdx := 1

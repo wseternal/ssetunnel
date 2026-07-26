@@ -370,6 +370,13 @@ func (s *Store) ValidateUserSession(ctx context.Context, rawToken string) (*User
 	return &info, nil
 }
 
+// RevokeUserSession deletes a user session by its raw token, invalidating it immediately.
+func (s *Store) RevokeUserSession(ctx context.Context, rawToken string) error {
+	digest := ComputeDigest(rawToken)
+	_, err := s.pool.Exec(ctx, `DELETE FROM user_sessions WHERE digest = $1`, digest)
+	return err
+}
+
 // isUniqueViolation checks if an error is a PostgreSQL unique constraint violation.
 func isUniqueViolation(err error) bool {
 	var pgErr *pgconn.PgError
