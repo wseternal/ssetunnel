@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -328,12 +329,16 @@ func TestE2E_NoAuth_Reconnect(t *testing.T) {
 	// connection actually closes (EOF / error) within the budget.
 	idle.SetReadDeadline(start.Add(2 * time.Second))
 	var drained int
+	buf := make([]byte, 64)
 	for {
-		buf := make([]byte, 64)
 		n, err := idle.Read(buf)
 		drained += n
 		if err != nil {
-			break // EOF, timeout, or reset — connection closed cleanly
+			var nerr net.Error
+			if errors.As(err, &nerr) && nerr.Timeout() {
+				t.Fatalf("idle conn still open 2s after session kill (drained %d bytes)", drained)
+			}
+			break // EOF or reset — clean close
 		}
 		if drained > 64 {
 			t.Fatalf("idle conn received %d bytes after session kill, proxy still alive", drained)
