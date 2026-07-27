@@ -213,7 +213,7 @@ func dialAgent(serverURL string) (net.Conn, error) {
 		return nil, fmt.Errorf("listen local: %w", err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	client := connect.NewClient(serverURL, "", "", "")
+	client := connect.NewClient(serverURL, "", "", "", "")
 	client.BatchSize = 64 << 10
 	go client.ServeListener(ctx, ln)
 	c, err := net.Dial("tcp", ln.Addr().String())
@@ -420,7 +420,7 @@ func TestE2E_Auth_FullCycle(t *testing.T) {
 	clientCtx, clientCancel := context.WithCancel(ctx)
 	defer clientCancel()
 
-	client := connect.NewClient(authURL, userSessionToken, "", "")
+	client := connect.NewClient(authURL, userSessionToken, "", "", "")
 	go client.ServeListener(clientCtx, localLn)
 
 	// 2. Dial the local client wrapper and echo a message.
@@ -492,7 +492,7 @@ func TestE2E_Auth_InvalidTokenRejected(t *testing.T) {
 	}
 	defer ln.Close()
 
-	client := connect.NewClient(authURL, "invalid-token-should-be-rejected", "", "")
+	client := connect.NewClient(authURL, "invalid-token-should-be-rejected", "", "", "")
 	err = client.ServeListener(ctx, ln)
 	if err == nil {
 		t.Fatal("expected ServeListener to fail with invalid token, got nil")
@@ -523,7 +523,7 @@ func TestE2E_NoAuth_StdioRoundTrip(t *testing.T) {
 		t.Fatalf("pipe stdout: %v", err)
 	}
 
-	client := connect.NewClient(noAuthURL, "", "", "")
+	client := connect.NewClient(noAuthURL, "", "", "", "")
 
 	done := make(chan error, 1)
 	go func() {

@@ -26,6 +26,13 @@ func NewConsoleHandler(ctx context.Context, pool *pgxpool.Pool, store *auth.Stor
 	spaCfg := litespaserver.Config{
 		EmbeddedContent: frontend.ConsoleWebRootFs,
 		StaticPaths:     []string{"/assets/**"},
+		CSP: litespaserver.CSPConfig{
+			ScriptSrcs:   litespaserver.ScriptSrcAll,
+			StyleSrcs:    litespaserver.StyleSrcAll,
+			ConnectSrcs:  litespaserver.ConnectSrcAll,
+			FontSrcs:     litespaserver.FontSrcAll,
+			ManifestSrcs: litespaserver.ManifestSrcAll,
+		},
 	}
 	spaServer := litespaserver.NewServer(ctx, pool, spaCfg)
 	r.PathPrefix("/").HandlerFunc(spaServer.ServeRoot).Methods("GET")

@@ -139,7 +139,7 @@ func TestConnectClient_LocalPortMode(t *testing.T) {
 	}
 	defer localListener.Close()
 
-	client := connect.NewClient(httpSrv.URL, userToken, "", "")
+	client := connect.NewClient(httpSrv.URL, userToken, "", "", "")
 
 	go func() {
 		_ = client.ServeListener(ctx, localListener)
@@ -271,7 +271,7 @@ func TestServeRW_ServerClosesReturns(t *testing.T) {
 		t.Fatalf("pipe stdout: %v", err)
 	}
 
-	client := connect.NewClient(httpSrv.URL, "", "", "")
+	client := connect.NewClient(httpSrv.URL, "", "", "", "")
 	done := make(chan error, 1)
 	go func() {
 		done <- client.ServeRW(ctx, stdinR, stdoutW)
@@ -321,7 +321,7 @@ func TestServeRW_HandshakeFailureWritesToWriter(t *testing.T) {
 	ln.Close() // close immediately so dial fails
 
 	var stdout bytes.Buffer
-	client := connect.NewClient("http://"+addr, "bad-token", "", "")
+	client := connect.NewClient("http://"+addr, "bad-token", "", "", "")
 
 	err = client.ServeRW(ctx, strings.NewReader(""), &stdout)
 	if err == nil {

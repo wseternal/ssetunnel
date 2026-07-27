@@ -23,6 +23,7 @@ import (
 // recover from drops automatically).
 type Agent struct {
 	ServerURL  string        // tunnel server base URL
+	BasePath   string        // HTTP path prefix for tunnel endpoints (e.g. "/tunnel"); empty means no prefix
 	Target     string        // TCP address to forward streams to (empty = dynamic mode)
 	AgentID    string        // human-readable agent identifier (e.g. "mydevbox")
 	Token      string        // Bearer token or single-use PIN for authentication
@@ -109,6 +110,7 @@ func newAgentBackoff() *backoff.ExponentialBackOff {
 func (a *Agent) runOnce(ctx context.Context) error {
 	conn, err := transport.DialAgent(ctx, transport.Config{
 		URL:              a.ServerURL,
+		BasePath:         a.BasePath,
 		Token:            a.Token,
 		RequestModifier:  a.RequestModifier,
 		MaxWait:          a.MaxWait,
