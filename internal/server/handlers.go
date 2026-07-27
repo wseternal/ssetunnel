@@ -294,6 +294,10 @@ type connectSession struct {
 // session, opens a stream, and bridges bidirectionally between the HTTP
 // transport and the yamux stream.
 func (h *Handler) handleConnect(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
 	f, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
@@ -353,6 +357,14 @@ func (h *Handler) handleConnect(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, fmt.Sprintf("target %q not allowed", target), http.StatusForbidden)
 			return
 		}
+	}
+
+	// Re-check the session is still alive before opening a stream — the
+	// agent may have reconnected between the short-poll loop and here,
+	// causing Registry.Replace to close the old yamux session (TOCTOU).
+	if ms.IsClosed() {
+		http.Error(w, "agent session replaced, retry", http.StatusServiceUnavailable)
+		return
 	}
 
 	// Open a yamux stream to the agent.
@@ -467,6 +479,12 @@ func (h *Handler) handleConnectUp(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Write to the up pipe with a deadline to avoid blocking indefinitely.
+	// Check request context first: if the client disconnected mid-POST,
+	// don't block on a write the client will never see.
+	if r.Context().Err() != nil {
+		http.Error(w, "client disconnected", http.StatusGone)
+		return
+	}
 	cs.up.SetWriteDeadline(time.Now().Add(defaultWriteTimeout))
 	if _, err := cs.up.Write(body); err != nil {
 		http.Error(w, "session closed", http.StatusConflict)
