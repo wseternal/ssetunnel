@@ -247,9 +247,7 @@ func runAgent(ctx context.Context, args []string) error {
 
 func runConnect(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("connect", flag.ContinueOnError)
-	serverURL := fs.String("server", "http://127.0.0.1:8080", "tunnel server URL")
-	fs.StringVar(serverURL, "server-agent", "", "DEPRECATED: use -server")
-	fs.StringVar(serverURL, "server-entry", "", "DEPRECATED: use -server")
+	server := fs.String("server", "http://127.0.0.1:8080", "tunnel server URL")
 	agentID := fs.String("agent", "", "agent identifier to connect to (e.g. mydevbox)")
 	target := fs.String("target", "", "target address on the agent machine (e.g. 127.0.0.1:22)")
 	local := fs.String("local", "", "local listen TCP address (e.g. 127.0.0.1:3306) or '-' for Stdio mode")
@@ -261,12 +259,9 @@ func runConnect(ctx context.Context, args []string) error {
 		return errors.New("--local is required (e.g. --local 127.0.0.1:3306 or --local -)")
 	}
 
-	// Auto-detect legacy TCP addresses (no http:// or https:// prefix)
-	// and convert to HTTP URL for backward compatibility.
-	url := *serverURL
-	if url != "" && !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") {
-		log.Printf("connect: WARNING: %q looks like a TCP address; converting to http://%s (the TCP entry listener is removed)", url, url)
-		url = "http://" + url
+	url := *server
+	if url == "" {
+		return errors.New("--server is required (e.g. --server http://tunnel.example.com:8080)")
 	}
 
 	// Load session token from ~/.ssetunnel/session
