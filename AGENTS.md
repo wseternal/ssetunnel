@@ -31,7 +31,7 @@ User (SSH, DB client, ...)
 
 **Data flow for an SSH ProxyCommand session:**
 1. SSH client spawns `connect --local -` as ProxyCommand (stdin/stdout pipes)
-2. Connect client dials the server's TCP agent listener, performs token handshake
+2. Connect client dials the server via HTTP transport (GET /connect SSE + POST /connect-up)
 3. Server opens a yamux stream to the agent's session
 4. Agent accepts the stream and dials the local TCP target (sshd)
 5. Bidirectional `io.Copy` proxy chains: SSH client ↔ connect ↔ server ↔ agent ↔ sshd
@@ -45,7 +45,7 @@ User (SSH, DB client, ...)
 * **Path**: `cmd/ssetunnel/`
 
 ### 2. [Server](internal/server/AGENTS.md)
-* **Responsibility**: Public tunnel server — HTTP endpoints (`/events`, `/up`, `/probe`), TCP agent listener, session registry, yamux attachment, auth middleware, agent routing by `agent_id`, and bidirectional proxy between agent connections and yamux streams.
+* **Responsibility**: Public tunnel server — HTTP endpoints (`/events`, `/up`, `/probe`, `/connect`, `/connect-up`), session registry, yamux attachment, auth middleware, agent routing by `agent_id`, and bidirectional proxy between agent connections and yamux streams.
 * **Path**: `internal/server/`
 
 ### 3. [Agent](internal/agent/AGENTS.md)
@@ -53,7 +53,7 @@ User (SSH, DB client, ...)
 * **Path**: `internal/agent/`
 
 ### 4. [Connect Client](internal/connect/AGENTS.md)
-* **Responsibility**: User-side connection wrapper — `ServeRW` for stdio (SSH ProxyCommand) and `ServeListener` for local TCP port forwarding. Dials the agent listener with agent routing and optional dynamic target, proxies bidirectionally.
+* **Responsibility**: User-side connection wrapper — `ServeRW` for stdio (SSH ProxyCommand) and `ServeListener` for local TCP port forwarding. Dials the server via HTTP transport (`transport.DialConnect`) with agent routing and optional dynamic target, proxies bidirectionally.
 * **Path**: `internal/connect/`
 
 ### 5. [Transport](internal/transport/AGENTS.md)
