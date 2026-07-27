@@ -31,7 +31,9 @@ func TestRunServer_AddressAlreadyBound(t *testing.T) {
 			defer ln.Close()
 			addr := ln.Addr().String()
 
-			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			// 30 s: the console-listen subtest provisions a TestContainer,
+			// runs migrations, and seeds an admin user — all on this context.
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
 
 			args := []string{"--disable-auth"}
