@@ -36,6 +36,13 @@ type Config struct {
 	MaxWait        time.Duration // 0 → DefaultMaxWait
 	MaxQueuedBytes int           // Write blocks past this; 0 → DefaultMaxQueuedBytes
 
+	// EventsPath overrides the SSE downstream endpoint path (default "/events").
+	// Used by DialConnect to point at "/connect".
+	EventsPath string
+	// UpPath overrides the POST upstream endpoint path (default "/up").
+	// Used by DialConnect to point at "/connect-up".
+	UpPath string
+
 	// DisableCaps is a test-only knob (cycle-2 plan decision 10): when
 	// true the agent sends no X-SSET-Caps request header and ignores the
 	// server's response caps — pure cycle-1 wire behavior.
@@ -69,6 +76,12 @@ type Config struct {
 	// WantTargetHeader tells the server to write the target address as the
 	// first line on each yamux stream (for dynamic target mode).
 	WantTargetHeader bool
+
+	// Target is the dynamic target address (e.g. "127.0.0.1:22"). When set,
+	// it is passed as a query parameter to the server for connect clients.
+	// The server validates it against agent config and writes it as the
+	// target header on the yamux stream if the agent wants it.
+	Target string
 }
 
 // Conn is the agent side of the tunnel: a net.Conn over SSE-down +
@@ -150,9 +163,18 @@ func DialAgent(ctx context.Context, cfg Config) (*Conn, error) {
 		conc = 1
 	}
 
+	eventsPath := cfg.EventsPath
+	if eventsPath == "" {
+		eventsPath = "/events"
+	}
+	upPath := cfg.UpPath
+	if upPath == "" {
+		upPath = "/up"
+	}
+
 	c := &Conn{
 		client:   client,
-		upURL:    cfg.URL + "/up",
+		upURL:    cfg.URL + upPath,
 		id:       id,
 		down:     NewPipe(downPipeCap),
 		modifier: cfg.RequestModifier,
@@ -161,8 +183,19 @@ func DialAgent(ctx context.Context, cfg Config) (*Conn, error) {
 	c.ownClient = cfg.Client == nil
 	c.ctx, c.cancel = context.WithCancel(ctx)
 
-	req, err := http.NewRequestWithContext(c.ctx, http.MethodGet,
-		cfg.URL+"/events?id="+url.QueryEscape(id), nil)
+	// Build events URL with query parameters.
+	eventsURL := cfg.URL + eventsPath + "?id=" + url.QueryEscape(id)
+	if cfg.AgentID != "" {
+		eventsURL += "&agent=" + url.QueryEscape(cfg.AgentID)
+	}
+	if cfg.Target != "" {
+		eventsURL += "&target=" + url.QueryEscape(cfg.Target)
+	}
+	if cfg.WantTargetHeader {
+		eventsURL += "&want_target=true"
+	}
+
+	req, err := http.NewRequestWithContext(c.ctx, http.MethodGet, eventsURL, nil)
 	if err != nil {
 		c.cancel()
 		return nil, fmt.Errorf("build events request: %w", err)
@@ -234,6 +267,22 @@ func DialAgent(ctx context.Context, cfg Config) (*Conn, error) {
 	c.wg.Add(1)
 	go c.readLoop(resp.Body)
 	return c, nil
+}
+
+// DialConnect opens an HTTP transport connection for connect clients,
+// using the /connect (SSE-down) and /connect-up (POST-up) endpoints.
+// It forces single-sender mode (no caps negotiation) and passes the
+// agent ID and target as query parameters so the server can route to
+// the correct agent.
+func DialConnect(ctx context.Context, cfg Config) (*Conn, error) {
+	cfg.EventsPath = "/connect"
+	cfg.UpPath = "/connect-up"
+	cfg.DisableCaps = true
+	cfg.Concurrency = 1
+	// Target is passed as a query parameter; the server determines whether
+	// to write it as a target header on the yamux stream based on the
+	// agent's session capabilities.
+	return DialAgent(ctx, cfg)
 }
 
 // SessionID returns the agent-generated session ID.

@@ -77,8 +77,6 @@ func main() {
 func runServer(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("server", flag.ContinueOnError)
 	listen := fs.String("listen", ":8080", "HTTP listen address for tunnel endpoints")
-	agentAddr := fs.String("agent", ":9090", "TCP agent listen address for user connections")
-	fs.StringVar(agentAddr, "entry", ":9090", "DEPRECATED: use -agent")
 	consoleListen := fs.String("console-listen", ":8081", "HTTP listen address for admin console SPA")
 	heartbeat := fs.Duration("heartbeat", 15*time.Second, "SSE heartbeat interval")
 	dbURL := fs.String("db-url", os.Getenv("DATABASE_URL"), "PostgreSQL DB connection URL (default uses testcontainer if empty)")
@@ -97,13 +95,6 @@ func runServer(ctx context.Context, args []string) error {
 
 	srv := server.NewServer(*heartbeat)
 
-	// Open the agent listener eagerly so address-in-use errors surface
-	// immediately instead of after other resources are allocated.
-	agentLn, err := net.Listen("tcp", *agentAddr)
-	if err != nil {
-		return fmt.Errorf("listen agent %s: %w", *agentAddr, err)
-	}
-
 	var store *auth.Store
 	var consoleLn net.Listener
 	var pool *pgxpool.Pool
@@ -115,9 +106,9 @@ func runServer(ctx context.Context, args []string) error {
 		dbcfg := orcapostgres.DBConfig{
 			DatabaseURLTemplate: targetDBURL,
 		}
+		var err error
 		pool, err = orcapostgres.OpenPool(ctx, dbcfg, orcapostgres.NewMigrator(migrations.FS, nil))
 		if err != nil {
-			agentLn.Close()
 			return fmt.Errorf("open postgres pool: %w", err)
 		}
 		store = auth.NewStore(pool)
@@ -133,7 +124,6 @@ func runServer(ctx context.Context, args []string) error {
 
 		// Seed an admin user on first startup so the console is accessible.
 		if adminPW, err := store.EnsureAdminUser(ctx); err != nil {
-			agentLn.Close()
 			if consoleLn != nil {
 				consoleLn.Close()
 			}
@@ -149,31 +139,23 @@ func runServer(ctx context.Context, args []string) error {
 		}
 
 		if *consoleListen != "" {
+			var err error
 			consoleLn, err = net.Listen("tcp", *consoleListen)
 			if err != nil {
-				agentLn.Close()
 				return fmt.Errorf("listen console %s: %w", *consoleListen, err)
 			}
 		}
 	}
 
 	// Open the HTTP listener eagerly so address-in-use errors surface
-	// before we start serving on the other listeners.
+	// before we start serving.
 	httpLn, err := net.Listen("tcp", *listen)
 	if err != nil {
-		agentLn.Close()
 		if consoleLn != nil {
 			consoleLn.Close()
 		}
 		return fmt.Errorf("listen http %s: %w", *listen, err)
 	}
-
-	// All listeners are open; start serving.
-	go func() {
-		if err := srv.ServeAgent(ctx, agentLn); err != nil {
-			log.Printf("server: agent listener: %v", err)
-		}
-	}()
 
 	if consoleLn != nil {
 		consoleHandler := consoleserver.NewConsoleHandler(ctx, pool, store, srv.Reg)
@@ -203,7 +185,7 @@ func runServer(ctx context.Context, args []string) error {
 	}()
 
 	log.Printf("server: ssetunnel %s", BuildVersion())
-	log.Printf("server: http %s, agent %s", *listen, *agentAddr)
+	log.Printf("server: http %s", *listen)
 	if err := httpSrv.Serve(httpLn); !errors.Is(err, http.ErrServerClosed) {
 		return fmt.Errorf("serve http: %w", err)
 	}
@@ -265,8 +247,9 @@ func runAgent(ctx context.Context, args []string) error {
 
 func runConnect(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("connect", flag.ContinueOnError)
-	serverAgent := fs.String("server-agent", "127.0.0.1:9090", "tunnel server agent TCP address")
-	fs.StringVar(serverAgent, "server-entry", "127.0.0.1:9090", "DEPRECATED: use -server-agent")
+	serverURL := fs.String("server", "http://127.0.0.1:8080", "tunnel server URL")
+	fs.StringVar(serverURL, "server-agent", "", "DEPRECATED: use -server")
+	fs.StringVar(serverURL, "server-entry", "", "DEPRECATED: use -server")
 	agentID := fs.String("agent", "", "agent identifier to connect to (e.g. mydevbox)")
 	target := fs.String("target", "", "target address on the agent machine (e.g. 127.0.0.1:22)")
 	local := fs.String("local", "", "local listen TCP address (e.g. 127.0.0.1:3306) or '-' for Stdio mode")
@@ -278,6 +261,14 @@ func runConnect(ctx context.Context, args []string) error {
 		return errors.New("--local is required (e.g. --local 127.0.0.1:3306 or --local -)")
 	}
 
+	// Auto-detect legacy TCP addresses (no http:// or https:// prefix)
+	// and convert to HTTP URL for backward compatibility.
+	url := *serverURL
+	if url != "" && !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") {
+		log.Printf("connect: WARNING: %q looks like a TCP address; converting to http://%s (the TCP entry listener is removed)", url, url)
+		url = "http://" + url
+	}
+
 	// Load session token from ~/.ssetunnel/session
 	sessToken, sessErr := auth.LoadSession()
 	if sessErr != nil {
@@ -286,10 +277,10 @@ func runConnect(ctx context.Context, args []string) error {
 		log.Printf("connect: using session from ~/.ssetunnel/session")
 	}
 
-	client := connect.NewClient(*serverAgent, sessToken, *agentID, *target)
+	client := connect.NewClient(url, sessToken, *agentID, *target)
 
 	if *local == "-" {
-		log.Printf("connect: running in Stdio mode connecting to %s (agent=%s, target=%s)", *serverAgent, *agentID, *target)
+		log.Printf("connect: running in Stdio mode connecting to %s (agent=%s, target=%s)", url, *agentID, *target)
 		return client.ServeStdio(ctx)
 	}
 
@@ -297,7 +288,7 @@ func runConnect(ctx context.Context, args []string) error {
 	if err != nil {
 		return fmt.Errorf("listen local %s: %w", *local, err)
 	}
-	log.Printf("connect: listening on local port %s -> agent %s (agent=%s, target=%s)", *local, *serverAgent, *agentID, *target)
+	log.Printf("connect: listening on local port %s -> server %s (agent=%s, target=%s)", *local, url, *agentID, *target)
 	return client.ServeListener(ctx, ln)
 }
 

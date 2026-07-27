@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/wseternal/ssetunnel/internal/agent"
+	"github.com/wseternal/ssetunnel/internal/connect"
 )
 
 // TestHTTPServer_IdleTimeoutStability verifies that the agent session
@@ -56,17 +57,8 @@ func TestHTTPServer_IdleTimeoutStability(t *testing.T) {
 		}
 	}()
 
-	// Agent listener.
-	agentLn, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen agent: %v", err)
-	}
-	defer agentLn.Close()
-	agentAddr := agentLn.Addr().String()
-
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go srv.ServeAgent(ctx, agentLn)
 
 	// Connect agent.
 	ag := &agent.Agent{
@@ -91,7 +83,7 @@ func TestHTTPServer_IdleTimeoutStability(t *testing.T) {
 	}
 
 	// Verify the tunnel works with a round-trip.
-	doAgentRoundTrip(t, agentAddr, []byte("before idle"))
+	doAgentRoundTrip(t, serverURL, []byte("before idle"))
 
 	// Wait well past the idle timeout (500ms). The agent's yamux
 	// keepalive fires every 30s, so between keepalives the POST
@@ -108,7 +100,7 @@ func TestHTTPServer_IdleTimeoutStability(t *testing.T) {
 	}
 
 	// The tunnel must still work.
-	doAgentRoundTrip(t, agentAddr, []byte("after idle"))
+	doAgentRoundTrip(t, serverURL, []byte("after idle"))
 
 	// Wait again past the idle timeout to ensure stability.
 	time.Sleep(2 * time.Second)
@@ -117,15 +109,25 @@ func TestHTTPServer_IdleTimeoutStability(t *testing.T) {
 	if len(ids) == 0 || ids[0] != sessID {
 		t.Fatalf("session unstable across idle periods: was %s, now %v", sessID, ids)
 	}
-	doAgentRoundTrip(t, agentAddr, []byte("still working"))
+	doAgentRoundTrip(t, serverURL, []byte("still working"))
 }
 
-// doAgentRoundTrip dials the agent listener and verifies a byte-exact echo.
-func doAgentRoundTrip(t *testing.T, agent string, data []byte) {
+// doAgentRoundTrip uses the connect client to dial the server and verifies a byte-exact echo.
+func doAgentRoundTrip(t *testing.T, serverURL string, data []byte) {
 	t.Helper()
-	c, err := net.Dial("tcp", agent)
+	localLn, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		t.Fatalf("dial agent: %v", err)
+		t.Fatalf("listen local: %v", err)
+	}
+	defer localLn.Close()
+
+	client := connect.NewClient(serverURL, "", "", "")
+	client.BatchSize = 64 << 10
+	go client.ServeListener(context.Background(), localLn)
+
+	c, err := net.Dial("tcp", localLn.Addr().String())
+	if err != nil {
+		t.Fatalf("dial local: %v", err)
 	}
 	defer c.Close()
 	c.SetDeadline(time.Now().Add(10 * time.Second))

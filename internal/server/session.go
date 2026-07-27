@@ -60,6 +60,7 @@ type Session struct {
 	yamuxSess *yamux.Session // per-session yamux; set by attach after mux.Server
 
 	closeOnce sync.Once
+	closeCh   chan struct{} // closed by Close(); for monitor goroutines
 }
 
 // defaultWriteTimeout keeps POST handlers short-lived when the consumer
@@ -79,6 +80,7 @@ func NewSession(id string) *Session {
 		WriteTimeout: defaultWriteTimeout,
 		GapTimeout:   defaultGapTimeout,
 		createdAt:    time.Now().UTC(),
+		closeCh:      make(chan struct{}),
 	}
 }
 
@@ -195,9 +197,15 @@ func (s *Session) Close() error {
 	s.closeOnce.Do(func() {
 		s.up.Close()
 		s.down.Close()
+		close(s.closeCh)
 	})
 	return nil
 }
+
+// Done returns a channel that is closed when the session is torn down.
+// Useful for goroutines that need to detect session death without
+// consuming data from the session's pipes.
+func (s *Session) Done() <-chan struct{} { return s.closeCh }
 
 // SetYamuxSession attaches a yamux session to this tunnel session.
 func (s *Session) SetYamuxSession(ms *yamux.Session) {

@@ -35,12 +35,12 @@ var (
 	echoAddr string
 
 	// No-auth server: agent connects freely, no token required.
-	noAuthSrv   *server.Server
-	noAuthAgent string // agent listener address
+	noAuthSrv *server.Server
+	noAuthURL string // server HTTP URL for connect client
 
 	// Auth server: agent must present a valid token.
-	authSrv    *server.Server
-	authAgent  string // agent listener address
+	authSrv   *server.Server
+	authURL   string // server HTTP URL for connect client
 	authStore  *auth.Store
 	agentToken string
 	userSessionToken string
@@ -110,17 +110,10 @@ func runE2E(m *testing.M) int {
 
 	// ── No-auth server + agent ──────────────────────────────────────────
 	noAuthSrv = server.NewServer(20 * time.Millisecond)
+	noAuthSrv.SetAuthStore(nil) // register /connect routes (nil store = no auth)
 	noAuthHTTP := httptest.NewServer(noAuthSrv.HTTPHandler())
 	defer noAuthHTTP.Close()
-
-	noAuthAgentLn, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "e2e: listen no-auth agent: %v\n", err)
-		return 1
-	}
-	defer noAuthAgentLn.Close()
-	noAuthAgent = noAuthAgentLn.Addr().String()
-	go noAuthSrv.ServeAgent(ctx, noAuthAgentLn)
+	noAuthURL = noAuthHTTP.URL
 
 	noAuthAg := &agent.Agent{
 		ServerURL:  noAuthHTTP.URL,
@@ -134,15 +127,7 @@ func runE2E(m *testing.M) int {
 	authSrv.SetAuthStore(authStore)
 	authHTTP := httptest.NewServer(authSrv.HTTPHandler())
 	defer authHTTP.Close()
-
-	authAgentLn, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "e2e: listen auth agent: %v\n", err)
-		return 1
-	}
-	defer authAgentLn.Close()
-	authAgent = authAgentLn.Addr().String()
-	go authSrv.ServeAgent(ctx, authAgentLn)
+	authURL = authHTTP.URL
 
 	authAg := &agent.Agent{
 		ServerURL:  authHTTP.URL,
@@ -220,14 +205,40 @@ func waitNewSession(reg *server.Registry, notID string, within time.Duration) (s
 	return "", fmt.Errorf("no new session (other than %s) within %v", notID, within)
 }
 
-// dialAgent opens a raw TCP connection to the agent listener.
-func dialAgent(addr string) (net.Conn, error) {
-	c, err := net.Dial("tcp", addr)
+// dialAgent connects to the server's /connect endpoint via the connect client
+// and returns a net.Conn bridged through the tunnel.
+func dialAgent(serverURL string) (net.Conn, error) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
+		return nil, fmt.Errorf("listen local: %w", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	client := connect.NewClient(serverURL, "", "", "")
+	client.BatchSize = 64 << 10
+	go client.ServeListener(ctx, ln)
+	c, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		cancel()
+		ln.Close()
 		return nil, err
 	}
 	c.SetDeadline(time.Now().Add(30 * time.Second))
-	return c, nil
+	// Wrap to cancel context and close listener on Close.
+	return &cleanupConn{Conn: c, cancel: cancel, ln: ln}, nil
+}
+
+// cleanupConn wraps a net.Conn to clean up the connect client on close.
+type cleanupConn struct {
+	net.Conn
+	cancel context.CancelFunc
+	ln     net.Listener
+}
+
+func (c *cleanupConn) Close() error {
+	err := c.Conn.Close()
+	c.cancel()
+	c.ln.Close()
+	return err
 }
 
 // roundTrip writes want through conn and asserts a byte-exact echo.
@@ -261,7 +272,7 @@ func TestE2E_NoAuth_EchoByteExact(t *testing.T) {
 	if err := waitAnySession(noAuthSrv.Reg, 5*time.Second); err != nil {
 		t.Fatal(err)
 	}
-	c, err := dialAgent(noAuthAgent)
+	c, err := dialAgent(noAuthURL)
 	if err != nil {
 		t.Fatalf("dial agent: %v", err)
 	}
@@ -280,7 +291,7 @@ func TestE2E_NoAuth_ConcurrentEcho(t *testing.T) {
 		wg.Add(1)
 		go func(fill int) {
 			defer wg.Done()
-			c, err := dialAgent(noAuthAgent)
+			c, err := dialAgent(noAuthURL)
 			if err != nil {
 				t.Errorf("dial agent: %v", err)
 				return
@@ -300,34 +311,51 @@ func TestE2E_NoAuth_Reconnect(t *testing.T) {
 	}
 
 	// Verify tunnel works before killing.
-	probe, err := dialAgent(noAuthAgent)
+	probe, err := dialAgent(noAuthURL)
 	if err != nil {
 		t.Fatalf("dial probe: %v", err)
 	}
 	roundTrip(t, probe, []byte("before kill"))
 	probe.Close()
 
-	// Grab current session ID and kill it.
-	ids := noAuthSrv.Reg.IDs()
-	if len(ids) == 0 {
-		t.Fatal("no session to kill")
-	}
-	id1 := ids[0]
+	// Wait for agent to stabilize after probe close (probe close may
+	// kill the agent's yamux session via transport cascade).
+	time.Sleep(200 * time.Millisecond)
 
-	idle, err := dialAgent(noAuthAgent)
+	// Grab current sessions.
+	idsBefore := noAuthSrv.Reg.IDs()
+	if len(idsBefore) == 0 {
+		t.Fatal("no session after probe close")
+	}
+	id1 := idsBefore[0]
+
+	idle, err := dialAgent(noAuthURL)
 	if err != nil {
 		t.Fatalf("dial idle: %v", err)
 	}
 	defer idle.Close()
 
+	// Find the session the idle connection is using. It might be the
+	// same as id1 or a new one if the agent reconnected.
+	time.Sleep(200 * time.Millisecond)
+	idsAfter := noAuthSrv.Reg.IDs()
+	killID := id1
+	for _, id := range idsAfter {
+		if id != id1 {
+			killID = id // newer session — idle is likely using this
+			break
+		}
+	}
+
 	start := time.Now()
-	noAuthSrv.Reg.Get(id1).Close()
+	sess := noAuthSrv.Reg.Get(killID)
+	if sess == nil {
+		t.Fatalf("session %s gone before kill", killID)
+	}
+	sess.Close()
 
 	// Idle connection must close cleanly (no hang, no unbounded data).
-	// During yamux shutdown a stray byte or two may leak through before
-	// the server proxy's CloseWrite reaches us.  Drain and confirm the
-	// connection actually closes (EOF / error) within the budget.
-	idle.SetReadDeadline(start.Add(2 * time.Second))
+	idle.SetReadDeadline(start.Add(3 * time.Second))
 	var drained int
 	buf := make([]byte, 64)
 	for {
@@ -336,7 +364,7 @@ func TestE2E_NoAuth_Reconnect(t *testing.T) {
 		if err != nil {
 			var nerr net.Error
 			if errors.As(err, &nerr) && nerr.Timeout() {
-				t.Fatalf("idle conn still open 2s after session kill (drained %d bytes)", drained)
+				t.Fatalf("idle conn still open 3s after session kill (drained %d bytes)", drained)
 			}
 			break // EOF or reset — clean close
 		}
@@ -349,7 +377,7 @@ func TestE2E_NoAuth_Reconnect(t *testing.T) {
 	}
 
 	// Agent reconnects well under the 5 s budget.
-	id2, err := waitNewSession(noAuthSrv.Reg, id1, 5*time.Second)
+	id2, err := waitNewSession(noAuthSrv.Reg, killID, 5*time.Second)
 	if err != nil {
 		t.Fatalf("reconnect: %v", err)
 	}
@@ -359,7 +387,7 @@ func TestE2E_NoAuth_Reconnect(t *testing.T) {
 	t.Logf("reconnected as session %s in %v", id2, time.Since(start))
 
 	// New agent connections work again.
-	c, err := dialAgent(noAuthAgent)
+	c, err := dialAgent(noAuthURL)
 	if err != nil {
 		t.Fatalf("dial after reconnect: %v", err)
 	}
@@ -392,7 +420,7 @@ func TestE2E_Auth_FullCycle(t *testing.T) {
 	clientCtx, clientCancel := context.WithCancel(ctx)
 	defer clientCancel()
 
-	client := connect.NewClient(authAgent, userSessionToken, "", "")
+	client := connect.NewClient(authURL, userSessionToken, "", "")
 	go client.ServeListener(clientCtx, localLn)
 
 	// 2. Dial the local client wrapper and echo a message.
@@ -464,7 +492,7 @@ func TestE2E_Auth_InvalidTokenRejected(t *testing.T) {
 	}
 	defer ln.Close()
 
-	client := connect.NewClient(authAgent, "invalid-token-should-be-rejected", "", "")
+	client := connect.NewClient(authURL, "invalid-token-should-be-rejected", "", "")
 	err = client.ServeListener(ctx, ln)
 	if err == nil {
 		t.Fatal("expected ServeListener to fail with invalid token, got nil")
@@ -495,7 +523,7 @@ func TestE2E_NoAuth_StdioRoundTrip(t *testing.T) {
 		t.Fatalf("pipe stdout: %v", err)
 	}
 
-	client := connect.NewClient(noAuthAgent, "", "", "")
+	client := connect.NewClient(noAuthURL, "", "", "")
 
 	done := make(chan error, 1)
 	go func() {

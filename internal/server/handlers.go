@@ -3,14 +3,18 @@ package server
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/hashicorp/yamux"
 	"github.com/wseternal/ssetunnel/internal/auth"
 	"github.com/wseternal/ssetunnel/internal/transport"
 )
@@ -36,10 +40,16 @@ const (
 // Handler serves the tunnel endpoints: GET /events?id= streams the
 // downstream SSE for a session, POST /up carries upstream batches with
 // X-SSET-Session / X-SSET-Seq headers (plan decision 4).
+// GET /connect and POST /connect-up serve the connect client's HTTP transport.
 type Handler struct {
 	reg       *Registry
 	heartbeat time.Duration
+	store     *auth.Store
 	mux       *http.ServeMux
+
+	// connectSessions maps connect session IDs to connectSession structs,
+	// bridging the connect client's HTTP transport to the agent's yamux stream.
+	connectSessions sync.Map
 
 	// OnSession, if set, is called after each session registers. Set it
 	// before serving; the server uses it to attach yamux (step 7).
@@ -60,10 +70,13 @@ func NewHandler(reg *Registry, heartbeat time.Duration) *Handler {
 
 // NewHandlerWithAuth builds the tunnel handler with an optional auth store.
 func NewHandlerWithAuth(reg *Registry, heartbeat time.Duration, store *auth.Store) *Handler {
-	h := &Handler{reg: reg, heartbeat: heartbeat, mux: http.NewServeMux()}
+	h := &Handler{reg: reg, heartbeat: heartbeat, store: store, mux: http.NewServeMux()}
 	agentAuth := AgentAuthMiddleware(store)
+	connectAuth := ConnectAuthMiddleware(store)
 	h.mux.Handle("/events", agentAuth(http.HandlerFunc(h.handleEvents)))
 	h.mux.Handle("/up", agentAuth(http.HandlerFunc(h.handleUp)))
+	h.mux.Handle("/connect", connectAuth(http.HandlerFunc(h.handleConnect)))
+	h.mux.Handle("/connect-up", connectAuth(http.HandlerFunc(h.handleConnectUp)))
 	h.mux.HandleFunc("/probe", h.handleProbe)
 	return h
 }
@@ -261,4 +274,236 @@ func parseCapsConcurrency(h string) int {
 		return n
 	}
 	return 0
+}
+
+// ---------------------------------------------------------------------------
+// Connect endpoint: HTTP transport for connect clients (replaces TCP listener)
+// ---------------------------------------------------------------------------
+
+// connectSession bridges a connect client's HTTP transport (SSE-down +
+// POST-up) to the agent's yamux stream. It is NOT registered in the
+// session registry (which is for agent tunnel sessions only).
+type connectSession struct {
+	id     string
+	up     *transport.Pipe // POST bodies → yamux stream
+	cancel context.CancelFunc
+}
+
+// handleConnect serves GET /connect: the connect client's SSE downstream.
+// It authenticates via ConnectAuthMiddleware, finds the target agent's yamux
+// session, opens a stream, and bridges bidirectionally between the HTTP
+// transport and the yamux stream.
+func (h *Handler) handleConnect(w http.ResponseWriter, r *http.Request) {
+	f, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+
+	q := r.URL.Query()
+	id := q.Get("id")
+	if id == "" {
+		http.Error(w, "missing id", http.StatusBadRequest)
+		return
+	}
+	agentID := q.Get("agent")
+	target := q.Get("target")
+
+	// Find the target agent's yamux session.
+	// Short-poll: if no agent is available yet (e.g., agent reconnecting
+	// after a session kill), wait up to connectWaitTimeout for one to
+	// appear. This avoids forcing the connect client into expensive
+	// backoff retries when the agent is momentarily between sessions.
+	const connectWaitTimeout = 3 * time.Second
+	const connectPollInterval = 25 * time.Millisecond
+	var ms *yamux.Session
+	var sess *Session
+	deadline := time.Now().Add(connectWaitTimeout)
+	for {
+		if agentID != "" {
+			ms, sess = h.findYamuxByAgentID(agentID)
+		} else {
+			ms, sess = h.findYamux()
+		}
+		if ms != nil && !ms.IsClosed() {
+			break
+		}
+		if time.Now().After(deadline) || r.Context().Err() != nil {
+			if agentID != "" {
+				http.Error(w, fmt.Sprintf("agent %q not connected", agentID), http.StatusNotFound)
+			} else {
+				http.Error(w, "no active agent session", http.StatusNotFound)
+			}
+			return
+		}
+		time.Sleep(connectPollInterval)
+	}
+
+	// Validate target if the connect client specified one and auth is enabled.
+	if target != "" && h.store != nil {
+		lookupID := agentID
+		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+		defer cancel()
+		cfg, err := h.store.GetAgentConfig(ctx, lookupID)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("agent config not found for %q", lookupID), http.StatusNotFound)
+			return
+		}
+		if !auth.TargetAllowed(cfg.AllowedTargets, target) {
+			http.Error(w, fmt.Sprintf("target %q not allowed", target), http.StatusForbidden)
+			return
+		}
+	}
+
+	// Open a yamux stream to the agent.
+	stream, err := ms.OpenStream()
+	if err != nil {
+		http.Error(w, fmt.Sprintf("open stream: %v", err), http.StatusServiceUnavailable)
+		return
+	}
+
+	// Write target header if the agent wants it (dynamic target mode).
+	if target != "" && sess != nil && sess.WantTarget() {
+		if _, err := fmt.Fprintf(stream, "%s\n", target); err != nil {
+			stream.Close()
+			http.Error(w, fmt.Sprintf("write target header: %v", err), http.StatusInternalServerError)
+			return
+		}
+	}
+
+	// Create the connect bridge: up pipe for POST bodies → yamux stream.
+	_, ctxCancel := context.WithCancel(r.Context())
+	cs := &connectSession{
+		id:     id,
+		up:     transport.NewPipe(downPipeCap),
+		cancel: ctxCancel,
+	}
+	h.connectSessions.Store(id, cs)
+	defer func() {
+		ctxCancel()
+		cs.up.Close()
+		stream.Close()
+		h.connectSessions.Delete(id)
+	}()
+
+	// Goroutine: copy upstream data from pipe → yamux stream.
+	go func() {
+		buf := bufferPool.Get().(*[]byte)
+		defer bufferPool.Put(buf)
+		io.CopyBuffer(stream, cs.up, *buf)
+		stream.Close() // signal EOF to agent
+	}()
+
+	// Set up SSE response headers.
+	w.Header().Set("X-SSET-Session", id)
+	transport.WriteHeaders(w)
+	f.Flush()
+
+	// SSE loop: read from yamux stream → write SSE frames to client.
+	// Uses read deadline as heartbeat timer (same pattern as handleEvents).
+	// On heartbeat, also checks session health via sess.Done() to detect
+	// session death promptly (Session.Close() does NOT close yamux streams).
+	sseBuf := make([]byte, 32<<10)
+	for {
+		stream.SetReadDeadline(time.Now().Add(h.heartbeat))
+		n, err := stream.Read(sseBuf)
+		if n > 0 {
+			if werr := transport.WriteFrame(w, f, sseBuf[:n]); werr != nil {
+				return
+			}
+		}
+		if err == nil {
+			continue
+		}
+		var nerr net.Error
+		if errors.As(err, &nerr) && nerr.Timeout() {
+			// Check if the agent session died while we waited.
+			if sess != nil {
+				select {
+				case <-sess.Done():
+					return // session killed
+				default:
+				}
+			}
+			if werr := transport.WriteHeartbeat(w, f); werr != nil {
+				return
+			}
+			continue
+		}
+		return // stream closed
+	}
+}
+
+// handleConnectUp serves POST /connect-up: the connect client's batched upstream.
+// It looks up the connect session by X-SSET-Session header and writes the POST
+// body into the session's up pipe (which feeds the yamux stream).
+func (h *Handler) handleConnectUp(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	id := r.Header.Get("X-SSET-Session")
+	if id == "" {
+		http.Error(w, "missing X-SSET-Session", http.StatusBadRequest)
+		return
+	}
+
+	v, ok := h.connectSessions.Load(id)
+	if !ok {
+		http.Error(w, "unknown connect session", http.StatusConflict)
+		return
+	}
+	cs := v.(*connectSession)
+
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxUpBody))
+	if err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			http.Error(w, "body too large", http.StatusRequestEntityTooLarge)
+		} else {
+			http.Error(w, "read body", http.StatusBadRequest)
+		}
+		return
+	}
+
+	// Write to the up pipe with a deadline to avoid blocking indefinitely.
+	cs.up.SetWriteDeadline(time.Now().Add(defaultWriteTimeout))
+	if _, err := cs.up.Write(body); err != nil {
+		http.Error(w, "session closed", http.StatusConflict)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+// findYamux returns the first open yamux session and its Session from the registry.
+func (h *Handler) findYamux() (*yamux.Session, *Session) {
+	var ms *yamux.Session
+	var found *Session
+	h.reg.Range(func(sess *Session) bool {
+		if m := sess.YamuxSession(); m != nil && !m.IsClosed() {
+			ms = m
+			found = sess
+			return false // stop at first
+		}
+		return true
+	})
+	return ms, found
+}
+
+// findYamuxByAgentID returns the yamux session and Session for an agent with
+// the given agentID. Returns (nil, nil) if no matching agent is found.
+func (h *Handler) findYamuxByAgentID(agentID string) (*yamux.Session, *Session) {
+	var ms *yamux.Session
+	var found *Session
+	h.reg.Range(func(sess *Session) bool {
+		if sess.AgentID() == agentID {
+			if m := sess.YamuxSession(); m != nil && !m.IsClosed() {
+				ms = m
+				found = sess
+				return false
+			}
+		}
+		return true
+	})
+	return ms, found
 }

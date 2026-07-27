@@ -1,18 +1,18 @@
 package connect
 
 import (
-	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net"
 	"os"
-	"strings"
 	"sync"
 	"time"
 
 	"github.com/cenkalti/backoff/v4"
+	"github.com/wseternal/ssetunnel/internal/transport"
 )
 
 var bufferPool = sync.Pool{
@@ -22,28 +22,36 @@ var bufferPool = sync.Pool{
 	},
 }
 
+// Client connects to a tunnel server's HTTP /connect endpoint and proxies
+// bidirectionally between the server's transport (SSE-down + POST-up) and
+// a local reader/writer or TCP listener.
 type Client struct {
-	agentAddr string
+	serverURL string // tunnel server base URL, e.g. http://host:8080
 	token     string
 	agentID   string // agent routing key (empty = first-match)
 	target    string // dynamic target address (empty = no dynamic target)
+
+	// BatchSize is the upstream batch ceiling; 0 → 1024.
+	BatchSize int
+	// MaxWait is the batcher flush ceiling; 0 → 10ms.
+	MaxWait time.Duration
 }
 
-func NewClient(agentAddr, token, agentID, target string) *Client {
+func NewClient(serverURL, token, agentID, target string) *Client {
 	return &Client{
-		agentAddr: agentAddr,
-		token:           token,
-		agentID:         agentID,
-		target:          target,
+		serverURL: serverURL,
+		token:     token,
+		agentID:   agentID,
+		target:    target,
 	}
 }
 
 func (c *Client) ServeListener(ctx context.Context, ln net.Listener) error {
-	// Eagerly validate the token by performing a test handshake at startup.
+	// Eagerly validate the token by performing a test connection at startup.
 	// This catches invalid tokens immediately instead of silently failing
 	// on the first user connection.
 	if c.token != "" {
-		probe, err := c.dialAndHandshake(ctx)
+		probe, err := c.dial(ctx)
 		if err != nil {
 			return fmt.Errorf("token validation failed: %w", err)
 		}
@@ -71,15 +79,13 @@ func (c *Client) ServeStdio(ctx context.Context) error {
 	return c.ServeRW(ctx, os.Stdin, os.Stdout)
 }
 
-// ServeRW connects to the agent server and copies bidirectionally between
-// the provided reader/writer and the server connection. When the server
-// side closes (EOF on read), the connection is torn down immediately so
-// that the writer's consumer (e.g. an SSH client reading from a pipe)
-// also sees EOF and can react. When the reader reaches EOF first, a TCP
-// half-close is used to signal the remote side without killing the read
-// path.
+// ServeRW connects to the tunnel server via HTTP transport and copies
+// bidirectionally between the provided reader/writer and the server
+// connection. When the server side closes (EOF on read), the connection
+// is torn down immediately. When the reader reaches EOF first, the
+// connection is closed (full close — HTTP transport has no half-close).
 func (c *Client) ServeRW(ctx context.Context, r io.Reader, w io.Writer) error {
-	serverConn, err := c.dialAndHandshake(ctx)
+	serverConn, err := c.dial(ctx)
 	if err != nil {
 		// Print a user-friendly error to stderr for direct terminal users,
 		// and to w (stdout in ProxyCommand mode) so the SSH client displays
@@ -87,39 +93,48 @@ func (c *Client) ServeRW(ctx context.Context, r io.Reader, w io.Writer) error {
 		msg := fmt.Sprintf("ssetunnel: %s\n", err)
 		fmt.Fprint(os.Stderr, msg)
 		fmt.Fprint(w, msg)
-		return fmt.Errorf("stdio connect handshake failed: %w", err)
+		return fmt.Errorf("stdio connect failed: %w", err)
 	}
 	defer serverConn.Close()
 
-	// r → server in the background; half-close on reader EOF so the
-	// remote target sees EOF. This goroutine may outlive ServeRW if
-	// the server side closes first (see below), which is fine for
-	// ProxyCommand usage where the process exits on return.
+	type result struct{ err error }
+	done := make(chan result, 1)
+
+	// r → server in the background. When the reader reaches EOF (e.g.,
+	// stdin closes in ProxyCommand mode), close the server connection to
+	// signal EOF to the server. HTTP transport has no half-close, so a
+	// full close is the only way to propagate upstream EOF.
 	go func() {
 		buf := bufferPool.Get().(*[]byte)
 		defer bufferPool.Put(buf)
 		io.CopyBuffer(serverConn, r, *buf)
-		if tcpConn, ok := serverConn.(*net.TCPConn); ok {
-			_ = tcpConn.CloseWrite()
-		}
+		serverConn.Close()
+		done <- result{}
 	}()
 
 	// server → w: when the server side closes (EOF or error), return
 	// immediately. This tears down the process (in ProxyCommand mode),
 	// closing stdout so the parent process (SSH client) sees EOF and
-	// can react. Waiting for r→server here would deadlock when the
-	// reader is a terminal waiting for user input that will never come
-	// because the remote side already closed.
+	// can react.
 	buf := bufferPool.Get().(*[]byte)
 	defer bufferPool.Put(buf)
 	_, err = io.CopyBuffer(w, serverConn, *buf)
-	return err
+	if err != nil {
+		// "use of closed network connection" means the goroutine above
+		// closed the conn after reader EOF — normal termination, not
+		// an error. Same for io.ErrClosedPipe.
+		if errors.Is(err, net.ErrClosed) || errors.Is(err, io.ErrClosedPipe) {
+			return nil
+		}
+		return err
+	}
+	return nil
 }
 
 func (c *Client) handleLocalConn(ctx context.Context, localConn net.Conn) {
 	defer localConn.Close()
 
-	// Retry dialAndHandshake with exponential backoff so transient
+	// Retry dial with exponential backoff so transient
 	// server outages don't immediately kill the user's connection.
 	var serverConn net.Conn
 	err := backoff.Retry(func() error {
@@ -127,15 +142,15 @@ func (c *Client) handleLocalConn(ctx context.Context, localConn net.Conn) {
 			return backoff.Permanent(ctx.Err())
 		}
 		var dialErr error
-		serverConn, dialErr = c.dialAndHandshake(ctx)
+		serverConn, dialErr = c.dial(ctx)
 		if dialErr != nil {
-			log.Printf("connect: handshake failed (will retry): %v", dialErr)
+			log.Printf("connect: dial failed (will retry): %v", dialErr)
 			return dialErr
 		}
 		return nil
 	}, backoff.WithContext(clientBackoff(), ctx))
 	if err != nil {
-		log.Printf("connect: handshake failed after retries: %v", err)
+		log.Printf("connect: dial failed after retries: %v", err)
 		return
 	}
 	defer serverConn.Close()
@@ -164,45 +179,36 @@ func clientBackoff() *backoff.ExponentialBackOff {
 	return b
 }
 
-func (c *Client) dialAndHandshake(ctx context.Context) (net.Conn, error) {
-	d := net.Dialer{Timeout: 10 * time.Second}
-	conn, err := d.DialContext(ctx, "tcp", c.agentAddr)
+// dial connects to the tunnel server's HTTP /connect endpoint using the
+// SSE-down + POST-up transport. The returned net.Conn proxies data through
+// the server to the agent's yamux stream.
+func (c *Client) dial(ctx context.Context) (net.Conn, error) {
+	return c.Dial(ctx)
+}
+
+// Dial connects to the tunnel server's HTTP /connect endpoint using the
+// SSE-down + POST-up transport. The returned net.Conn proxies data through
+// the server to the agent's yamux stream.
+func (c *Client) Dial(ctx context.Context) (net.Conn, error) {
+	batchSize := c.BatchSize
+	if batchSize <= 0 {
+		batchSize = 1024
+	}
+	maxWait := c.MaxWait
+	if maxWait <= 0 {
+		maxWait = 10 * time.Millisecond
+	}
+
+	conn, err := transport.DialConnect(ctx, transport.Config{
+		URL:          c.serverURL,
+		Token:        c.token,
+		AgentID:      c.agentID,
+		Target:       c.target,
+		MaxBatchSize: batchSize,
+		MaxWait:      maxWait,
+	})
 	if err != nil {
-		return nil, fmt.Errorf("dial agent %s: %w", c.agentAddr, err)
+		return nil, fmt.Errorf("dial server %s: %w", c.serverURL, err)
 	}
-
-	if c.token != "" {
-		// Build handshake line: TOKEN [agent_id [target]]
-
-		handshake := c.token
-		if c.agentID != "" {
-			handshake += " " + c.agentID
-			if c.target != "" {
-				handshake += " " + c.target
-			}
-		}
-		if _, err := fmt.Fprintf(conn, "%s\n", handshake); err != nil {
-			conn.Close()
-			return nil, fmt.Errorf("send token: %w", err)
-		}
-
-		conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-		reader := bufio.NewReader(conn)
-		respLine, err := reader.ReadString('\n')
-		if err != nil {
-			conn.Close()
-			return nil, fmt.Errorf("read handshake response: %w", err)
-		}
-
-		resp := strings.TrimSpace(respLine)
-		if resp != "OK" {
-			conn.Close()
-			// Strip "ERR " prefix for cleaner user-facing messages.
-			msg := strings.TrimPrefix(resp, "ERR ")
-			return nil, fmt.Errorf("%s", msg)
-		}
-		conn.SetReadDeadline(time.Time{})
-	}
-
 	return conn, nil
 }
