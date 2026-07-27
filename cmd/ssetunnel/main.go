@@ -248,8 +248,6 @@ func runAgent(ctx context.Context, args []string) error {
 func runConnect(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("connect", flag.ContinueOnError)
 	server := fs.String("server", "http://127.0.0.1:8080", "tunnel server URL")
-	serverAgent := fs.String("server-agent", "", "DEPRECATED: use -server")
-	serverEntry := fs.String("server-entry", "", "DEPRECATED: use -server")
 	agentID := fs.String("agent", "", "agent identifier to connect to (e.g. mydevbox)")
 	target := fs.String("target", "", "target address on the agent machine (e.g. 127.0.0.1:22)")
 	local := fs.String("local", "", "local listen TCP address (e.g. 127.0.0.1:3306) or '-' for Stdio mode")
@@ -261,28 +259,7 @@ func runConnect(ctx context.Context, args []string) error {
 		return errors.New("--local is required (e.g. --local 127.0.0.1:3306 or --local -)")
 	}
 
-	// Resolve server URL: explicit -server wins over deprecated aliases.
-	// Without this check, -server-agent "" (its zero default) silently
-	// overwrites the -server default when both share one pointer.
 	url := *server
-	var serverExplicit, deprecatedUsed bool
-	fs.Visit(func(f *flag.Flag) {
-		switch f.Name {
-		case "server":
-			serverExplicit = true
-		case "server-agent", "server-entry":
-			deprecatedUsed = true
-		}
-	})
-	if !serverExplicit && deprecatedUsed {
-		if *serverAgent != "" {
-			url = *serverAgent
-			log.Printf("connect: WARNING: -server-agent is deprecated, use -server %s", url)
-		} else if *serverEntry != "" {
-			url = *serverEntry
-			log.Printf("connect: WARNING: -server-entry is deprecated, use -server %s", url)
-		}
-	}
 
 	// Auto-detect legacy TCP addresses (no http:// or https:// prefix)
 	// and convert to HTTP URL for backward compatibility.
