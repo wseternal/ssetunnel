@@ -11,6 +11,11 @@ vars:
     -X main.GitSHA={{.GIT_SHA}}
 
 tasks:
+  modupdate:
+    desc: update go modules
+    cmds:
+    - go get -u ./... github.com/visdomtech/orcacommon
+    - go mod tidy -v
   ci:
     desc: Full CI pipeline (build, vet, test)
     cmds:
