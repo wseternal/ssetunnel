@@ -344,13 +344,20 @@ func (h *Handler) handleConnect(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Validate target if the connect client specified one and auth is enabled.
+	// When agentID is empty (first-match mode), target validation is ambiguous
+	// because GetAgentConfig falls back to the default (NULL agent_id) row,
+	// which may not exist or may have unrelated allowed_targets. Require
+	// agentID to be set when target is specified.
 	if target != "" && h.store != nil {
-		lookupID := agentID
+		if agentID == "" {
+			http.Error(w, "agent query parameter is required when target is specified", http.StatusBadRequest)
+			return
+		}
 		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 		defer cancel()
-		cfg, err := h.store.GetAgentConfig(ctx, lookupID)
+		cfg, err := h.store.GetAgentConfig(ctx, agentID)
 		if err != nil {
-			http.Error(w, fmt.Sprintf("agent config not found for %q", lookupID), http.StatusNotFound)
+			http.Error(w, fmt.Sprintf("agent config not found for %q", agentID), http.StatusNotFound)
 			return
 		}
 		if !auth.TargetAllowed(cfg.AllowedTargets, target) {
@@ -359,9 +366,10 @@ func (h *Handler) handleConnect(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Re-check the session is still alive before opening a stream — the
-	// agent may have reconnected between the short-poll loop and here,
-	// causing Registry.Replace to close the old yamux session (TOCTOU).
+	// Narrow the TOCTOU window: re-check the session is still alive before
+	// opening a stream. This is best-effort — the agent may still disconnect
+	// between this check and OpenStream, but OpenStream's error path below
+	// catches that race and returns 503.
 	if ms.IsClosed() {
 		http.Error(w, "agent session replaced, retry", http.StatusServiceUnavailable)
 		return
@@ -384,17 +392,15 @@ func (h *Handler) handleConnect(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Create the connect bridge: up pipe for POST bodies → yamux stream.
-	_, ctxCancel := context.WithCancel(r.Context())
 	cs := &connectSession{
 		id:     id,
 		up:     transport.NewPipe(downPipeCap),
-		cancel: ctxCancel,
+		cancel: func() {}, // no-op; cleanup is handled by the deferred teardown below
 	}
 	h.connectSessions.Store(id, cs)
 	defer func() {
-		ctxCancel()
 		cs.up.Close()
-		stream.Close()
+		stream.Close() // idempotent: the goroutine below also closes on copy completion
 		h.connectSessions.Delete(id)
 	}()
 
@@ -403,8 +409,21 @@ func (h *Handler) handleConnect(w http.ResponseWriter, r *http.Request) {
 		buf := bufferPool.Get().(*[]byte)
 		defer bufferPool.Put(buf)
 		io.CopyBuffer(stream, cs.up, *buf)
-		stream.Close() // signal EOF to agent
+		stream.Close() // signal EOF to agent; idempotent with defer in handleConnect
 	}()
+
+	// Goroutine: detect agent session death promptly and break the SSE
+	// read loop by closing the stream. Without this, death is only
+	// detected on the next heartbeat timeout (up to heartbeat interval).
+	if sess != nil {
+		go func() {
+			select {
+			case <-sess.Done():
+				stream.Close() // breaks the stream.Read in the SSE loop below
+			case <-r.Context().Done():
+			}
+		}()
+	}
 
 	// Set up SSE response headers.
 	w.Header().Set("X-SSET-Session", id)
@@ -429,7 +448,9 @@ func (h *Handler) handleConnect(w http.ResponseWriter, r *http.Request) {
 		}
 		var nerr net.Error
 		if errors.As(err, &nerr) && nerr.Timeout() {
-			// Check if the agent session died while we waited.
+			// Heartbeat: check if the agent session died while we waited.
+			// The session-death goroutine above also closes the stream
+			// promptly, but this is a belt-and-suspenders check.
 			if sess != nil {
 				select {
 				case <-sess.Done():
@@ -478,9 +499,10 @@ func (h *Handler) handleConnectUp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Write to the up pipe with a deadline to avoid blocking indefinitely.
-	// Check request context first: if the client disconnected mid-POST,
-	// don't block on a write the client will never see.
+	// Best-effort early exit: if the client already disconnected, don't
+	// block on a pipe write the client will never see. The write deadline
+	// below bounds the worst case if the context is canceled between this
+	// check and the Write call.
 	if r.Context().Err() != nil {
 		http.Error(w, "client disconnected", http.StatusGone)
 		return
@@ -494,6 +516,9 @@ func (h *Handler) handleConnectUp(w http.ResponseWriter, r *http.Request) {
 }
 
 // findYamux returns the first open yamux session and its Session from the registry.
+// NOTE: iteration order over the registry map is non-deterministic, so with
+// multiple agents the returned session may vary between calls. Clients that
+// need a specific agent should use findYamuxByAgentID instead.
 func (h *Handler) findYamux() (*yamux.Session, *Session) {
 	var ms *yamux.Session
 	var found *Session

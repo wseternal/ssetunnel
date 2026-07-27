@@ -8,14 +8,13 @@ ssetunnel exposes private TCP services (SSH, databases, etc.) through a public s
 
 ```
 User (SSH, DB client, ...)
-  │  TCP connection to agent listener (:9090)
+  │  TCP connection to local connect listener
   ▼
-┌─────────────────────────────────┐
-│  Server (public, reachable)     │
-│  • HTTP :8080 — /events, /up   │
-│  • TCP  :9090 — agent listener │
-│  • HTTP :8081 — admin console  │
-└──────────┬──────────────────────┘
+┌─────────────────────────────────────────────────────────┐
+│  Server (public, reachable)                              │
+│  • HTTP :8080 — /events, /up, /connect, /connect-up     │
+│  • HTTP :8081 — admin console                           │
+└──────────┬──────────────────────────────────────────────┘
            │  yamux over HTTP (SSE-down + POST-up)
            ▼
 ┌─────────────────────────────────┐
@@ -125,17 +124,15 @@ ssh -o ProxyCommand="./local.sh connect --local -" user@127.0.0.1   # SSH throug
 **Key insight**: TCP half-close (`CloseWrite`) signals EOF to the remote side without killing the read path. But when the *other* side closes first, you must return from the proxy function to tear down the pipe, not wait for the blocked reader.
 
 ### yamux Stream Close Semantics
-yamux `stream.Close()` kills both directions — there is no half-close. This means you cannot signal "done writing" while still reading. The connect client uses TCP `CloseWrite()` on the agent connection instead.
+yamux `stream.Close()` kills both directions — there is no half-close. This means you cannot signal "done writing" while still reading. The HTTP transport has no half-close either — a full `Close()` on the connect client's `serverConn` is the only way to propagate upstream EOF.
 
 ### Agent Routing and Dynamic Target
-**Agent handshake protocol**: `TOKEN [agent_id [target]]\n` (space-separated, optional fields).
-
-When `agent_id` is provided, the server routes to that specific agent via `findYamuxByAgentID`. When `target` is also provided, the agent reads it from the yamux stream header and connects to that address (dynamic target mode).
+Connect clients pass `agent` and `target` as HTTP query parameters on `GET /connect`. The server routes to the target agent via `findYamuxByAgentID` (or first-match if `agent` is empty). When `target` is provided and the agent wants target headers (`WantTarget`), the server writes it as the first line on the yamux stream.
 
 **Agent configs** in the `agents` table define allowed targets per agent. A NULL `agent_id` row serves as the default config for all agents. The `TargetAllowed` function matches patterns like `*`, `host:*`, or `host:port`.
 
 ### SSH ProxyCommand Error Messages
-**Problem**: When handshake fails, SSH only shows "Connection closed by UNKNOWN port 65535".
+**Problem**: When the connection fails, SSH only shows "Connection closed by UNKNOWN port 65535".
 
 **Fix**: Write the error to both `os.Stderr` and `w` (stdout pipe) in `ServeRW` so SSH displays the actual error message before its generic message.
 
