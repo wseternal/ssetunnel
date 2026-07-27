@@ -58,8 +58,10 @@ func NewServerWithRegistryAndBase(reg *Registry, heartbeat time.Duration, basePa
 // SetAuthStore attaches an authentication store for token validation.
 func (s *Server) SetAuthStore(store *auth.Store) {
 	s.store = store
+	prev := s.handler
 	s.handler = NewHandlerWithAuth(s.Reg, s.handler.heartbeat, store, s.basePath)
 	s.handler.OnSession = s.attach
+	s.handler.OnUpPush = prev.OnUpPush
 }
 
 // AttachSession manually attaches a session (useful for custom flows and testing).

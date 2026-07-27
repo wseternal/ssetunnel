@@ -88,6 +88,9 @@ func runServer(ctx context.Context, args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	if err := validateBasePath(*basePath); err != nil {
+		return err
+	}
 
 	// Deprecation warning for removed global TOTP secret.
 	if os.Getenv("SSETUNNEL_TOTP_SECRET") != "" {
@@ -206,6 +209,9 @@ func runAgent(ctx context.Context, args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	if err := validateBasePath(*basePath); err != nil {
+		return err
+	}
 	batch, conc := clampAgentFlags(*batchSize, *concurrency)
 
 	// Load session token from ~/.ssetunnel/session
@@ -257,6 +263,9 @@ func runConnect(ctx context.Context, args []string) error {
 	local := fs.String("local", "", "local listen TCP address (e.g. 127.0.0.1:3306) or '-' for Stdio mode")
 
 	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if err := validateBasePath(*basePath); err != nil {
 		return err
 	}
 	if *local == "" {
@@ -318,11 +327,25 @@ func clampAgentFlags(batchSize, concurrency int) (int, int) {
 	return batchSize, concurrency
 }
 
+// validateBasePath rejects --base values that are non-empty but lack a
+// leading "/".  Without the slash the server registers host-specific
+// ServeMux patterns that never match, and client URLs lose the path
+// separator (e.g. http://host:porttunnel/events).
+func validateBasePath(basePath string) error {
+	if basePath != "" && !strings.HasPrefix(basePath, "/") {
+		return fmt.Errorf("--base must start with / (got %q)", basePath)
+	}
+	return nil
+}
+
 func runProbe(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("probe", flag.ContinueOnError)
 	serverURL := fs.String("server", "", "tunnel server URL, e.g. http://tunnel.example.com")
 	basePath := fs.String("base", "", "HTTP path prefix for tunnel endpoints (must match server --base)")
 	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if err := validateBasePath(*basePath); err != nil {
 		return err
 	}
 	if *serverURL == "" {
