@@ -260,13 +260,6 @@ func runConnect(ctx context.Context, args []string) error {
 	}
 
 	url := *server
-
-	// Auto-detect legacy TCP addresses (no http:// or https:// prefix)
-	// and convert to HTTP URL for backward compatibility.
-	if url != "" && !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") {
-		log.Printf("connect: WARNING: %q looks like a TCP address; converting to http://%s (the TCP entry listener is removed)", url, url)
-		url = "http://" + url
-	}
 	if url == "" {
 		return errors.New("--server is required (e.g. --server http://tunnel.example.com:8080)")
 	}

@@ -14,7 +14,7 @@ tasks:
   modupdate:
     desc: update go modules
     cmds:
-    - go get -u ./... github.com/visdomtech/orcacommon
+    - go get -u ./...
     - go mod tidy -v
   ci:
     desc: Full CI pipeline (build, vet, test)
@@ -30,6 +30,12 @@ tasks:
     cmds:
       - mkdir -p {{.BUILD_DIR}}
       - go build -ldflags "{{.LDFLAGS}}" -o {{.BUILD_DIR}}/{{.BIN}} ./cmd/ssetunnel
+
+  go:install:
+    desc: Build and install binary to ~/bin
+    cmds:
+      - task: go:build
+      - mkdir -p ~/bin
       - cp -af {{.BUILD_DIR}}/{{.BIN}} ~/bin/
 
   go:test:
