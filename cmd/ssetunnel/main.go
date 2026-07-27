@@ -78,6 +78,7 @@ func runServer(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("server", flag.ContinueOnError)
 	listen := fs.String("listen", ":8080", "HTTP listen address for tunnel endpoints")
 	consoleListen := fs.String("console-listen", ":8081", "HTTP listen address for admin console SPA")
+	basePath := fs.String("base", "", "HTTP path prefix for all tunnel endpoints (e.g. /tunnel)")
 	heartbeat := fs.Duration("heartbeat", 15*time.Second, "SSE heartbeat interval")
 	dbURL := fs.String("db-url", os.Getenv("DATABASE_URL"), "PostgreSQL DB connection URL (default uses testcontainer if empty)")
 	disableAuth := fs.Bool("disable-auth", false, "Disable authentication enforcement")
@@ -87,13 +88,16 @@ func runServer(ctx context.Context, args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	if err := validateBasePath(*basePath); err != nil {
+		return err
+	}
 
 	// Deprecation warning for removed global TOTP secret.
 	if os.Getenv("SSETUNNEL_TOTP_SECRET") != "" {
 		log.Println("server: WARNING: SSETUNNEL_TOTP_SECRET is deprecated; per-user TOTP is now used. Set up TOTP via the console.")
 	}
 
-	srv := server.NewServer(*heartbeat)
+	srv := server.NewServerWithBase(*heartbeat, *basePath)
 
 	var store *auth.Store
 	var consoleLn net.Listener
@@ -195,6 +199,7 @@ func runServer(ctx context.Context, args []string) error {
 func runAgent(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("agent", flag.ContinueOnError)
 	serverURL := fs.String("server", "http://127.0.0.1:8080", "tunnel server URL")
+	basePath := fs.String("base", "", "HTTP path prefix for tunnel endpoints (must match server --base)")
 	target := fs.String("target", "", "TCP address to forward streams to (empty = dynamic target mode)")
 	agentID := fs.String("id", "", "agent identifier for routing (e.g. mydevbox)")
 	batchSize := fs.Int("batch-size", 16384, "upstream batch ceiling in bytes (1024..1048576)")
@@ -202,6 +207,9 @@ func runAgent(ctx context.Context, args []string) error {
 	compress := fs.Bool("compress", false, "negotiate gzip-per-batch upstream encoding")
 
 	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if err := validateBasePath(*basePath); err != nil {
 		return err
 	}
 	batch, conc := clampAgentFlags(*batchSize, *concurrency)
@@ -234,6 +242,7 @@ func runAgent(ctx context.Context, args []string) error {
 
 	ag := &agent.Agent{
 		ServerURL:       *serverURL,
+		BasePath:        *basePath,
 		Target:          *target,
 		AgentID:         *agentID,
 		Token:           sessToken,
@@ -248,11 +257,15 @@ func runAgent(ctx context.Context, args []string) error {
 func runConnect(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("connect", flag.ContinueOnError)
 	server := fs.String("server", "http://127.0.0.1:8080", "tunnel server URL")
+	basePath := fs.String("base", "", "HTTP path prefix for tunnel endpoints (must match server --base)")
 	agentID := fs.String("agent", "", "agent identifier to connect to (e.g. mydevbox)")
 	target := fs.String("target", "", "target address on the agent machine (e.g. 127.0.0.1:22)")
 	local := fs.String("local", "", "local listen TCP address (e.g. 127.0.0.1:3306) or '-' for Stdio mode")
 
 	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if err := validateBasePath(*basePath); err != nil {
 		return err
 	}
 	if *local == "" {
@@ -272,7 +285,7 @@ func runConnect(ctx context.Context, args []string) error {
 		log.Printf("connect: using session from ~/.ssetunnel/session")
 	}
 
-	client := connect.NewClient(url, sessToken, *agentID, *target)
+	client := connect.NewClient(url, sessToken, *agentID, *target, *basePath)
 
 	if *local == "-" {
 		log.Printf("connect: running in Stdio mode connecting to %s (agent=%s, target=%s)", url, *agentID, *target)
@@ -314,16 +327,31 @@ func clampAgentFlags(batchSize, concurrency int) (int, int) {
 	return batchSize, concurrency
 }
 
+// validateBasePath rejects --base values that are non-empty but lack a
+// leading "/".  Without the slash the server registers host-specific
+// ServeMux patterns that never match, and client URLs lose the path
+// separator (e.g. http://host:porttunnel/events).
+func validateBasePath(basePath string) error {
+	if basePath != "" && !strings.HasPrefix(basePath, "/") {
+		return fmt.Errorf("--base must start with / (got %q)", basePath)
+	}
+	return nil
+}
+
 func runProbe(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("probe", flag.ContinueOnError)
 	serverURL := fs.String("server", "", "tunnel server URL, e.g. http://tunnel.example.com")
+	basePath := fs.String("base", "", "HTTP path prefix for tunnel endpoints (must match server --base)")
 	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if err := validateBasePath(*basePath); err != nil {
 		return err
 	}
 	if *serverURL == "" {
 		return errors.New("--server is required")
 	}
-	rep, err := probe.Run(ctx, probe.Config{URL: *serverURL})
+	rep, err := probe.Run(ctx, probe.Config{URL: *serverURL, BasePath: *basePath})
 	if err != nil {
 		return err
 	}

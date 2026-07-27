@@ -121,7 +121,7 @@ func doAgentRoundTrip(t *testing.T, serverURL string, data []byte) {
 	}
 	defer localLn.Close()
 
-	client := connect.NewClient(serverURL, "", "", "")
+	client := connect.NewClient(serverURL, "", "", "", "")
 	client.BatchSize = 64 << 10
 	go client.ServeListener(context.Background(), localLn)
 

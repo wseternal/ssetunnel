@@ -176,7 +176,7 @@ func setupBench(t *testing.T, target net.Listener) *benchEnv {
 
 func (e *benchEnv) dialAgent(t *testing.T) net.Conn {
 	t.Helper()
-	client := connect.NewClient(e.serverURL, "", "", "")
+	client := connect.NewClient(e.serverURL, "", "", "", "")
 	client.BatchSize = 64 << 10
 	client.MaxWait = 10 * time.Millisecond
 	c, err := client.Dial(context.Background())

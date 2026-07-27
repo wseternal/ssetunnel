@@ -30,6 +30,7 @@ type Client struct {
 	token     string
 	agentID   string // agent routing key (empty = first-match)
 	target    string // dynamic target address (empty = no dynamic target)
+	basePath  string // HTTP path prefix for tunnel endpoints (empty = no prefix)
 
 	// BatchSize is the upstream batch ceiling; 0 → 1024.
 	BatchSize int
@@ -37,12 +38,13 @@ type Client struct {
 	MaxWait time.Duration
 }
 
-func NewClient(serverURL, token, agentID, target string) *Client {
+func NewClient(serverURL, token, agentID, target, basePath string) *Client {
 	return &Client{
 		serverURL: serverURL,
 		token:     token,
 		agentID:   agentID,
 		target:    target,
+		basePath:  basePath,
 	}
 }
 
@@ -201,6 +203,7 @@ func (c *Client) Dial(ctx context.Context) (net.Conn, error) {
 
 	conn, err := transport.DialConnect(ctx, transport.Config{
 		URL:          c.serverURL,
+		BasePath:     c.basePath,
 		Token:        c.token,
 		AgentID:      c.agentID,
 		Target:       c.target,

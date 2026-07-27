@@ -3,6 +3,7 @@ package server
 import (
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -23,23 +24,33 @@ type Server struct {
 	// Reg is the live session registry (exported for tests and the console).
 	Reg *Registry
 
-	handler *Handler
-	store   *auth.Store
+	handler  *Handler
+	store    *auth.Store
+	basePath string // HTTP path prefix for all endpoints (empty = no prefix)
 }
 
 // NewServer builds a server given an SSE heartbeat interval.
 func NewServer(heartbeat time.Duration) *Server {
-	reg := NewRegistry()
-	h := NewHandler(reg, heartbeat)
-	s := &Server{Reg: reg, handler: h}
-	h.OnSession = s.attach
-	return s
+	return NewServerWithBase(heartbeat, "")
+}
+
+// NewServerWithBase builds a server with an HTTP path prefix for all
+// tunnel endpoints (empty = no prefix).
+func NewServerWithBase(heartbeat time.Duration, basePath string) *Server {
+	return NewServerWithRegistryAndBase(NewRegistry(), heartbeat, basePath)
 }
 
 // NewServerWithRegistry builds a server with a given registry and SSE heartbeat interval.
 func NewServerWithRegistry(reg *Registry, heartbeat time.Duration) *Server {
-	h := NewHandler(reg, heartbeat)
-	s := &Server{Reg: reg, handler: h}
+	return NewServerWithRegistryAndBase(reg, heartbeat, "")
+}
+
+// NewServerWithRegistryAndBase builds a server with a given registry,
+// SSE heartbeat interval, and HTTP path prefix.
+func NewServerWithRegistryAndBase(reg *Registry, heartbeat time.Duration, basePath string) *Server {
+	basePath = strings.TrimRight(basePath, "/")
+	h := NewHandlerWithAuth(reg, heartbeat, nil, basePath)
+	s := &Server{Reg: reg, handler: h, basePath: basePath}
 	h.OnSession = s.attach
 	return s
 }
@@ -47,8 +58,10 @@ func NewServerWithRegistry(reg *Registry, heartbeat time.Duration) *Server {
 // SetAuthStore attaches an authentication store for token validation.
 func (s *Server) SetAuthStore(store *auth.Store) {
 	s.store = store
-	s.handler = NewHandlerWithAuth(s.Reg, s.handler.heartbeat, store)
+	prev := s.handler
+	s.handler = NewHandlerWithAuth(s.Reg, s.handler.heartbeat, store, s.basePath)
 	s.handler.OnSession = s.attach
+	s.handler.OnUpPush = prev.OnUpPush
 }
 
 // AttachSession manually attaches a session (useful for custom flows and testing).
