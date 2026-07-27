@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
@@ -55,14 +56,8 @@ func TestConnectClient_LocalPortMode(t *testing.T) {
 
 	srv := server.NewServer(15 * time.Second)
 	srv.SetAuthStore(store)
-
-	agentListener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("failed to listen agent: %v", err)
-	}
-	defer agentListener.Close()
-
-	go srv.ServeAgent(ctx, agentListener)
+	httpSrv := httptest.NewServer(srv.HTTPHandler())
+	defer httpSrv.Close()
 
 	// Create echo target listener
 	echoListener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -144,7 +139,7 @@ func TestConnectClient_LocalPortMode(t *testing.T) {
 	}
 	defer localListener.Close()
 
-	client := connect.NewClient(agentListener.Addr().String(), userToken, "", "")
+	client := connect.NewClient(httpSrv.URL, userToken, "", "")
 
 	go func() {
 		_ = client.ServeListener(ctx, localListener)
@@ -209,13 +204,9 @@ func TestServeRW_ServerClosesReturns(t *testing.T) {
 
 	// Server (no auth, direct yamux pipe)
 	srv := server.NewServer(15 * time.Second)
-
-	agentLn, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen agent: %v", err)
-	}
-	defer agentLn.Close()
-	go srv.ServeAgent(ctx, agentLn)
+	srv.SetAuthStore(nil) // register /connect routes
+	httpSrv := httptest.NewServer(srv.HTTPHandler())
+	defer httpSrv.Close()
 
 	// Agent side: pipe-based yamux
 	pipeLn, err := net.Listen("tcp", "127.0.0.1:0")
@@ -280,7 +271,7 @@ func TestServeRW_ServerClosesReturns(t *testing.T) {
 		t.Fatalf("pipe stdout: %v", err)
 	}
 
-	client := connect.NewClient(agentLn.Addr().String(), "", "", "")
+	client := connect.NewClient(httpSrv.URL, "", "", "")
 	done := make(chan error, 1)
 	go func() {
 		done <- client.ServeRW(ctx, stdinR, stdoutW)
@@ -321,7 +312,7 @@ func TestServeRW_ServerClosesReturns(t *testing.T) {
 func TestServeRW_HandshakeFailureWritesToWriter(t *testing.T) {
 	ctx := context.Background()
 
-	// Use a closed listener so dial fails immediately.
+	// Use a closed port so the HTTP dial fails immediately.
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
@@ -330,7 +321,7 @@ func TestServeRW_HandshakeFailureWritesToWriter(t *testing.T) {
 	ln.Close() // close immediately so dial fails
 
 	var stdout bytes.Buffer
-	client := connect.NewClient(addr, "bad-token", "", "")
+	client := connect.NewClient("http://"+addr, "bad-token", "", "")
 
 	err = client.ServeRW(ctx, strings.NewReader(""), &stdout)
 	if err == nil {
@@ -341,7 +332,7 @@ func TestServeRW_HandshakeFailureWritesToWriter(t *testing.T) {
 	if !strings.Contains(output, "ssetunnel:") {
 		t.Errorf("expected friendly error in stdout, got: %q", output)
 	}
-	if !strings.Contains(output, "dial agent") {
+	if !strings.Contains(output, "dial server") {
 		t.Errorf("expected dial error detail in stdout, got: %q", output)
 	}
 }

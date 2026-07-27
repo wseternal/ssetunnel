@@ -6,10 +6,10 @@ Multi-command CLI binary. Dispatches to server, agent, connect, login, or probe 
 
 ### `server`
 ```bash
-ssetunnel server [--listen :8080] [--agent :9090] [--console-listen :8081] \
+ssetunnel server [--listen :8080] [--console-listen :8081] \
   [--heartbeat 15s] [--db-url URL] [--totp-secret SECRET] [--disable-auth]
 ```
-Runs the public tunnel server. Opens HTTP, agent TCP, and optional console HTTP listeners. With `--disable-auth`, skips DB pool, auth store, and console server. Auto-seeds an admin user on first startup.
+Runs the public tunnel server. Opens HTTP listener (agent tunnel + connect endpoints) and optional console HTTP listener. With `--disable-auth`, skips DB pool, auth store, and console server. Auto-seeds an admin user on first startup.
 
 ### `agent`
 ```bash
@@ -20,10 +20,10 @@ Runs the restricted-network agent. `--target` is optional (empty = dynamic targe
 
 ### `connect`
 ```bash
-ssetunnel connect --local 127.0.0.1:3306 [--server-agent 127.0.0.1:9090] [--agent dev] [--target 127.0.0.1:22]
+ssetunnel connect --local 127.0.0.1:3306 [--server http://127.0.0.1:8080] [--agent dev] [--target 127.0.0.1:22]
 ssetunnel connect --local -  # Stdio mode for SSH ProxyCommand
 ```
-User-side connection wrapper. `--local -` enables stdio mode (stdin/stdout pipes for SSH ProxyCommand). `--agent` routes to a specific agent. `--target` enables dynamic target mode.
+User-side connection wrapper. Uses HTTP transport (SSE-down + POST-up) to connect to the server. `--local -` enables stdio mode (stdin/stdout pipes for SSH ProxyCommand). `--agent` routes to a specific agent. `--target` enables dynamic target mode.
 
 ### `login`
 ```bash
