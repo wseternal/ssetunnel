@@ -5,10 +5,11 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"os/signal"
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/kardianos/service"
@@ -26,10 +27,12 @@ var serviceActions = map[string]bool{
 // or runAgent as a managed OS service.  The run function is launched via
 // a conc.WaitGroup for panic-safe structured concurrency.
 type serviceProgram struct {
-	name   string
-	runFn  func(context.Context) error
-	cancel context.CancelFunc
-	wg     *conc.WaitGroup
+	name     string
+	runFn    func(context.Context) error
+	cancel   context.CancelFunc
+	wg       *conc.WaitGroup
+	stopOnce sync.Once
+	stopErr  error
 }
 
 func (p *serviceProgram) Start(_ service.Service) error {
@@ -47,9 +50,18 @@ func (p *serviceProgram) Start(_ service.Service) error {
 }
 
 func (p *serviceProgram) Stop(_ service.Service) error {
+	p.stopOnce.Do(func() {
+		p.stopErr = p.doStop()
+	})
+	return p.stopErr
+}
+
+func (p *serviceProgram) doStop() error {
 	p.cancel()
 	removePIDFile(p.name)
 	// WaitAndRecover in a helper goroutine so we can enforce a deadline.
+	// On timeout the goroutine is intentionally abandoned; it will resolve
+	// when the worker eventually exits.
 	ch := make(chan *panics.Recovered, 1)
 	go func() {
 		ch <- p.wg.WaitAndRecover()
@@ -138,7 +150,7 @@ func dispatchServiceAction(subcommand string, args []string) (handled bool, err 
 		return true, nil
 
 	case "reload":
-		return true, sendReload(svc)
+		return true, sendReload(svcConfig)
 	}
 	return false, nil
 }
@@ -172,15 +184,11 @@ func buildServiceArgs(subcommand string, args []string) []string {
 // sendReload sends SIGHUP to the running service process.  It reads the
 // PID from the file written by Start (pidFilePath).  On platforms without
 // SIGHUP (Windows) it returns an error.
-func sendReload(_ service.Service) error {
+func sendReload(svcConfig *service.Config) error {
 	if runtime.GOOS == "windows" {
 		return fmt.Errorf("reload is not supported on %s", runtime.GOOS)
 	}
-	pid, err := readPIDFile("ssetunnel-server")
-	if err != nil {
-		// Fall back to the agent PID file.
-		pid, err = readPIDFile("ssetunnel-agent")
-	}
+	pid, err := readPIDFile(svcConfig.Name)
 	if err != nil {
 		return fmt.Errorf("no running daemon found (start it first): %w", err)
 	}
@@ -197,7 +205,10 @@ func sendReload(_ service.Service) error {
 
 // pidDir returns the directory for PID files (~/.ssetunnel/).
 func pidDir() string {
-	home, _ := os.UserHomeDir()
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return filepath.Join(os.TempDir(), ".ssetunnel")
+	}
 	return filepath.Join(home, ".ssetunnel")
 }
 
@@ -221,7 +232,9 @@ func writePIDFile(name string) {
 
 // removePIDFile cleans up the PID file on stop.
 func removePIDFile(name string) {
-	os.Remove(pidFilePath(name))
+	if err := os.Remove(pidFilePath(name)); err != nil && !os.IsNotExist(err) {
+		log.Printf("%s: remove pid file: %v", name, err)
+	}
 }
 
 // readPIDFile reads the PID from a service's PID file.
@@ -230,17 +243,5 @@ func readPIDFile(name string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	return strconv.Atoi(string(data))
-}
-
-// installSIGHUPHandler registers a SIGHUP listener that logs the given
-// message.  The actual reload logic is a TODO per subcommand.
-func installSIGHUPHandler(role, message string) {
-	hup := make(chan os.Signal, 1)
-	signal.Notify(hup, syscallSIGHUP())
-	go func() {
-		for range hup {
-			log.Printf("%s: %s", role, message)
-		}
-	}()
+	return strconv.Atoi(strings.TrimSpace(string(data)))
 }

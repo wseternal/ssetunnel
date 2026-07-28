@@ -201,6 +201,8 @@ func runServer(ctx context.Context, args []string) error {
 	httpSrv := srv.NewHTTPServer(*listen)
 	go func() {
 		<-ctx.Done()
+		// Force-close all active agent sessions before draining HTTP.
+		srv.Reg.CloseAll()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		httpSrv.Shutdown(shutdownCtx)
