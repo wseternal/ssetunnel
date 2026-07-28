@@ -1,6 +1,66 @@
 package main
 
-import "testing"
+import (
+	"context"
+	"net"
+	"strings"
+	"testing"
+	"time"
+)
+
+func TestRunServer_AddressAlreadyBound(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		bindFlag string // "listen", "entry", or "console-listen"
+	}{
+		{"listen address bound", "listen"},
+		{"entry address bound", "entry"},
+		{"console-listen address bound", "console-listen"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Occupy a port
+			ln, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatalf("setup listen: %v", err)
+			}
+			defer ln.Close()
+			addr := ln.Addr().String()
+
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+
+			args := []string{"--disable-auth"}
+			switch tt.bindFlag {
+			case "listen":
+				args = append(args, "--listen", addr, "--entry", "127.0.0.1:0")
+			case "entry":
+				args = append(args, "--listen", "127.0.0.1:0", "--entry", addr)
+			case "console-listen":
+				// console-listen only opens when auth is enabled; use
+				// --db-url with testcontainer to enable the console path.
+				args = []string{
+					"--listen", "127.0.0.1:0",
+					"--entry", "127.0.0.1:0",
+					"--console-listen", addr,
+				}
+			}
+
+			err = runServer(ctx, args)
+			if err == nil {
+				t.Fatal("expected error when address is already bound, got nil")
+			}
+			if !strings.Contains(err.Error(), "address already in use") &&
+				!strings.Contains(err.Error(), "bind") {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+}
 
 func TestClampAgentFlags(t *testing.T) {
 	t.Parallel()
