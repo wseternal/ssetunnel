@@ -1,4 +1,4 @@
-h1:VOHxKTOgBmlI5T7Nb7QSCBjnk0em9+oxj3eHKbXyB1Q=
+h1:AagQtLlmomVof2I1eKGWGmk5xk0mnWyebNw2O4O0X6o=
 20260724000001_initial_schema.sql h1:9FZAm54p/ipAfxAF8bMIfT1J83W1t5PxnbI5K5P3bUs=
 20260724000002_add_users.sql h1:84E+kuIn4ElyyIEm9bw68yPEgygp1slGFqs49GVVJB4=
 20260724000003_add_user_id_fk.sql h1:Kmi9HTGhl6kh3sk7bJqsnjGBwPQ/IeFu8CKgXcTKBwI=
@@ -6,3 +6,4 @@ h1:VOHxKTOgBmlI5T7Nb7QSCBjnk0em9+oxj3eHKbXyB1Q=
 20260724000005_cleanup_legacy.sql h1:x2vbb4mXSb8EpMv3nviMCstlsV+NWyY+Sv59ObwwJgI=
 20260724000006_add_user_permissions.sql h1:FSMfthIvM9iCkuTdYb29w2FICq7erxeSZua4C6nuGBk=
 20260724000007_add_agents.sql h1:2exn44ZdcEk8R0QckvgYZzRqrBR5P+o4Ah2mHhD2RXg=
+20260724000008_add_recovery_codes.sql h1:uhJ4BYb+KeryyvGhH7IRBzVuwaFGUN1C0SIDRiD64xk=

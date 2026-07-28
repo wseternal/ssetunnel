@@ -37,6 +37,9 @@ import AddIcon from '@mui/icons-material/Add';
 import CableIcon from '@mui/icons-material/Cable';
 import GroupIcon from '@mui/icons-material/Group';
 import RouterIcon from '@mui/icons-material/Router';
+import SecurityIcon from '@mui/icons-material/Security';
+import ContentCopyIcon from '@mui/icons-material/ContentCopy';
+import { QRCodeSVG } from 'qrcode.react';
 import {
   AdminTable,
   type AdminTableColumn,
@@ -98,6 +101,18 @@ export default function App() {
   const [users, setUsers] = useState<User[]>([]);
   const [agents, setAgents] = useState<AgentConfig[]>([]);
   const [error, setError] = useState('');
+
+  // TOTP login state
+  const [totpRequired, setTotpRequired] = useState(false);
+  const [totpEnrolled, setTotpEnrolled] = useState(false);
+
+  // TOTP setup dialog state
+  const [openTOTPDialog, setOpenTOTPDialog] = useState(false);
+  const [totpStep, setTotpStep] = useState<'setup' | 'verify' | 'done'>('setup');
+  const [totpSecret, setTotpSecret] = useState('');
+  const [totpKeyURL, setTotpKeyURL] = useState('');
+  const [totpVerifyCode, setTotpVerifyCode] = useState('');
+  const [recoveryCodes, setRecoveryCodes] = useState<string[]>([]);
 
   // User dialog
   const [openUserDialog, setOpenUserDialog] = useState(false);
@@ -201,6 +216,7 @@ export default function App() {
         setSessionToken(data.token);
         localStorage.setItem('sessionToken', data.token);
         setIsLoggedIn(true);
+        setTotpEnrolled(data.totp_enrolled ?? false);
       } else {
         const text = await res.text();
         setError(text || 'Login failed');
@@ -215,6 +231,74 @@ export default function App() {
     localStorage.removeItem('sessionToken');
     setSessionToken('');
     setIsLoggedIn(false);
+    setTotpEnrolled(false);
+  };
+
+  const handleUsernameBlur = async () => {
+    if (!username) return;
+    try {
+      const res = await fetch('/api/v1/user-login-check', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setTotpRequired(data.totp_required ?? false);
+      }
+    } catch { /* ignore */ }
+  };
+
+  const handleBeginTOTPSetup = async () => {
+    try {
+      const res = await fetch('/api/v1/totp/begin-setup', {
+        method: 'POST',
+        headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setTotpSecret(data.secret);
+        setTotpKeyURL(data.key_url);
+        setTotpStep('verify');
+      } else {
+        setError(await res.text() || 'Failed to begin TOTP setup');
+      }
+    } catch {
+      setError('Failed to begin TOTP setup');
+    }
+  };
+
+  const handleVerifyTOTPSetup = async () => {
+    try {
+      const res = await fetch('/api/v1/totp/verify-setup', {
+        method: 'POST',
+        headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ secret: totpSecret, code: totpVerifyCode }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setRecoveryCodes(data.recovery_codes || []);
+        setTotpStep('done');
+        setTotpEnrolled(true);
+      } else {
+        setError(await res.text() || 'Invalid TOTP code');
+      }
+    } catch {
+      setError('Failed to verify TOTP setup');
+    }
+  };
+
+  const handleCloseTOTPDialog = () => {
+    setOpenTOTPDialog(false);
+    setTotpStep('setup');
+    setTotpSecret('');
+    setTotpKeyURL('');
+    setTotpVerifyCode('');
+    setRecoveryCodes([]);
+  };
+
+  const handleCopyRecoveryCodes = () => {
+    navigator.clipboard.writeText(recoveryCodes.join('\n')).catch(() => {});
   };
 
   const openCreateUserDialog = () => {
@@ -443,9 +527,19 @@ export default function App() {
             ssetunnel Console
           </Typography>
           {isLoggedIn && (
-            <Button color="inherit" size="small" onClick={handleLogout}>
-              Logout
-            </Button>
+            <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
+              <IconButton
+                color="default"
+                size="small"
+                onClick={() => setOpenTOTPDialog(true)}
+                title="Security (TOTP)"
+              >
+                <SecurityIcon />
+              </IconButton>
+              <Button color="inherit" size="small" onClick={handleLogout}>
+                Logout
+              </Button>
+            </Box>
           )}
         </Box>
 
@@ -469,6 +563,7 @@ export default function App() {
                     variant="outlined"
                     value={username}
                     onChange={(e) => setUsername(e.target.value)}
+                    onBlur={handleUsernameBlur}
                     sx={{ mb: 2 }}
                     autoFocus
                   />
@@ -481,15 +576,17 @@ export default function App() {
                     onChange={(e) => setPassword(e.target.value)}
                     sx={{ mb: 2 }}
                   />
-                  <TextField
-                    fullWidth
-                    label="TOTP Passcode"
-                    variant="outlined"
-                    value={totpCode}
-                    onChange={(e) => setTotpCode(e.target.value)}
-                    placeholder="123456"
-                    sx={{ mb: 3 }}
-                  />
+                  {totpRequired && (
+                    <TextField
+                      fullWidth
+                      label="TOTP or Recovery Code"
+                      variant="outlined"
+                      value={totpCode}
+                      onChange={(e) => setTotpCode(e.target.value)}
+                      placeholder="123456 or recovery code"
+                      sx={{ mb: 3 }}
+                    />
+                  )}
                   <Button fullWidth variant="contained" type="submit" size="large">
                     Sign In
                   </Button>
@@ -507,6 +604,20 @@ export default function App() {
                 <Tab label="Agents" />
               </Tabs>
             </Paper>
+
+            {!totpEnrolled && (
+              <Alert
+                severity="info"
+                sx={{ mb: 2 }}
+                action={
+                  <Button color="inherit" size="small" onClick={() => setOpenTOTPDialog(true)}>
+                    Set Up
+                  </Button>
+                }
+              >
+                Two-factor authentication is not configured. Click "Set Up" to enable TOTP.
+              </Alert>
+            )}
 
             {tabIndex === 0 && (
               <Box>
@@ -673,6 +784,93 @@ export default function App() {
                 <Button onClick={() => setOpenAgentDialog(false)}>Cancel</Button>
                 <Button variant="contained" onClick={handleSaveAgent}>
                   {editingAgentId !== null ? 'Save' : 'Create'}
+                </Button>
+              </DialogActions>
+            </Dialog>
+
+            {/* TOTP Setup Dialog */}
+            <Dialog open={openTOTPDialog} onClose={handleCloseTOTPDialog} maxWidth="sm" fullWidth>
+              <DialogTitle>
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                  <SecurityIcon /> Two-Factor Authentication
+                </Box>
+              </DialogTitle>
+              <DialogContent>
+                {totpStep === 'setup' && (
+                  <Box sx={{ textAlign: 'center', py: 2 }}>
+                    <Typography variant="body1" sx={{ mb: 2 }}>
+                      {totpEnrolled
+                        ? 'TOTP is already configured for your account.'
+                        : 'TOTP is not configured. Set up two-factor authentication to protect your account.'}
+                    </Typography>
+                    {!totpEnrolled && (
+                      <Button variant="contained" onClick={handleBeginTOTPSetup}>
+                        Set Up TOTP
+                      </Button>
+                    )}
+                  </Box>
+                )}
+                {totpStep === 'verify' && (
+                  <Box sx={{ textAlign: 'center', py: 2 }}>
+                    <Typography variant="body2" sx={{ mb: 2 }}>
+                      Scan this QR code with your authenticator app:
+                    </Typography>
+                    <Box sx={{ display: 'flex', justifyContent: 'center', mb: 2 }}>
+                      <QRCodeSVG value={totpKeyURL} size={200} />
+                    </Box>
+                    <Typography variant="caption" color="text.secondary" sx={{ mb: 1, display: 'block' }}>
+                      Or enter this secret manually:
+                    </Typography>
+                    <Typography
+                      variant="body2"
+                      sx={{ fontFamily: 'monospace', bgcolor: 'grey.100', p: 1, borderRadius: 1, mb: 2, userSelect: 'all' }}
+                    >
+                      {totpSecret}
+                    </Typography>
+                    <TextField
+                      fullWidth
+                      label="Enter 6-digit code to verify"
+                      value={totpVerifyCode}
+                      onChange={(e) => setTotpVerifyCode(e.target.value)}
+                      placeholder="123456"
+                      sx={{ mb: 2 }}
+                    />
+                    <Button variant="contained" onClick={handleVerifyTOTPSetup}>
+                      Verify & Enable
+                    </Button>
+                  </Box>
+                )}
+                {totpStep === 'done' && (
+                  <Box sx={{ py: 2 }}>
+                    <Alert severity="success" sx={{ mb: 2 }}>
+                      TOTP has been enabled for your account.
+                    </Alert>
+                    <Typography variant="body2" sx={{ mb: 1, fontWeight: 600 }}>
+                      Save these recovery codes. Each can be used once:
+                    </Typography>
+                    <Paper
+                      variant="outlined"
+                      sx={{ p: 2, mb: 2, bgcolor: 'grey.50', fontFamily: 'monospace', whiteSpace: 'pre-line' }}
+                    >
+                      {recoveryCodes.join('\n')}
+                    </Paper>
+                    <Button
+                      variant="outlined"
+                      startIcon={<ContentCopyIcon />}
+                      onClick={handleCopyRecoveryCodes}
+                      sx={{ mb: 2 }}
+                    >
+                      Copy Codes
+                    </Button>
+                    <Alert severity="warning">
+                      Store these codes in a safe place. If you lose your authenticator and recovery codes, you will be locked out.
+                    </Alert>
+                  </Box>
+                )}
+              </DialogContent>
+              <DialogActions>
+                <Button onClick={handleCloseTOTPDialog}>
+                  {totpStep === 'done' ? 'Done' : 'Cancel'}
                 </Button>
               </DialogActions>
             </Dialog>

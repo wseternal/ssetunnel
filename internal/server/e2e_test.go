@@ -43,7 +43,6 @@ var (
 	authStore  *auth.Store
 	agentToken string
 	userSessionToken string
-	totpSecret string
 	consoleURL string
 )
 
@@ -75,7 +74,6 @@ func runE2E(m *testing.M) int {
 		return 1
 	}
 	authStore = auth.NewStore(pool)
-	totpSecret = ""
 
 	// Pre-create tokens used by auth tests.
 	agentToken, err = auth.GenerateToken()
@@ -154,7 +152,7 @@ func runE2E(m *testing.M) int {
 	go authAg.Run(ctx)
 
 	// ── Console API (backed by auth server's registry) ──────────────────
-	consoleRouter := consoleapi.NewRouter(authStore, authSrv.Reg, totpSecret)
+	consoleRouter := consoleapi.NewRouter(authStore, authSrv.Reg)
 	consoleTS := httptest.NewServer(consoleRouter)
 	defer consoleTS.Close()
 	consoleURL = consoleTS.URL

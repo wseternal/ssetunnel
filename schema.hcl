@@ -188,3 +188,48 @@ table "agents" {
     columns = [column.agent_id]
   }
 }
+
+table "recovery_codes" {
+  schema = schema.public
+  column "id" {
+    null = false
+    type = bigint
+    identity {
+      generated = BY_DEFAULT
+    }
+  }
+  column "user_id" {
+    null = false
+    type = bigint
+  }
+  column "code_digest" {
+    null = false
+    type = text
+  }
+  column "used_at" {
+    null = true
+    type = timestamptz
+  }
+  column "created_at" {
+    null    = false
+    type    = timestamptz
+    default = sql("CURRENT_TIMESTAMP")
+  }
+  primary_key {
+    columns = [column.id]
+  }
+  index "recovery_codes_code_digest_idx" {
+    unique  = true
+    columns = [column.code_digest]
+    where   = "used_at IS NULL"
+  }
+  index "recovery_codes_user_id_idx" {
+    columns = [column.user_id]
+    where   = "used_at IS NULL"
+  }
+  foreign_key "recovery_codes_user_id_fkey" {
+    columns     = [column.user_id]
+    ref_columns = [table.users.column.id]
+    on_delete   = CASCADE
+  }
+}

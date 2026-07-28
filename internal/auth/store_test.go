@@ -184,3 +184,173 @@ func TestTOTPVerification(t *testing.T) {
 		t.Errorf("expected invalid TOTP code to fail")
 	}
 }
+
+func TestSetTOTPSecret(t *testing.T) {
+	ctx := context.Background()
+	dbcfg := orcapostgres.DBConfig{DatabaseURLTemplate: "postgres:tc:"}
+	pool, err := orcapostgres.OpenPool(ctx, dbcfg, orcapostgres.NewMigrator(migrations.FS, nil))
+	if err != nil {
+		t.Fatalf("failed to open pool: %v", err)
+	}
+	store := auth.NewStore(pool)
+
+	// Create a test user.
+	hash, _ := auth.HashPassword("testpass")
+	user, err := store.CreateUser(ctx, "totpuser", hash, "user", true, false)
+	if err != nil {
+		t.Fatalf("CreateUser failed: %v", err)
+	}
+
+	// Set TOTP secret.
+	secret := "JBSWY3DPEHPK3PXP"
+	if err := store.SetTOTPSecret(ctx, user.ID, secret); err != nil {
+		t.Fatalf("SetTOTPSecret failed: %v", err)
+	}
+
+	// Read back and verify.
+	u, err := store.GetUserByUsername(ctx, "totpuser")
+	if err != nil {
+		t.Fatalf("GetUserByUsername failed: %v", err)
+	}
+	if u.TOTPSecret != secret {
+		t.Errorf("expected totp_secret=%q, got %q", secret, u.TOTPSecret)
+	}
+
+	// UserTOTPEnrolled should return true.
+	enrolled, err := store.UserTOTPEnrolled(ctx, "totpuser")
+	if err != nil {
+		t.Fatalf("UserTOTPEnrolled failed: %v", err)
+	}
+	if !enrolled {
+		t.Error("expected UserTOTPEnrolled to return true")
+	}
+
+	// Clear TOTP secret.
+	if err := store.SetTOTPSecret(ctx, user.ID, ""); err != nil {
+		t.Fatalf("SetTOTPSecret clear failed: %v", err)
+	}
+	u, _ = store.GetUserByUsername(ctx, "totpuser")
+	if u.TOTPSecret != "" {
+		t.Errorf("expected empty totp_secret after clear, got %q", u.TOTPSecret)
+	}
+
+	// Non-existent user.
+	if err := store.SetTOTPSecret(ctx, 999999, "x"); err == nil {
+		t.Error("expected error for non-existent user")
+	}
+}
+
+func TestRecoveryCodesRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	dbcfg := orcapostgres.DBConfig{DatabaseURLTemplate: "postgres:tc:"}
+	pool, err := orcapostgres.OpenPool(ctx, dbcfg, orcapostgres.NewMigrator(migrations.FS, nil))
+	if err != nil {
+		t.Fatalf("failed to open pool: %v", err)
+	}
+	store := auth.NewStore(pool)
+
+	// Create a test user.
+	hash, _ := auth.HashPassword("testpass")
+	user, err := store.CreateUser(ctx, "recoveryuser", hash, "user", true, false)
+	if err != nil {
+		t.Fatalf("CreateUser failed: %v", err)
+	}
+
+	// Generate recovery codes.
+	codes, err := auth.GenerateRecoveryCodes(8)
+	if err != nil {
+		t.Fatalf("GenerateRecoveryCodes failed: %v", err)
+	}
+	if len(codes) != 8 {
+		t.Fatalf("expected 8 codes, got %d", len(codes))
+	}
+
+	// Compute digests and store.
+	digests := make([]string, len(codes))
+	for i, c := range codes {
+		digests[i] = auth.ComputeDigest(c)
+	}
+	if err := store.SaveRecoveryCodes(ctx, user.ID, digests); err != nil {
+		t.Fatalf("SaveRecoveryCodes failed: %v", err)
+	}
+
+	// Count should be 8.
+	count, err := store.CountUnusedRecoveryCodes(ctx, user.ID)
+	if err != nil {
+		t.Fatalf("CountUnusedRecoveryCodes failed: %v", err)
+	}
+	if count != 8 {
+		t.Errorf("expected 8 unused codes, got %d", count)
+	}
+
+	// Consume first code — should succeed.
+	ok, err := store.ConsumeRecoveryCode(ctx, user.ID, codes[0])
+	if err != nil {
+		t.Fatalf("ConsumeRecoveryCode failed: %v", err)
+	}
+	if !ok {
+		t.Error("expected first consume to succeed")
+	}
+
+	// Consume same code again — should fail.
+	ok, err = store.ConsumeRecoveryCode(ctx, user.ID, codes[0])
+	if err != nil {
+		t.Fatalf("ConsumeRecoveryCode second call error: %v", err)
+	}
+	if ok {
+		t.Error("expected second consume of same code to fail")
+	}
+
+	// Count should be 7.
+	count, _ = store.CountUnusedRecoveryCodes(ctx, user.ID)
+	if count != 7 {
+		t.Errorf("expected 7 unused codes after consume, got %d", count)
+	}
+
+	// Consume wrong code — should fail.
+	ok, err = store.ConsumeRecoveryCode(ctx, user.ID, "wrongcode")
+	if err != nil {
+		t.Fatalf("ConsumeRecoveryCode wrong code error: %v", err)
+	}
+	if ok {
+		t.Error("expected wrong code to fail")
+	}
+
+	// Delete all codes.
+	if err := store.DeleteRecoveryCodes(ctx, user.ID); err != nil {
+		t.Fatalf("DeleteRecoveryCodes failed: %v", err)
+	}
+	count, _ = store.CountUnusedRecoveryCodes(ctx, user.ID)
+	if count != 0 {
+		t.Errorf("expected 0 unused codes after delete, got %d", count)
+	}
+}
+
+func TestGenerateRecoveryCodes(t *testing.T) {
+	codes, err := auth.GenerateRecoveryCodes(5)
+	if err != nil {
+		t.Fatalf("GenerateRecoveryCodes failed: %v", err)
+	}
+	if len(codes) != 5 {
+		t.Fatalf("expected 5 codes, got %d", len(codes))
+	}
+	for i, c := range codes {
+		if len(c) != 10 {
+			t.Errorf("code[%d] length = %d, want 10", i, len(c))
+		}
+	}
+	// All codes should be unique.
+	seen := make(map[string]bool)
+	for _, c := range codes {
+		if seen[c] {
+			t.Errorf("duplicate recovery code: %s", c)
+		}
+		seen[c] = true
+	}
+
+	// Invalid count.
+	_, err = auth.GenerateRecoveryCodes(0)
+	if err == nil {
+		t.Error("expected error for count=0")
+	}
+}
