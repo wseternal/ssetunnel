@@ -361,7 +361,7 @@ func runProbe(ctx context.Context, args []string) error {
 
 func runLogin(_ context.Context, args []string) error {
 	fs := flag.NewFlagSet("login", flag.ContinueOnError)
-	consoleURL := fs.String("console", "http://127.0.0.1:8081", "console API URL")
+	consoleURL := fs.String("console", "http://127.0.0.1:8081/console", "console base URL (include path prefix if behind reverse proxy)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -385,7 +385,7 @@ func runLogin(_ context.Context, args []string) error {
 	// Check if TOTP is required for this user.
 	var totpCode string
 	checkBody, _ := json.Marshal(map[string]string{"username": username})
-	checkResp, err := http.Post(*consoleURL+"/console/api/v1/user-login-check", "application/json", strings.NewReader(string(checkBody)))
+	checkResp, err := http.Post(*consoleURL+"/api/v1/user-login-check", "application/json", strings.NewReader(string(checkBody)))
 	if err == nil {
 		defer checkResp.Body.Close()
 		if checkResp.StatusCode == http.StatusOK {
@@ -417,7 +417,7 @@ func runLogin(_ context.Context, args []string) error {
 		"totp_code": totpCode,
 	})
 
-	resp, err := http.Post(*consoleURL+"/console/api/v1/user-login", "application/json", strings.NewReader(string(reqBody)))
+	resp, err := http.Post(*consoleURL+"/api/v1/user-login", "application/json", strings.NewReader(string(reqBody)))
 	if err != nil {
 		return fmt.Errorf("login request failed: %w", err)
 	}
