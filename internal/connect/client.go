@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"os"
 	"strings"
@@ -32,6 +33,17 @@ func NewClient(serverEntryAddr string, token string) *Client {
 }
 
 func (c *Client) ServeListener(ctx context.Context, ln net.Listener) error {
+	// Eagerly validate the token by performing a test handshake at startup.
+	// This catches invalid tokens immediately instead of silently failing
+	// on the first user connection.
+	if c.token != "" {
+		probe, err := c.dialAndHandshake(ctx)
+		if err != nil {
+			return fmt.Errorf("token validation failed: %w", err)
+		}
+		probe.Close()
+	}
+
 	go func() {
 		<-ctx.Done()
 		ln.Close()
@@ -85,6 +97,7 @@ func (c *Client) handleLocalConn(ctx context.Context, localConn net.Conn) {
 
 	serverConn, err := c.dialAndHandshake(ctx)
 	if err != nil {
+		log.Printf("connect: handshake failed: %v", err)
 		return
 	}
 	defer serverConn.Close()
