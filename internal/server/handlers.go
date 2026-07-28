@@ -45,6 +45,7 @@ type Handler struct {
 	reg       *Registry
 	heartbeat time.Duration
 	store     *auth.Store
+	basePath  string // HTTP path prefix for all endpoints (empty = no prefix)
 	mux       *http.ServeMux
 
 	// connectSessions maps connect session IDs to connectSession structs,
@@ -65,19 +66,21 @@ type Handler struct {
 
 // NewHandler builds the tunnel handler without auth.
 func NewHandler(reg *Registry, heartbeat time.Duration) *Handler {
-	return NewHandlerWithAuth(reg, heartbeat, nil)
+	return NewHandlerWithAuth(reg, heartbeat, nil, "")
 }
 
-// NewHandlerWithAuth builds the tunnel handler with an optional auth store.
-func NewHandlerWithAuth(reg *Registry, heartbeat time.Duration, store *auth.Store) *Handler {
-	h := &Handler{reg: reg, heartbeat: heartbeat, store: store, mux: http.NewServeMux()}
+// NewHandlerWithAuth builds the tunnel handler with an optional auth store
+// and an HTTP path prefix for all endpoints (empty = no prefix).
+func NewHandlerWithAuth(reg *Registry, heartbeat time.Duration, store *auth.Store, basePath string) *Handler {
+	basePath = strings.TrimRight(basePath, "/")
+	h := &Handler{reg: reg, heartbeat: heartbeat, store: store, basePath: basePath, mux: http.NewServeMux()}
 	agentAuth := AgentAuthMiddleware(store)
 	connectAuth := ConnectAuthMiddleware(store)
-	h.mux.Handle("/events", agentAuth(http.HandlerFunc(h.handleEvents)))
-	h.mux.Handle("/up", agentAuth(http.HandlerFunc(h.handleUp)))
-	h.mux.Handle("/connect", connectAuth(http.HandlerFunc(h.handleConnect)))
-	h.mux.Handle("/connect-up", connectAuth(http.HandlerFunc(h.handleConnectUp)))
-	h.mux.HandleFunc("/probe", h.handleProbe)
+	h.mux.Handle(basePath+"/events", agentAuth(http.HandlerFunc(h.handleEvents)))
+	h.mux.Handle(basePath+"/up", agentAuth(http.HandlerFunc(h.handleUp)))
+	h.mux.Handle(basePath+"/connect", connectAuth(http.HandlerFunc(h.handleConnect)))
+	h.mux.Handle(basePath+"/connect-up", connectAuth(http.HandlerFunc(h.handleConnectUp)))
+	h.mux.HandleFunc(basePath+"/probe", h.handleProbe)
 	return h
 }
 

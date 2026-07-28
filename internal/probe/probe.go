@@ -28,6 +28,7 @@ const (
 // Config configures Run.
 type Config struct {
 	URL      string       // tunnel server base URL, e.g. http://host:port
+	BasePath string       // HTTP path prefix for tunnel endpoints (e.g. "/tunnel"); empty means no prefix
 	Client   *http.Client // nil → http.DefaultClient
 	Steps    int          // escalation steps from 16 KiB; 0 → 7
 	Parallel int          // phase-3 parallel stream count; 0 → 4
@@ -77,8 +78,9 @@ func Run(ctx context.Context, cfg Config) (Report, error) {
 	}
 
 	rep := Report{URL: cfg.URL}
+	baseURL := cfg.URL + strings.TrimRight(cfg.BasePath, "/")
 	post := func(size int) (Measurement, error) {
-		return timedPost(ctx, client, cfg.URL, size)
+		return timedPost(ctx, client, baseURL, size)
 	}
 
 	// Phases 1+2: escalating sizes → body-size cliff + RTT-vs-size table.
