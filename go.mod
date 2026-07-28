@@ -3,6 +3,7 @@ module github.com/wseternal/ssetunnel
 go 1.26.5
 
 require (
+	github.com/cenkalti/backoff/v4 v4.3.0
 	github.com/gorilla/mux v1.8.1
 	github.com/hashicorp/yamux v0.1.2
 	github.com/jackc/pgx/v5 v5.10.0
@@ -25,7 +26,6 @@ require (
 	github.com/bmatcuk/doublestar v1.3.4 // indirect
 	github.com/bmatcuk/doublestar/v4 v4.10.0 // indirect
 	github.com/boombuler/barcode v1.0.1-0.20190219062509-6c824513bacc // indirect
-	github.com/cenkalti/backoff/v4 v4.3.0 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/containerd/errdefs v1.0.0 // indirect
 	github.com/containerd/errdefs/pkg v0.3.0 // indirect
