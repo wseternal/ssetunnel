@@ -1,70 +1,34 @@
-# Implementation Plan: Revise `dev-cycle` Skill for Dual-Model Configuration
+# Implementation Plan - ssetunnel Cycle 3 (Auth, Management Console, Connect Wrapper)
 
-## Overview
-Revise the `dev-cycle` skill at `/Users/jiangzhaohua/.agents/skills/dev-cycle/SKILL.md` to introduce model selection and deduction in Phase 0 Setup. The skill will deduce and prompt the user to confirm/choose two distinct models provided by the agent platform:
-1. **High-Reasoning Model**: for `PLAN`, `REVIEW`, and `SIMPLIFY` (upfront architecture, deep analysis, quality audit, safe complexity reduction).
-2. **Faster Execution Model**: for `IMPLEMENT` (fast TDD code generation, rapid test-driven iteration).
+## Architecture & Design
 
-Phase 0 will deduce these models based on available models provided by the agent/environment, present the assigned models for the 4 steps, and require explicit user confirmation before advancing to Phase 1.
+1. **Database & Schema Management (`schema.hcl`, `atlas.hcl`, `migrations/`)**:
+   - Atlas declarative schema in `schema.hcl` (`tokens`, `pins`, `admin_sessions`).
+   - Versioned SQL migrations in `migrations/` embedded via `//go:embed` (`migrations.FS`).
+   - Startup auto-migrations using `orcapostgres.OpenPool` with `orcapostgres.NewMigrator(migrations.FS, nil)`.
+   - Integration tests use `testcontainers` (`orcapostgres.DBConfig{ DatabaseURLTemplate: "postgres:tc:" }`).
+   - Optional auth bypass if `--disable-auth` or no DB config is passed (100% backward compatibility for existing cycle 1/2 tests).
 
-## Proposed Changes
+2. **Authentication Core & High Performance (`internal/auth/`)**:
+   - Stores cryptographically secure SHA-256 digests (`crypto/rand` 32-byte tokens / base32 PINs).
+   - In-memory `sync.Map` read-through token cache for sub-microsecond validation on high-frequency `/up` POST batch paths.
+   - Atomic single-use PIN consumption via `UPDATE pins SET used_at = NOW() WHERE ... RETURNING role`.
+   - TOTP validation via `pquerna/otp/totp`.
 
-### 1. Update Overview Diagram and Phase Descriptions
-In `SKILL.md`:
-- Update Phase 0 summary to include model selection.
-- Update pipeline flow diagram:
-  ```
-  Phase 0  SETUP       (branch verification + complexity assessment + model selection & confirmation)
-  Phase 1  PLAN        (high-reasoning model: parallel multi-perspective planning → critical review → synthesis → user approval)
-  Phase 2  IMPLEMENT   (faster model: incremental vertical slices / TDD)
-  Phase 3  REVIEW      (high-reasoning model: six-axis code review)
-  Phase 4  SIMPLIFY    (high-reasoning model: complexity reduction)
-  Phase 5  WRAP-UP     (squash commits + user recap)
-  ```
+3. **High-Throughput Stream Proxying & Handshake (`internal/server/`, `internal/connect/`)**:
+   - Line-delimited TCP handshake (`<token>\n` → `OK\n`) with 5s read deadline on user TCP entry connection.
+   - Reusable `sync.Pool` (32KB buffers) with `io.CopyBuffer` to eliminate GC allocation churn during bidirectional stream proxying.
+   - `ssetunnel connect` wrapper supports both **Local Port Mode** (`--local 13306`) and **Stdio Mode** (`--local -`) for SSH `ProxyCommand`.
 
-### 2. Phase 0 Setup Enhancements
-Add **Step 0.3: Model Selection & Confirmation**:
-- **Get Available Models:** Query or inspect the agent runtime's provided/configured model list or available models (e.g. `Gemini 3.6 Pro / Flash (High)`, `Claude 3.7 Sonnet / Thinking`, `GPT-4o`, `O1/O3`, etc. or current model context).
-- **Deduce Two Models:**
-  - High-Reasoning Model (e.g. Pro / Thinking / High reasoning): Assigned to `PLAN`, `REVIEW`, `SIMPLIFY`.
-  - Faster Model (e.g. Flash / Fast execution): Assigned to `IMPLEMENT`.
-- **User Confirmation Gate:** Present the model allocation table to the user and ask for confirmation before proceeding to Phase 1:
-  | Step / Phase | Model Role | Selected Model | Rationale |
-  |---|---|---|---|
-  | **Phase 1: PLAN** | High-Reasoning | `<model-name>` | Upfront architecture, synthesis, risk mitigation |
-  | **Phase 2: IMPLEMENT** | Faster Execution | `<model-name>` | Speed, rapid TDD iteration |
-  | **Phase 3: REVIEW** | High-Reasoning | `<model-name>` | Six-axis deep quality audit |
-  | **Phase 4: SIMPLIFY** | High-Reasoning | `<model-name>` | Safe refactoring & complexity reduction |
-- Update Phase 0 Exit Gate:
-  - Models for the 4 steps determined and explicitly confirmed by the user.
+4. **Embedded React Console & JSON Management API (`frontend/`, `internal/consoleapi/`)**:
+   - React 18 + Vite + Material UI (`@mui/material`) in `frontend/console/`, built to `frontend/console/dist`, embedded in Go via `frontend/frontend.go`.
+   - SPA catch-all routing powered by `github.com/visdomtech/orcacommon/litespaserver`.
+   - Admin TOTP login yielding 12h HTTP-only session cookie.
+   - JSON management API (`/api/v1/login`, `/api/v1/tokens`, `/api/v1/enroll`, `/api/v1/sessions`).
+   - Live metrics (active sessions, throughput bytes) backed by Go in-memory `sync/atomic` counters on `Session` and `Registry` (zero DB write overhead).
 
-### 3. Update Phase 1 (PLAN)
-- Explicitly mandate launching research agents and doing synthesis using the confirmed **High-Reasoning Model**.
+## Rejected Alternatives
 
-### 4. Update Phase 2 (IMPLEMENT)
-- Explicitly mandate performing code generation, TDD cycles (RED -> GREEN -> REFACTOR) using the confirmed **Faster Model** for speed and execution efficiency.
-
-### 5. Update Phase 3 (REVIEW)
-- Explicitly mandate carrying out the six-axis code review using the confirmed **High-Reasoning Model**.
-
-### 6. Update Phase 4 (SIMPLIFY)
-- Explicitly mandate analyzing and simplifying code using the confirmed **High-Reasoning Model**.
-
-### 7. Pipeline Rules & Recap Updates
-- Update Phase 5 (WRAP-UP) recap table to report model selections used for the cycle.
-- Update Pipeline Rules to reflect mandatory model confirmation gate in Phase 0.
-
-## Task List
-
-### Phase 1: Edit `SKILL.md`
-- [ ] Task 1: Add Step 0.3 (Model Selection & Confirmation) to Phase 0 and update Phase 0 exit gate.
-- [ ] Task 2: Update Overview diagram and phase summaries to explicitly highlight the model assignment for `PLAN`, `IMPLEMENT`, `REVIEW`, and `SIMPLIFY`.
-- [ ] Task 3: Update Phase 1 (PLAN), Phase 2 (IMPLEMENT), Phase 3 (REVIEW), and Phase 4 (SIMPLIFY) instructions to reference using the assigned High-Reasoning or Faster model.
-- [ ] Task 4: Update Phase 5 (WRAP-UP) recap summary table and Pipeline Rules to include model tracking.
-
-### Checkpoint & Verification
-- [ ] Review updated `SKILL.md` against all user requirements.
-- [ ] Confirm clean formatting and accurate instructions.
-
-## Open Questions / Assumptions
-- The skill instructions guide the agent running `dev-cycle` to discover/detect available models provided by its execution environment or active configuration, infer high-reasoning vs faster execution options, and present them in a clear table for user approval.
+1. **File-based JSON Token Storage**: Rejected in favor of PostgreSQL + Atlas + `orcacommon/postgres` per user request and requirement to match `auth-go` standard.
+2. **Direct DB queries on every `/up` POST batch**: Rejected because high-frequency `/up` batches (hundreds/sec) would saturate DB connection pools. Replaced with `sync.Map` in-memory read-through cache.
+3. **Database-backed Live Traffic Metrics**: Rejected because updating DB rows on every proxied byte/frame creates severe write contention. Replaced with Go in-memory `sync/atomic` counters.

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/wseternal/ssetunnel/internal/auth"
 	"github.com/wseternal/ssetunnel/internal/transport"
 )
 
@@ -52,12 +53,17 @@ type Handler struct {
 	OnUpPush func(seq uint64) <-chan struct{}
 }
 
-// NewHandler builds the tunnel handler. heartbeat is the SSE keepalive
-// interval — a struct field, so tests use tiny values (plan decision 10).
+// NewHandler builds the tunnel handler without auth.
 func NewHandler(reg *Registry, heartbeat time.Duration) *Handler {
+	return NewHandlerWithAuth(reg, heartbeat, nil)
+}
+
+// NewHandlerWithAuth builds the tunnel handler with an optional auth store.
+func NewHandlerWithAuth(reg *Registry, heartbeat time.Duration, store *auth.Store) *Handler {
 	h := &Handler{reg: reg, heartbeat: heartbeat, mux: http.NewServeMux()}
-	h.mux.HandleFunc("/events", h.handleEvents)
-	h.mux.HandleFunc("/up", h.handleUp)
+	agentAuth := AgentAuthMiddleware(store)
+	h.mux.Handle("/events", agentAuth(http.HandlerFunc(h.handleEvents)))
+	h.mux.Handle("/up", agentAuth(http.HandlerFunc(h.handleUp)))
 	h.mux.HandleFunc("/probe", h.handleProbe)
 	return h
 }

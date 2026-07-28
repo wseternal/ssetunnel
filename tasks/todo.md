@@ -1,25 +1,41 @@
-# Tasks: Revise `dev-cycle` Skill
+# Todo List - ssetunnel Cycle 3
 
-- [x] **Task 1: Add Step 0.3 (Model Selection & Confirmation) to Phase 0**
-  - Acceptance Criteria:
-    - Step 0.3 clearly explains how to detect available models provided by the current agent/environment.
-    - Deduced mapping is defined: High-Reasoning for `PLAN`, `REVIEW`, `SIMPLIFY`; Faster model for `IMPLEMENT`.
-    - Includes a structured table template and explicit user confirmation requirement before advancing to Phase 1.
-    - Exit gate of Phase 0 includes model confirmation.
+- [x] Slice 1: Database Schema & Migrations (`schema.hcl`, `atlas.hcl`, `migrations/`)
+  - Acceptance: `schema.hcl` defines `tokens`, `pins`, `admin_sessions`; migration SQL files generated in `migrations/` and embedded via `//go:embed`.
+  - Verify: `atlas migrate validate` / `go test ./migrations/...` passes.
+  - Files: `schema.hcl`, `atlas.hcl`, `migrations/migrations.go`
 
-- [x] **Task 2: Update Overview & Pipeline Flow Diagram**
-  - Acceptance Criteria:
-    - Overview diagram and summary list reflect model selection in Phase 0.
-    - Phase 1, 2, 3, 4 summaries mention High-Reasoning vs Faster model usage.
+- [x] Slice 2: Auth Storage Engine (`internal/auth/`)
+  - Acceptance: `store.go` implements PostgreSQL operations with SHA-256 digest hashing & `sync.Map` read-through cache; `totp.go`, `pin.go`, `token.go` pass unit tests.
+  - Verify: `go test ./internal/auth/... -race -count=1` passes with testcontainers (`postgres:tc:`).
+  - Files: `internal/auth/store.go`, `internal/auth/totp.go`, `internal/auth/pin.go`, `internal/auth/token.go`, `internal/auth/store_test.go`
 
-- [x] **Task 3: Update Phase 1, Phase 2, Phase 3, Phase 4 Descriptions**
-  - Acceptance Criteria:
-    - Phase 1 (PLAN) explicitly instructs using the confirmed High-Reasoning model.
-    - Phase 2 (IMPLEMENT) explicitly instructs using the confirmed Faster model.
-    - Phase 3 (REVIEW) explicitly instructs using the confirmed High-Reasoning model.
-    - Phase 4 (SIMPLIFY) explicitly instructs using the confirmed High-Reasoning model.
+- [x] Slice 3: Server Middleware & HTTP Auth Enforcement (`internal/server/`)
+  - Acceptance: `/events` and `/up` endpoints reject unauthorized requests with 401 when auth enabled, and bypass when `--disable-auth`.
+  - Verify: `go test ./internal/server/... -run Auth -race -count=1` passes.
+  - Files: `internal/server/middleware.go`, `internal/server/handlers.go`, `internal/server/server.go`
 
-- [x] **Task 4: Update Phase 5 (WRAP-UP) and Pipeline Rules**
-  - Acceptance Criteria:
-    - Phase 5 recap table includes a row for Models Used (`High-Reasoning: ... / Faster: ...`).
-    - Pipeline Rules note model selection/confirmation as a required Phase 0 gate.
+- [x] Slice 4: TCP Entry Listener Handshake & Buffer Pool (`internal/server/`)
+  - Acceptance: Entry listener validates `<token>\n` within 5s timeout, replies `OK\n`, and uses `sync.Pool` 32KB buffers for zero-alloc `io.CopyBuffer` stream proxying.
+  - Verify: `go test ./internal/server/... -run EntryHandshake -race -count=1` passes.
+  - Files: `internal/server/server.go`, `internal/server/session.go`
+
+- [x] Slice 5: Management JSON API (`internal/consoleapi/`)
+  - Acceptance: `/api/v1/login`, `/api/v1/tokens`, `/api/v1/enroll`, `/api/v1/sessions` function correctly with admin TOTP cookie auth and in-memory session stats.
+  - Verify: `go test ./internal/consoleapi/... -race -count=1` passes.
+  - Files: `internal/consoleapi/router.go`, `internal/consoleapi/consoleapi_test.go`
+
+- [x] Slice 6: Embedded React Console SPA & litespaserver Integration (`frontend/`, `internal/consoleserver/`)
+  - Acceptance: React 18 + Vite + MUI console builds into `frontend/console/dist`, embeds via `frontend/frontend.go`, and is served via `litespaserver`.
+  - Verify: `cd frontend/console && npm run build` succeeds; `go test ./internal/server/... -race -count=1` passes.
+  - Files: `frontend/console/...`, `frontend/frontend.go`, `internal/consoleserver/consoleserver.go`
+
+- [x] Slice 7: Connect Client Wrapper & Subcommand Integration (`internal/connect/`, `cmd/`)
+  - Acceptance: `ssetunnel connect` supports Local Port and Stdio (`--local -`) modes, injecting `<token>\n` handshake; `agent` passes token in HTTP headers.
+  - Verify: `go test ./internal/connect/... -race -count=1` passes; `go test ./cmd/ssetunnel/... -race -count=1` passes.
+  - Files: `internal/connect/client.go`, `internal/transport/conn.go`, `internal/agent/agent.go`, `cmd/ssetunnel/main.go`
+
+- [x] Slice 8: End-to-End Integration Tests (`internal/server/`)
+  - Acceptance: Full E2E flow passes: Admin Login → PIN Generation → Agent Enrollment → Client Wrapper TCP Proxying.
+  - Verify: `go test ./internal/server/... -run E2E_Cycle3 -race -count=1` passes.
+  - Files: `internal/server/e2e_cycle3_test.go`

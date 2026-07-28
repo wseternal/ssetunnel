@@ -20,6 +20,7 @@ import (
 type Agent struct {
 	ServerURL  string        // tunnel server base URL
 	Target     string        // TCP address to forward streams to
+	Token      string        // Bearer token or single-use PIN for authentication
 	MaxBackoff time.Duration // reconnect cap; 0 → 1 s
 	MaxWait    time.Duration // batcher flush ceiling; 0 → default
 	Client     *http.Client  // nil → transport default
@@ -78,6 +79,7 @@ func (a *Agent) Run(ctx context.Context) error {
 func (a *Agent) runOnce(ctx context.Context) error {
 	conn, err := transport.DialAgent(ctx, transport.Config{
 		URL:          a.ServerURL,
+		Token:        a.Token,
 		MaxWait:      a.MaxWait,
 		Client:       a.Client,
 		MaxBatchSize: a.BatchSize,

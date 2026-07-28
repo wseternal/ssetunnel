@@ -43,6 +43,9 @@ type Config struct {
 	// Compress wants gzip-per-batch encoding (decision 5); used only
 	// when negotiated on a windowed (concurrency>1) session.
 	Compress bool
+
+	// Token is the bearer token for agent authentication
+	Token string
 }
 
 // Conn is the agent side of the tunnel: a net.Conn over SSE-down +
@@ -53,6 +56,7 @@ type Conn struct {
 	ownClient bool // Close must reap the transport's idle conns
 	upURL     string
 	id        string
+	token     string
 	seq       atomic.Uint64 // next X-SSET-Seq; serial sender keeps order
 
 	ctx    context.Context
@@ -126,6 +130,7 @@ func DialAgent(ctx context.Context, cfg Config) (*Conn, error) {
 		client: client,
 		upURL:  cfg.URL + "/up",
 		id:     id,
+		token:  cfg.Token,
 		down:   NewPipe(downPipeCap),
 	}
 	c.ownClient = cfg.Client == nil
@@ -136,6 +141,9 @@ func DialAgent(ctx context.Context, cfg Config) (*Conn, error) {
 	if err != nil {
 		c.cancel()
 		return nil, fmt.Errorf("build events request: %w", err)
+	}
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
 	}
 	want := Caps{Concurrency: conc, Batch: maxSize, Gzip: cfg.Compress}
 	if !cfg.DisableCaps {
@@ -310,6 +318,9 @@ func (c *Conn) post(seq uint64, batch []byte) error {
 	}
 	req.Header.Set("X-SSET-Session", c.id)
 	req.Header.Set("X-SSET-Seq", strconv.FormatUint(seq, 10))
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
 	if flags != "" {
 		req.Header.Set("X-SSET-Flags", flags)
 	}

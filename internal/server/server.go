@@ -1,41 +1,85 @@
 package server
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"io"
 	"log"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/hashicorp/yamux"
+	"github.com/wseternal/ssetunnel/internal/auth"
 	"github.com/wseternal/ssetunnel/internal/mux"
 )
 
+var bufferPool = sync.Pool{
+	New: func() any {
+		buf := make([]byte, 32*1024)
+		return &buf
+	},
+}
+
 // Server is the public side of the tunnel: the HTTP endpoints plus the
-// TCP entry listener users connect to (plan step 7).
+// TCP entry listener users connect to.
 type Server struct {
-	// Reg is the live session registry (exported for tests and the
-	// future console).
+	// Reg is the live session registry (exported for tests and the console).
 	Reg *Registry
 
 	handler *Handler
+	store   *auth.Store
 
 	mu   sync.Mutex
 	sess *yamux.Session // yamux server over the current tunnel session
 }
 
-// NewServer wires the registry, handlers, and session→yamux attachment.
-// heartbeat is the SSE keepalive interval (15 s in production, tiny in
-// tests per plan decision 10).
+// NewServer builds a server given an SSE heartbeat interval.
 func NewServer(heartbeat time.Duration) *Server {
 	reg := NewRegistry()
 	h := NewHandler(reg, heartbeat)
 	s := &Server{Reg: reg, handler: h}
 	h.OnSession = s.attach
 	return s
+}
+
+// NewServerWithRegistry builds a server with a given registry and SSE heartbeat interval.
+func NewServerWithRegistry(reg *Registry, heartbeat time.Duration) *Server {
+	h := NewHandler(reg, heartbeat)
+	s := &Server{Reg: reg, handler: h}
+	h.OnSession = s.attach
+	return s
+}
+
+// SetAuthStore attaches an authentication store for token validation.
+func (s *Server) SetAuthStore(store *auth.Store) {
+	s.store = store
+	s.handler = NewHandlerWithAuth(s.Reg, s.handler.heartbeat, store)
+	s.handler.OnSession = s.attach
+}
+
+// AttachSession manually attaches a session (useful for custom flows and testing).
+func (s *Server) AttachSession(sess *Session) {
+	s.attach(sess)
+}
+
+// AttachConn manually attaches any net.Conn (useful for direct multiplexing tests).
+func (s *Server) AttachConn(conn net.Conn) {
+	ms, err := mux.Server(conn)
+	if err != nil {
+		conn.Close()
+		return
+	}
+	s.mu.Lock()
+	old := s.sess
+	s.sess = ms
+	s.mu.Unlock()
+	if old != nil {
+		old.Close()
+	}
 }
 
 // attach wraps a newly registered tunnel session in a yamux server and
@@ -58,11 +102,7 @@ func (s *Server) attach(sess *Session) {
 // HTTPHandler returns the tunnel endpoint handler (/events, /up).
 func (s *Server) HTTPHandler() http.Handler { return s.handler }
 
-// NewHTTPServer builds the production HTTP server. WriteTimeout MUST
-// stay 0 — any write timeout kills the long-lived SSE stream (plan
-// decision 7). ReadHeaderTimeout bounds slowloris; ReadTimeout bounds
-// slow-dribble POST bodies (≤1 MiB, well under 30 s) — the SSE GET has
-// no request body, so it is unaffected.
+// NewHTTPServer builds the production HTTP server.
 func (s *Server) NewHTTPServer(addr string) *http.Server {
 	return &http.Server{
 		Addr:              addr,
@@ -73,8 +113,7 @@ func (s *Server) NewHTTPServer(addr string) *http.Server {
 	}
 }
 
-// ServeEntry accepts user TCP conns until ctx is done, proxying each
-// over its own yamux stream (plan step 7: one stream per accepted conn).
+// ServeEntry accepts user TCP conns until ctx is done.
 func (s *Server) ServeEntry(ctx context.Context, ln net.Listener) error {
 	go func() {
 		<-ctx.Done()
@@ -92,10 +131,33 @@ func (s *Server) ServeEntry(ctx context.Context, ln net.Listener) error {
 	}
 }
 
-// proxyEntry opens a yamux stream on the current session and copies
-// bidirectionally. With no active session the conn is closed cleanly —
-// users retry rather than hang (spec: no hung connections).
+// proxyEntry opens a yamux stream on the current session and copies bidirectionally.
 func (s *Server) proxyEntry(c net.Conn) {
+	if s.store != nil {
+		c.SetReadDeadline(time.Now().Add(5 * time.Second))
+		reader := bufio.NewReader(c)
+		tokenLine, err := reader.ReadString('\n')
+		if err != nil {
+			log.Printf("server: entry handshake failed from %s: %v", c.RemoteAddr(), err)
+			c.Close()
+			return
+		}
+
+		tokenStr := strings.TrimSpace(tokenLine)
+		tokInfo, err := s.store.ValidateToken(context.Background(), tokenStr)
+		if err != nil || (tokInfo.Role != "user" && tokInfo.Role != "admin") {
+			log.Printf("server: entry handshake rejected invalid token from %s", c.RemoteAddr())
+			c.Close()
+			return
+		}
+
+		if _, err := fmt.Fprintf(c, "OK\n"); err != nil {
+			c.Close()
+			return
+		}
+		c.SetReadDeadline(time.Time{})
+	}
+
 	s.mu.Lock()
 	ms := s.sess
 	s.mu.Unlock()
@@ -110,6 +172,17 @@ func (s *Server) proxyEntry(c net.Conn) {
 		c.Close()
 		return
 	}
-	go func() { io.Copy(stream, c); stream.Close() }()
-	go func() { io.Copy(c, stream); c.Close() }()
+
+	go func() {
+		buf := bufferPool.Get().(*[]byte)
+		defer bufferPool.Put(buf)
+		_, _ = io.CopyBuffer(stream, c, *buf)
+		stream.Close()
+	}()
+	go func() {
+		buf := bufferPool.Get().(*[]byte)
+		defer bufferPool.Put(buf)
+		_, _ = io.CopyBuffer(c, stream, *buf)
+		c.Close()
+	}()
 }
