@@ -53,7 +53,6 @@ func TestMain(m *testing.M) {
 
 func runE2E(m *testing.M) int {
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 
 	// ── Echo target (shared by both servers) ────────────────────────────
 	echoLn, err := net.Listen("tcp", "127.0.0.1:0")
@@ -156,7 +155,12 @@ func runE2E(m *testing.M) int {
 		return 1
 	}
 
-	return m.Run()
+	// Cancel agent context BEFORE tearing down HTTP servers, so agents
+	// stop their reconnect loops cleanly instead of spamming connection
+	// refused errors while servers are shutting down.
+	code := m.Run()
+	cancel()
+	return code
 }
 
 // ---------------------------------------------------------------------------
