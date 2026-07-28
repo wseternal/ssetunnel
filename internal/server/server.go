@@ -129,28 +129,9 @@ func (s *Server) ServeEntry(ctx context.Context, ln net.Listener) error {
 // proxyEntry opens a yamux stream on the current session and copies bidirectionally.
 func (s *Server) proxyEntry(c net.Conn) {
 	if s.store != nil {
-		c.SetReadDeadline(time.Now().Add(5 * time.Second))
-		reader := bufio.NewReader(c)
-		tokenLine, err := reader.ReadString('\n')
-		if err != nil {
-			log.Printf("server: entry handshake failed from %s: %v", c.RemoteAddr(), err)
-			c.Close()
+		if !s.authenticateEntryConn(c) {
 			return
 		}
-
-		tokenStr := strings.TrimSpace(tokenLine)
-		tokInfo, err := s.store.ValidateToken(context.Background(), tokenStr)
-		if err != nil || (tokInfo.Role != "user" && tokInfo.Role != "admin") {
-			log.Printf("server: entry handshake rejected invalid token from %s", c.RemoteAddr())
-			c.Close()
-			return
-		}
-
-		if _, err := fmt.Fprintf(c, "OK\n"); err != nil {
-			c.Close()
-			return
-		}
-		c.SetReadDeadline(time.Time{})
 	}
 
 	ms := s.findYamux()
@@ -178,6 +159,38 @@ func (s *Server) proxyEntry(c net.Conn) {
 		_, _ = io.CopyBuffer(c, stream, *buf)
 		c.Close()
 	}()
+}
+
+// authenticateEntryConn reads the first line from c as a token and validates
+// it. On success it writes "OK\n" and clears the read deadline. On failure it
+// writes "ERR unauthorized\n" before closing c, so clients are not left
+// guessing why the connection was dropped.
+func (s *Server) authenticateEntryConn(c net.Conn) bool {
+	c.SetReadDeadline(time.Now().Add(5 * time.Second))
+	reader := bufio.NewReader(c)
+	tokenLine, err := reader.ReadString('\n')
+	if err != nil {
+		log.Printf("server: entry handshake failed from %s: %v", c.RemoteAddr(), err)
+		fmt.Fprintf(c, "ERR unauthorized\n") //nolint:errcheck // best-effort
+		c.Close()
+		return false
+	}
+
+	tokenStr := strings.TrimSpace(tokenLine)
+	tokInfo, err := s.store.ValidateToken(context.Background(), tokenStr)
+	if err != nil || (tokInfo.Role != "user" && tokInfo.Role != "admin") {
+		log.Printf("server: entry handshake rejected invalid token from %s", c.RemoteAddr())
+		fmt.Fprintf(c, "ERR unauthorized\n") //nolint:errcheck // best-effort
+		c.Close()
+		return false
+	}
+
+	if _, err := fmt.Fprintf(c, "OK\n"); err != nil {
+		c.Close()
+		return false
+	}
+	c.SetReadDeadline(time.Time{})
+	return true
 }
 
 // findYamux returns the first open yamux session from the registry.

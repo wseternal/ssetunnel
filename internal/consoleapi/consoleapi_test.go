@@ -127,3 +127,30 @@ func TestConsoleAPI(t *testing.T) {
 		t.Fatalf("expected 200 getting sessions, got %d", rec.Code)
 	}
 }
+
+func TestLoginTOTPNotConfigured(t *testing.T) {
+	ctx := context.Background()
+
+	dbcfg := orcapostgres.DBConfig{
+		DatabaseURLTemplate: "postgres:tc:",
+	}
+	pool, err := orcapostgres.OpenPool(ctx, dbcfg, orcapostgres.NewMigrator(migrations.FS, nil))
+	if err != nil {
+		t.Fatalf("failed to open pool: %v", err)
+	}
+
+	store := auth.NewStore(pool)
+	reg := server.NewRegistry()
+
+	// Router with empty totpSecret → TOTP not configured
+	router := consoleapi.NewRouter(store, reg, "")
+
+	loginBody, _ := json.Marshal(map[string]string{"totp_code": "123456"})
+	req := httptest.NewRequest("POST", "/api/v1/login", bytes.NewReader(loginBody))
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503 when TOTP not configured, got %d", rec.Code)
+	}
+}

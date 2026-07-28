@@ -4,10 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -27,8 +27,7 @@ type TokenInfo struct {
 }
 
 type Store struct {
-	pool  *pgxpool.Pool
-	cache sync.Map // map[digest]TokenInfo
+	pool *pgxpool.Pool
 }
 
 func NewStore(pool *pgxpool.Pool) *Store {
@@ -50,6 +49,15 @@ func (s *Store) CreatePIN(ctx context.Context, rawPIN, role string, ttl time.Dur
 }
 
 func (s *Store) VerifyAndUsePIN(ctx context.Context, rawPIN string) (string, error) {
+	return s.verifyAndUsePINTx(ctx, s.pool, rawPIN)
+}
+
+// verifyAndUsePINTx executes the single-use PIN consumption against the given
+// queryable (either a *pgxpool.Pool or a pgx.Tx). This enables callers to
+// include the PIN check in a broader atomic transaction.
+func (s *Store) verifyAndUsePINTx(ctx context.Context, q interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}, rawPIN string) (string, error) {
 	digest := ComputeDigest(rawPIN)
 
 	query := `
@@ -60,7 +68,7 @@ func (s *Store) VerifyAndUsePIN(ctx context.Context, rawPIN string) (string, err
 	`
 
 	var role string
-	err := s.pool.QueryRow(ctx, query, digest).Scan(&role)
+	err := q.QueryRow(ctx, query, digest).Scan(&role)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return "", ErrInvalidPIN
@@ -72,11 +80,18 @@ func (s *Store) VerifyAndUsePIN(ctx context.Context, rawPIN string) (string, err
 }
 
 // RedeemPIN atomically consumes a single-use PIN and creates a persistent
-// bearer token with the same role. Returns the raw token (caller must
-// deliver it to the agent) and the role. Fails with ErrInvalidPIN if the
-// PIN is expired, already used, or does not exist.
+// bearer token with the same role. Both operations execute in a single DB
+// transaction so that a failure in token creation leaves the PIN unconsumed.
+// Returns the raw token (caller must deliver it to the agent) and the role.
+// Fails with ErrInvalidPIN if the PIN is expired, already used, or does not exist.
 func (s *Store) RedeemPIN(ctx context.Context, rawPIN string) (rawToken, role string, err error) {
-	role, err = s.VerifyAndUsePIN(ctx, rawPIN)
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return "", "", fmt.Errorf("begin redeem transaction: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // rollback errors are non-fatal after commit
+
+	role, err = s.verifyAndUsePINTx(ctx, tx, rawPIN)
 	if err != nil {
 		return "", "", err
 	}
@@ -84,17 +99,27 @@ func (s *Store) RedeemPIN(ctx context.Context, rawPIN string) (rawToken, role st
 	if err != nil {
 		return "", "", fmt.Errorf("generate token for PIN redemption: %w", err)
 	}
-	if err := s.CreateToken(ctx, rawToken, role, "auto-generated from PIN redemption", nil); err != nil {
+	if err := s.createTokenTx(ctx, tx, rawToken, role, "auto-generated from PIN redemption", nil); err != nil {
 		return "", "", fmt.Errorf("store redeemed token: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return "", "", fmt.Errorf("commit redeem transaction: %w", err)
 	}
 	return rawToken, role, nil
 }
 
 func (s *Store) CreateToken(ctx context.Context, rawToken, role, description string, expiresAt *time.Time) error {
+	return s.createTokenTx(ctx, s.pool, rawToken, role, description, expiresAt)
+}
+
+// createTokenTx inserts a token using the given queryable (pool or tx).
+func (s *Store) createTokenTx(ctx context.Context, q interface {
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+}, rawToken, role, description string, expiresAt *time.Time) error {
 	digest := ComputeDigest(rawToken)
 
 	query := `INSERT INTO tokens (digest, role, description, expires_at) VALUES ($1, $2, $3, $4)`
-	_, err := s.pool.Exec(ctx, query, digest, role, description, expiresAt)
+	_, err := q.Exec(ctx, query, digest, role, description, expiresAt)
 	if err != nil {
 		return fmt.Errorf("failed to insert token: %w", err)
 	}
@@ -103,18 +128,6 @@ func (s *Store) CreateToken(ctx context.Context, rawToken, role, description str
 
 func (s *Store) ValidateToken(ctx context.Context, rawToken string) (TokenInfo, error) {
 	digest := ComputeDigest(rawToken)
-
-	// Read-through cache check
-	if cached, ok := s.cache.Load(digest); ok {
-		info := cached.(TokenInfo)
-		if info.RevokedAt != nil {
-			return TokenInfo{}, ErrInvalidToken
-		}
-		if info.ExpiresAt != nil && info.ExpiresAt.Before(time.Now().UTC()) {
-			return TokenInfo{}, ErrInvalidToken
-		}
-		return info, nil
-	}
 
 	query := `
 		SELECT id, role, description, created_at, expires_at, revoked_at
@@ -147,8 +160,6 @@ func (s *Store) ValidateToken(ctx context.Context, rawToken string) (TokenInfo, 
 		return TokenInfo{}, ErrInvalidToken
 	}
 
-	// Store in cache
-	s.cache.Store(digest, info)
 	return info, nil
 }
 
@@ -160,20 +171,15 @@ func (s *Store) RevokeToken(ctx context.Context, rawToken string) error {
 	if err != nil {
 		return fmt.Errorf("failed to revoke token: %w", err)
 	}
-
-	// Evict from cache
-	s.cache.Delete(digest)
 	return nil
 }
 
 func (s *Store) RevokeTokenByID(ctx context.Context, id int64) error {
-	query := `UPDATE tokens SET revoked_at = CURRENT_TIMESTAMP WHERE id = $1 RETURNING digest`
-	var digest string
-	err := s.pool.QueryRow(ctx, query, id).Scan(&digest)
+	query := `UPDATE tokens SET revoked_at = CURRENT_TIMESTAMP WHERE id = $1`
+	_, err := s.pool.Exec(ctx, query, id)
 	if err != nil {
 		return fmt.Errorf("failed to revoke token by ID: %w", err)
 	}
-	s.cache.Delete(digest)
 	return nil
 }
 
