@@ -245,9 +245,12 @@ export default function App() {
       if (res.ok) {
         const data = await res.json();
         setTotpRequired(data.totp_required ?? false);
+      } else {
+        // Fail closed: show TOTP field on server error (more secure).
+        setTotpRequired(true);
       }
     } catch {
-      // Fail open: show TOTP field on error so user can still provide a code.
+      // Fail closed: show TOTP field on network error (more secure).
       setTotpRequired(true);
     }
   };
