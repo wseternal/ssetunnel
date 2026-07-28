@@ -11,6 +11,11 @@ vars:
     -X main.GitSHA={{.GIT_SHA}}
 
 tasks:
+  modupdate:
+    desc: update go modules
+    cmds:
+    - go get -u ./...
+    - go mod tidy -v
   ci:
     desc: Full CI pipeline (build, vet, test)
     cmds:
@@ -25,6 +30,13 @@ tasks:
     cmds:
       - mkdir -p {{.BUILD_DIR}}
       - go build -ldflags "{{.LDFLAGS}}" -o {{.BUILD_DIR}}/{{.BIN}} ./cmd/ssetunnel
+
+  go:install:
+    desc: Build and install binary to ~/bin
+    cmds:
+      - task: go:build
+      - mkdir -p ~/bin
+      - cp -af {{.BUILD_DIR}}/{{.BIN}} ~/bin/
 
   go:test:
     desc: Run Go tests with race detector
