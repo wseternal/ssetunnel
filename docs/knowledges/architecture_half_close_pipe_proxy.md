@@ -197,12 +197,106 @@ Yamux multiplexes over a **plain `io.ReadWriteCloser`**, which fits perfectly ov
 
 ---
 
+## Two Separate Pipes Is Correct Design, Not the Bug
+
+The ProxyCommand model uses **two separate pipes** (stdin and stdout) — this is the standard Unix design, not a flaw. Every ProxyCommand implementation (`nc`, `socat`, custom proxies) uses the same pattern.
+
+```
+                        Proxy Process (ServeRW)
+                        ┌─────────────────────┐
+                        │                      │
+  SSH Client            │   r = stdin (fd 0)   │            sshd
+  ┌──────────┐         │   (reads FROM        │         ┌──────────┐
+  │          │ ───────▶│    SSH client)        │         │          │
+  │  writes  │ pipe A  │                      │  TCP    │  sends   │
+  │  to      │ (stdin) │                      │ ──────▶ │ "Password│
+  │  stdout  │         │   w = stdout (fd 1)  │         │  :"      │
+  │          │ ◀───────│   (writes TO         │ ◀────── │          │
+  │  reads   │ pipe B  │    SSH client)       │         │          │
+  │  from    │(stdout) │                      │         └──────────┘
+  │  stdin   │         │                      │
+  └──────────┘         └─────────────────────┘
+```
+
+### Why this is confusing in a normal terminal
+
+In a terminal, stdin and stdout both point to the same TTY device, creating the illusion that they share a channel. But SSH creates **two separate pipes** with independent buffers — data written to pipe B (stdout) never appears on pipe A (stdin).
+
+### The real bug
+
+The bug was **not** the two-pipe design. It was the `WaitGroup.Wait()` join logic:
+
+| Design choice | Correct? | Why |
+|---------------|----------|-----|
+| Two separate pipes (stdin + stdout) | Yes | Standard Unix ProxyCommand contract |
+| WaitGroup waiting for both copies | **No** | Wrong for pipe-based proxy; correct for socket-to-socket proxy |
+| Return on first EOF (the fix) | Yes | Matches standard ProxyCommand behavior |
+
+The standard ProxyCommand pattern used by `nc`, `socat`, etc.:
+1. Copy stdin → server (background)
+2. Copy server → stdout (foreground)
+3. When server → stdout finishes (EOF), **EXIT immediately**
+4. Process exit cleans up the background goroutine
+
+---
+
+## Why TCP Connect Mode Doesn't Deadlock
+
+Even with the old WaitGroup code, TCP connect mode (`handleLocalConn`) would **not** deadlock. The reason is fundamental:
+
+### TCP sockets are self-closing
+
+```
+TCP mode (both ends are TCP sockets the proxy owns):
+
+  User App ←── TCP socket A ──→ Proxy ←── TCP socket B ──→ sshd
+
+  When socket B closes:
+    → serverConn.Close() kills both directions of socket B
+    → localConn (socket A) is also owned by the proxy
+    → Closing either socket kills the Read() on the other goroutine
+    → Both goroutines finish. No deadlock.
+```
+
+### Pipes are NOT self-closing
+
+```
+Stdio mode (pipes owned by parent process):
+
+  SSH Client ←── pipe A (stdin) ──→ Proxy ←── TCP socket ──→ sshd
+  SSH Client ←── pipe B (stdout) ──↗
+
+  When TCP socket closes:
+    → serverConn.Close() kills the TCP connection
+    → But pipe A (stdin) is a DIFFERENT file descriptor
+    → SSH client controls pipe A's write end
+    → Closing serverConn has ZERO effect on os.Stdin.Read()
+    → Goroutine blocks forever. Deadlock.
+```
+
+### The fundamental difference
+
+| | TCP socket | Pipe (stdin/stdout) |
+|---|-----------|-------------------|
+| Who controls the other end? | OS kernel (TCP stack) | Parent process (SSH client) |
+| Can you force it to return error? | Yes — close the socket, send RST/FIN | No — only the parent can close the pipe |
+| Does closing one direction affect the other? | Yes — `conn.Close()` kills both reads and writes | No — `serverConn.Close()` has zero effect on `os.Stdin` |
+| Self-terminating? | Yes — when one side closes, the other sees EOF/error | No — stays open as long as parent keeps it open |
+
+### In one sentence
+
+With TCP, the proxy **owns both ends** of both I/O channels, so closing one kills the other. With pipes, the proxy only owns the read/write ends — the **parent process** (SSH client) owns the other ends and keeps them open. This is why the deadlock is specific to pipe-based proxy usage.
+
+---
+
 ## Summary
 
 ```
 The deadlock:      proxy process design issue → FIXED (return on server EOF)
 Yamux half-close:  architectural limitation → KNOWN (can't propagate FIN through tunnel)
 Dropping yamux:    lose multiplexing → 1 tunnel per connection (much more expensive)
+Two pipes:         standard Unix design → NOT the bug (WaitGroup join was)
+TCP mode:          no deadlock possible → proxy owns both ends of both FDs
 ```
 
 The deadlock fix stands regardless of whether you keep yamux. The half-close gap is real but only matters for protocols that depend on TCP half-close — SSH doesn't, which is why the fix works.
