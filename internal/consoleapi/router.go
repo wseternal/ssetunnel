@@ -52,6 +52,13 @@ func NewRouter(store *auth.Store, reg *server.Registry, totpSecret string) http.
 }
 
 func (a *API) handleLogout(w http.ResponseWriter, r *http.Request) {
+	// Revoke the server-side session token so it can't be reused.
+	if a.store != nil {
+		if tokenStr := server.ExtractBearerToken(r); tokenStr != "" {
+			_ = a.store.RevokeUserSession(r.Context(), tokenStr)
+		}
+	}
+
 	http.SetCookie(w, &http.Cookie{
 		Name:     server.SessionCookieName,
 		Value:    "",
@@ -389,6 +396,10 @@ func (a *API) handleAgentUpdate(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			if errors.Is(err, auth.ErrDuplicateAgentID) {
 				http.Error(w, err.Error(), http.StatusConflict)
+				return
+			}
+			if errors.Is(err, auth.ErrCannotRenameDefault) {
+				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
 			}
 			http.Error(w, err.Error(), http.StatusInternalServerError)
