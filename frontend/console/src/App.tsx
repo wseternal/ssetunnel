@@ -96,6 +96,9 @@ export default function App() {
   const [sessionToken, setSessionToken] = useState(() => localStorage.getItem('sessionToken') || '');
   const [userRole, setUserRole] = useState(() => localStorage.getItem('userRole') || '');
   const isAdmin = userRole === 'admin';
+  // roleConfirmed is true once /api/v1/me has resolved, preventing double-fetch
+  // before the actual role is known.
+  const [roleConfirmed, setRoleConfirmed] = useState(false);
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [totpCode, setTotpCode] = useState('');
@@ -187,11 +190,13 @@ export default function App() {
             setUserRole(me.role ?? 'user');
             localStorage.setItem('userRole', me.role ?? 'user');
             setIsLoggedIn(true);
+            setRoleConfirmed(true);
           } else {
             localStorage.removeItem('sessionToken');
             localStorage.removeItem('userRole');
             setSessionToken('');
             setUserRole('');
+            setRoleConfirmed(true);
           }
         })
         .catch(() => {
@@ -199,19 +204,24 @@ export default function App() {
           localStorage.removeItem('userRole');
           setSessionToken('');
           setUserRole('');
+          setRoleConfirmed(true);
         });
     }
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Reset tabIndex when role changes to avoid pointing at a non-existent tab.
+  useEffect(() => { setTabIndex(0); }, [isAdmin]);
+
   useEffect(() => {
-    if (isLoggedIn) {
+    if (isLoggedIn && roleConfirmed) {
       fetchSessions();
       fetchAgents();
       if (isAdmin) fetchUsers();
-      const interval = setInterval(fetchSessions, 3000);
-      return () => clearInterval(interval);
+      const sessionInterval = setInterval(fetchSessions, 3000);
+      const agentInterval = setInterval(fetchAgents, 10000);
+      return () => { clearInterval(sessionInterval); clearInterval(agentInterval); };
     }
-  }, [isLoggedIn, isAdmin]);
+  }, [isLoggedIn, isAdmin, roleConfirmed]);
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -229,6 +239,7 @@ export default function App() {
         setUserRole(data.role ?? 'user');
         localStorage.setItem('userRole', data.role ?? 'user');
         setIsLoggedIn(true);
+        setRoleConfirmed(true);
         setTotpEnrolled(data.totp_enrolled ?? false);
       } else {
         const text = await res.text();
@@ -246,6 +257,7 @@ export default function App() {
     setSessionToken('');
     setUserRole('');
     setIsLoggedIn(false);
+    setRoleConfirmed(false);
     setTotpEnrolled(false);
   };
 

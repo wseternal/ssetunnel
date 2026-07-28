@@ -418,6 +418,33 @@ func TestNonAdminSessionFiltering(t *testing.T) {
 	if len(userAgents) < 2 {
 		t.Errorf("user agents: expected >=2 configs, got %d", len(userAgents))
 	}
+	// Non-admin users should have allowed_targets redacted (nil/null).
+	for _, agent := range userAgents {
+		if targets, ok := agent["allowed_targets"]; ok && targets != nil {
+			t.Errorf("user agents: expected allowed_targets to be redacted, got %v", targets)
+		}
+	}
+
+	// Admin sees allowed_targets populated.
+	req = httptest.NewRequest("GET", "/api/v1/agents", nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("admin agents: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var adminAgents []map[string]interface{}
+	_ = json.Unmarshal(rec.Body.Bytes(), &adminAgents)
+	foundTargets := false
+	for _, agent := range adminAgents {
+		if targets, ok := agent["allowed_targets"]; ok && targets != nil {
+			foundTargets = true
+			break
+		}
+	}
+	if !foundTargets {
+		t.Errorf("admin agents: expected at least one config with allowed_targets populated")
+	}
 
 	// Regular user CANNOT create agents (admin-only).
 	body, _ := json.Marshal(map[string]interface{}{"agent_id": "rogue", "allowed_targets": []string{"*"}})

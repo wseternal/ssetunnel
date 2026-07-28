@@ -148,6 +148,8 @@ func (a *API) handleSessions(w http.ResponseWriter, r *http.Request) {
 	if a.reg != nil {
 		a.reg.Range(func(s *server.Session) bool {
 			// Non-admin users only see sessions attributed to their own user ID.
+			// Sessions with userID == 0 (unattributed, e.g. standalone tokens) are
+			// admin-only visible.
 			if !isAdmin && (sessInfo == nil || s.UserID() != sessInfo.UserID) {
 				return true
 			}
@@ -547,6 +549,17 @@ func (a *API) handleAgents(w http.ResponseWriter, r *http.Request) {
 		if configs == nil {
 			configs = []auth.AgentConfig{}
 		}
+
+		// Non-admin users see agent configs but with allowed_targets redacted
+		// to avoid exposing internal routing topology.
+		sessInfo := server.UserSessionFromContext(r)
+		isAdmin := sessInfo != nil && auth.HasPermission(sessInfo.Role, auth.PermAdmin)
+		if !isAdmin {
+			for i := range configs {
+				configs[i].AllowedTargets = nil
+			}
+		}
+
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(configs)
 		return
