@@ -98,6 +98,13 @@ func (s *Server) NewHTTPServer(addr string) *http.Server {
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
 		WriteTimeout:      0, // must not kill SSE
+		// IdleTimeout bounds how long the server keeps a TCP connection
+		// alive between requests. Go's zero default means 60 s, which
+		// silently closes idle POST connections; the agent's transport
+		// then reuses a stale connection, gets EOF on the next POST,
+		// and the yamux session dies. 5 minutes gives the yamux
+		// keepalive (30 s) a 10× margin.
+		IdleTimeout: 5 * time.Minute,
 	}
 }
 
