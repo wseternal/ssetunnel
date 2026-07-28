@@ -1,0 +1,99 @@
+version: "3"
+
+vars:
+  BIN: ssetunnel
+  BUILD_DIR: build
+  FRONTEND_DIR: frontend/console
+  GIT_SHA:
+    sh: git rev-parse --short HEAD 2>/dev/null || echo unknown
+  LDFLAGS: >-
+    -X main.Version=0.1.0
+    -X main.GitSHA={{.GIT_SHA}}
+
+tasks:
+  default:
+    desc: Full CI pipeline (build, vet, test)
+    cmds:
+      - task: go:build
+      - task: go:vet
+      - task: go:test
+
+  # ── Go ──────────────────────────────────────────────────────────────
+
+  go:build:
+    desc: Build Go CLI binary
+    cmds:
+      - mkdir -p {{.BUILD_DIR}}
+      - go build -ldflags "{{.LDFLAGS}}" -o {{.BUILD_DIR}}/{{.BIN}} ./cmd/ssetunnel
+
+  go:test:
+    desc: Run Go tests with race detector
+    cmds:
+      - go test -race -count=1 -timeout 120s ./...
+
+  go:test:cover:
+    desc: Run Go tests with coverage report
+    cmds:
+      - go test -race -coverprofile=coverage.out -timeout 120s ./...
+      - go tool cover -html=coverage.out -o coverage.html
+
+  go:vet:
+    desc: Run go vet static analysis
+    cmds:
+      - go vet ./...
+
+  go:fmt:
+    desc: Format Go code
+    cmds:
+      - go fmt ./...
+
+  go:tidy:
+    desc: Tidy Go module dependencies
+    cmds:
+      - go mod tidy
+
+  go:run:
+    desc: Run Go CLI (pass CLI_ARGS="..." for arguments)
+    cmds:
+      - go run -ldflags "{{.LDFLAGS}}" ./cmd/ssetunnel {{.CLI_ARGS}}
+
+  go:release:
+    desc: Cross-compile Go CLI for all platforms
+    cmds:
+      - mkdir -p {{.BUILD_DIR}}
+      - GOOS=darwin  GOARCH=arm64 go build -ldflags "{{.LDFLAGS}}" -o {{.BUILD_DIR}}/{{.BIN}}-darwin-arm64   ./cmd/ssetunnel
+      - GOOS=darwin  GOARCH=amd64 go build -ldflags "{{.LDFLAGS}}" -o {{.BUILD_DIR}}/{{.BIN}}-darwin-amd64   ./cmd/ssetunnel
+      - GOOS=linux   GOARCH=amd64 go build -ldflags "{{.LDFLAGS}}" -o {{.BUILD_DIR}}/{{.BIN}}-linux-amd64    ./cmd/ssetunnel
+      - GOOS=linux   GOARCH=arm64 go build -ldflags "{{.LDFLAGS}}" -o {{.BUILD_DIR}}/{{.BIN}}-linux-arm64    ./cmd/ssetunnel
+      - GOOS=windows GOARCH=amd64 go build -ldflags "{{.LDFLAGS}}" -o {{.BUILD_DIR}}/{{.BIN}}-windows-amd64.exe ./cmd/ssetunnel
+
+  go:clean:
+    desc: Clean Go build artifacts
+    cmds:
+      - rm -rf {{.BUILD_DIR}} coverage.out coverage.html
+
+  # ── Frontend ────────────────────────────────────────────────────────
+
+  fe:install:
+    desc: Install frontend npm dependencies
+    dir: "{{.FRONTEND_DIR}}"
+    cmds:
+      - npm install
+
+  fe:build:
+    desc: Build frontend SPA
+    dir: "{{.FRONTEND_DIR}}"
+    cmds:
+      - npm run build
+
+  fe:dev:
+    desc: Run frontend dev server
+    dir: "{{.FRONTEND_DIR}}"
+    cmds:
+      - npm run dev
+
+  fe:clean:
+    desc: Clean frontend build output
+    dir: "{{.FRONTEND_DIR}}"
+    cmds:
+      - rm -rf dist
