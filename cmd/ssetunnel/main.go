@@ -4,7 +4,9 @@
 package main
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -13,11 +15,12 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
-	orcapostgres "github.com/visdomtech/orcacommon/postgres"
 	"github.com/jackc/pgx/v5/pgxpool"
+	orcapostgres "github.com/visdomtech/orcacommon/postgres"
 	"github.com/wseternal/ssetunnel/internal/agent"
 	"github.com/wseternal/ssetunnel/internal/auth"
 	"github.com/wseternal/ssetunnel/internal/connect"
@@ -33,6 +36,7 @@ commands:
   server    run the public tunnel server
   agent     run the agent inside the restricted network
   connect   run the user connect client wrapper
+  login     authenticate and store a session for agent/connect
   probe     measure a server's POST path (body cap, throttling)
 `
 
@@ -52,6 +56,8 @@ func main() {
 		err = runAgent(ctx, os.Args[2:])
 	case "connect":
 		err = runConnect(ctx, os.Args[2:])
+	case "login":
+		err = runLogin(ctx, os.Args[2:])
 	case "probe":
 		err = runProbe(ctx, os.Args[2:])
 	default:
@@ -168,7 +174,7 @@ func runAgent(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("agent", flag.ContinueOnError)
 	serverURL := fs.String("server", "http://127.0.0.1:8080", "tunnel server URL")
 	target := fs.String("target", "", "TCP address to forward streams to, e.g. 127.0.0.1:3000")
-	token := fs.String("token", os.Getenv("SSETUNNEL_TOKEN"), "Bearer token or single-use PIN for agent authentication")
+	token := fs.String("token", os.Getenv("SSETUNNEL_TOKEN"), "Bearer token or single-use PIN for authentication")
 	batchSize := fs.Int("batch-size", 16384, "upstream batch ceiling in bytes (1024..1048576)")
 	concurrency := fs.Int("concurrency", 1, "upstream POST sender depth (1..4)")
 	compress := fs.Bool("compress", false, "negotiate gzip-per-batch upstream encoding")
@@ -180,16 +186,38 @@ func runAgent(ctx context.Context, args []string) error {
 		return errors.New("--target is required")
 	}
 	batch, conc := clampAgentFlags(*batchSize, *concurrency)
+
+	// Load session from file if no token provided
+	var reqMod func(*http.Request)
+	if *token == "" {
+		sessToken, sessErr := auth.LoadSession()
+		if sessErr != nil {
+			log.Printf("agent: warning: failed to load session: %v", sessErr)
+		} else if sessToken != "" {
+			*token = sessToken
+			log.Printf("agent: using session from ~/.ssetunnel/session")
+		}
+	}
+
+	// Build request modifier for session-based auth
+	if *token != "" {
+		sessionToken := *token // capture current value
+		reqMod = func(req *http.Request) {
+			req.Header.Set("Authorization", "Bearer "+sessionToken)
+		}
+	}
+
 	log.Printf("agent: target %s -> server %s (batch-size %d, concurrency %d, compress %v)",
 		*target, *serverURL, batch, conc, *compress)
 
 	ag := &agent.Agent{
-		ServerURL:   *serverURL,
-		Target:      *target,
-		Token:       *token,
-		BatchSize:   batch,
-		Concurrency: conc,
-		Compress:    *compress,
+		ServerURL:       *serverURL,
+		Target:          *target,
+		Token:           *token,
+		RequestModifier: reqMod,
+		BatchSize:       batch,
+		Concurrency:     conc,
+		Compress:        *compress,
 	}
 	return ag.Run(ctx)
 }
@@ -205,6 +233,17 @@ func runConnect(ctx context.Context, args []string) error {
 	}
 	if *local == "" {
 		return errors.New("--local is required (e.g. --local 127.0.0.1:3306 or --local -)")
+	}
+
+	// Load session from file if no token provided
+	if *token == "" {
+		sessToken, sessErr := auth.LoadSession()
+		if sessErr != nil {
+			log.Printf("connect: warning: failed to load session: %v", sessErr)
+		} else if sessToken != "" {
+			*token = sessToken
+			log.Printf("connect: using session from ~/.ssetunnel/session")
+		}
 	}
 
 	client := connect.NewClient(*serverEntry, *token)
@@ -263,5 +302,69 @@ func runProbe(ctx context.Context, args []string) error {
 		return err
 	}
 	fmt.Print(rep.String())
+	return nil
+}
+
+func runLogin(_ context.Context, args []string) error {
+	fs := flag.NewFlagSet("login", flag.ContinueOnError)
+	consoleURL := fs.String("console", "http://127.0.0.1:8081", "console API URL")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	reader := bufio.NewReader(os.Stdin)
+
+	fmt.Print("Username: ")
+	username, _ := reader.ReadString('\n')
+	username = strings.TrimSpace(username)
+	if username == "" {
+		return errors.New("username is required")
+	}
+
+	fmt.Print("Password: ")
+	password, _ := reader.ReadString('\n')
+	password = strings.TrimSpace(password)
+	if password == "" {
+		return errors.New("password is required")
+	}
+
+	fmt.Print("TOTP Code (press Enter to skip): ")
+	totpCode, _ := reader.ReadString('\n')
+	totpCode = strings.TrimSpace(totpCode)
+
+	// Build request
+	reqBody, _ := json.Marshal(map[string]string{
+		"username":  username,
+		"password":  password,
+		"totp_code": totpCode,
+	})
+
+	resp, err := http.Post(*consoleURL+"/api/v1/user-login", "application/json", strings.NewReader(string(reqBody)))
+	if err != nil {
+		return fmt.Errorf("login request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body := make([]byte, 1024)
+		n, _ := resp.Body.Read(body)
+		return fmt.Errorf("login failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(body[:n])))
+	}
+
+	var result struct {
+		Token    string `json:"token"`
+		Username string `json:"username"`
+		Role     string `json:"role"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	if err := auth.SaveSession(result.Token); err != nil {
+		return fmt.Errorf("failed to save session: %w", err)
+	}
+
+	fmt.Printf("Login successful! Session saved for %s (role: %s)\n", result.Username, result.Role)
+	fmt.Println("You can now run 'ssetunnel agent' or 'ssetunnel connect' without --token.")
 	return nil
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -15,6 +16,9 @@ var (
 	ErrInvalidToken   = errors.New("invalid or revoked token")
 	ErrInvalidPIN     = errors.New("invalid, expired, or already used PIN")
 	ErrInvalidSession = errors.New("invalid or expired admin session")
+	ErrUserNotFound   = errors.New("user not found")
+	ErrUserDisabled   = errors.New("user account is disabled")
+	ErrDuplicateUser  = errors.New("username already exists")
 )
 
 type TokenInfo struct {
@@ -24,6 +28,22 @@ type TokenInfo struct {
 	CreatedAt   time.Time  `json:"created_at"`
 	ExpiresAt   *time.Time `json:"expires_at,omitempty"`
 	RevokedAt   *time.Time `json:"revoked_at,omitempty"`
+	UserID      *int64     `json:"user_id,omitempty"`
+}
+
+type UserInfo struct {
+	ID           int64      `json:"id"`
+	Username     string     `json:"username"`
+	Role         string     `json:"role"`
+	TOTPSecret   string     `json:"-"`
+	CreatedAt    time.Time  `json:"created_at"`
+	DisabledAt   *time.Time `json:"disabled_at,omitempty"`
+}
+
+type UserSessionInfo struct {
+	UserID    int64     `json:"user_id"`
+	Role      string    `json:"role"`
+	ExpiresAt time.Time `json:"expires_at"`
 }
 
 type Store struct {
@@ -243,4 +263,166 @@ func (s *Store) ValidateAdminSession(ctx context.Context, rawSessionToken string
 	}
 
 	return nil
+}
+
+// --- User CRUD ---
+
+func (s *Store) CreateUser(ctx context.Context, username, passwordHash, role string) (*UserInfo, error) {
+	query := `
+		INSERT INTO users (username, password_hash, role)
+		VALUES ($1, $2, $3)
+		RETURNING id, created_at
+	`
+	u := &UserInfo{Username: username, Role: role}
+	err := s.pool.QueryRow(ctx, query, username, passwordHash, role).Scan(&u.ID, &u.CreatedAt)
+	if err != nil {
+		if isUniqueViolation(err) {
+			return nil, ErrDuplicateUser
+		}
+		return nil, fmt.Errorf("create user: %w", err)
+	}
+	return u, nil
+}
+
+func (s *Store) GetUserByUsername(ctx context.Context, username string) (*UserInfo, error) {
+	query := `SELECT id, username, password_hash, role, totp_secret, created_at, disabled_at FROM users WHERE username = $1`
+	var u UserInfo
+	var pwHash string
+	err := s.pool.QueryRow(ctx, query, username).Scan(
+		&u.ID, &u.Username, &pwHash, &u.Role, &u.TOTPSecret, &u.CreatedAt, &u.DisabledAt,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrUserNotFound
+		}
+		return nil, fmt.Errorf("get user by username: %w", err)
+	}
+	return &u, nil
+}
+
+// getUserPasswordHash returns the password hash for a user (used by ValidatePassword).
+func (s *Store) getUserPasswordHash(ctx context.Context, username string) (string, error) {
+	query := `SELECT password_hash FROM users WHERE username = $1 AND disabled_at IS NULL`
+	var hash string
+	err := s.pool.QueryRow(ctx, query, username).Scan(&hash)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", ErrUserNotFound
+		}
+		return "", fmt.Errorf("get password hash: %w", err)
+	}
+	return hash, nil
+}
+
+// ValidatePassword looks up the user by username and checks the password.
+// Returns the UserInfo on success.
+func (s *Store) ValidatePassword(ctx context.Context, username, password string) (*UserInfo, error) {
+	hash, err := s.getUserPasswordHash(ctx, username)
+	if err != nil {
+		return nil, err
+	}
+	if err := CheckPassword(hash, password); err != nil {
+		return nil, ErrUserNotFound // same error to avoid user enumeration
+	}
+	return s.GetUserByUsername(ctx, username)
+}
+
+func (s *Store) ListUsers(ctx context.Context) ([]UserInfo, error) {
+	query := `SELECT id, username, role, totp_secret, created_at, disabled_at FROM users ORDER BY created_at DESC`
+	rows, err := s.pool.Query(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("list users: %w", err)
+	}
+	defer rows.Close()
+
+	var users []UserInfo
+	for rows.Next() {
+		var u UserInfo
+		if err := rows.Scan(&u.ID, &u.Username, &u.Role, &u.TOTPSecret, &u.CreatedAt, &u.DisabledAt); err != nil {
+			return nil, fmt.Errorf("scan user row: %w", err)
+		}
+		users = append(users, u)
+	}
+	return users, nil
+}
+
+func (s *Store) UpdateUser(ctx context.Context, id int64, role *string, passwordHash *string) error {
+	switch {
+	case role != nil && passwordHash != nil:
+		_, err := s.pool.Exec(ctx, `UPDATE users SET role = $1, password_hash = $2 WHERE id = $3`, *role, *passwordHash, id)
+		return err
+	case role != nil:
+		_, err := s.pool.Exec(ctx, `UPDATE users SET role = $1 WHERE id = $2`, *role, id)
+		return err
+	case passwordHash != nil:
+		_, err := s.pool.Exec(ctx, `UPDATE users SET password_hash = $1 WHERE id = $2`, *passwordHash, id)
+		return err
+	default:
+		return nil
+	}
+}
+
+func (s *Store) DisableUser(ctx context.Context, id int64) error {
+	_, err := s.pool.Exec(ctx, `UPDATE users SET disabled_at = CURRENT_TIMESTAMP WHERE id = $1`, id)
+	return err
+}
+
+func (s *Store) EnableUser(ctx context.Context, id int64) error {
+	_, err := s.pool.Exec(ctx, `UPDATE users SET disabled_at = NULL WHERE id = $1`, id)
+	return err
+}
+
+func (s *Store) DeleteUser(ctx context.Context, id int64) error {
+	tag, err := s.pool.Exec(ctx, `DELETE FROM users WHERE id = $1`, id)
+	if err != nil {
+		return fmt.Errorf("delete user: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrUserNotFound
+	}
+	return nil
+}
+
+// --- User Sessions ---
+
+func (s *Store) CreateUserSession(ctx context.Context, userID int64, rawToken string, ttl time.Duration) error {
+	digest := ComputeDigest(rawToken)
+	expiresAt := time.Now().UTC().Add(ttl)
+
+	query := `INSERT INTO user_sessions (user_id, digest, expires_at) VALUES ($1, $2, $3)`
+	_, err := s.pool.Exec(ctx, query, userID, digest, expiresAt)
+	if err != nil {
+		return fmt.Errorf("create user session: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) ValidateUserSession(ctx context.Context, rawToken string) (*UserSessionInfo, error) {
+	digest := ComputeDigest(rawToken)
+
+	query := `
+		SELECT us.user_id, us.expires_at, u.role
+		FROM user_sessions us
+		JOIN users u ON u.id = us.user_id
+		WHERE us.digest = $1 AND us.expires_at > CURRENT_TIMESTAMP AND u.disabled_at IS NULL
+	`
+
+	var info UserSessionInfo
+	err := s.pool.QueryRow(ctx, query, digest).Scan(&info.UserID, &info.ExpiresAt, &info.Role)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrInvalidSession
+		}
+		return nil, fmt.Errorf("validate user session: %w", err)
+	}
+	return &info, nil
+}
+
+// isUniqueViolation checks if an error is a PostgreSQL unique constraint violation.
+func isUniqueViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		return pgErr.Code == "23505"
+	}
+	return err != nil && strings.Contains(err.Error(), "duplicate key")
 }

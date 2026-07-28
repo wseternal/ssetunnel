@@ -52,6 +52,11 @@ type Config struct {
 	// Token is the bearer token for agent authentication
 	Token string
 
+	// RequestModifier, when set, takes precedence over Token. It is called
+	// before each HTTP request to allow dynamic auth header injection (e.g.,
+	// reading a session token from a file that may be refreshed).
+	RequestModifier func(*http.Request)
+
 	// OnTokenUpgrade is called when the server returns a new persistent
 	// token via X-SSET-Token (PIN redemption). The agent uses the new
 	// token for subsequent connections.
@@ -66,7 +71,8 @@ type Conn struct {
 	ownClient bool // Close must reap the transport's idle conns
 	upURL     string
 	id        string
-	token     string
+	token     atomic.Value // string: bearer token, updated via OnTokenUpgrade
+	modifier  func(*http.Request)
 	seq       atomic.Uint64 // next X-SSET-Seq; serial sender keeps order
 
 	ctx    context.Context
@@ -137,12 +143,13 @@ func DialAgent(ctx context.Context, cfg Config) (*Conn, error) {
 	}
 
 	c := &Conn{
-		client: client,
-		upURL:  cfg.URL + "/up",
-		id:     id,
-		token:  cfg.Token,
-		down:   NewPipe(downPipeCap),
+		client:   client,
+		upURL:    cfg.URL + "/up",
+		id:       id,
+		down:     NewPipe(downPipeCap),
+		modifier: cfg.RequestModifier,
 	}
+	c.token.Store(cfg.Token)
 	c.ownClient = cfg.Client == nil
 	c.ctx, c.cancel = context.WithCancel(ctx)
 
@@ -152,8 +159,10 @@ func DialAgent(ctx context.Context, cfg Config) (*Conn, error) {
 		c.cancel()
 		return nil, fmt.Errorf("build events request: %w", err)
 	}
-	if c.token != "" {
-		req.Header.Set("Authorization", "Bearer "+c.token)
+	if c.modifier != nil {
+		c.modifier(req)
+	} else if tok, _ := c.token.Load().(string); tok != "" {
+		req.Header.Set("Authorization", "Bearer "+tok)
 	}
 	want := Caps{Concurrency: conc, Batch: maxSize, Gzip: cfg.Compress}
 	if !cfg.DisableCaps {
@@ -177,6 +186,7 @@ func DialAgent(ctx context.Context, cfg Config) (*Conn, error) {
 		return nil, fmt.Errorf("open events stream: status %s", resp.Status)
 	}
 	if upgraded := resp.Header.Get("X-SSET-Token"); upgraded != "" && cfg.OnTokenUpgrade != nil {
+		c.token.Store(upgraded)
 		cfg.OnTokenUpgrade(upgraded)
 	}
 
@@ -334,8 +344,10 @@ func (c *Conn) post(seq uint64, batch []byte) error {
 	}
 	req.Header.Set("X-SSET-Session", c.id)
 	req.Header.Set("X-SSET-Seq", strconv.FormatUint(seq, 10))
-	if c.token != "" {
-		req.Header.Set("Authorization", "Bearer "+c.token)
+	if c.modifier != nil {
+		c.modifier(req)
+	} else if tok, _ := c.token.Load().(string); tok != "" {
+		req.Header.Set("Authorization", "Bearer "+tok)
 	}
 	if flags != "" {
 		req.Header.Set("X-SSET-Flags", flags)

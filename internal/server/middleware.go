@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"net/http"
 	"strings"
 
@@ -19,6 +20,30 @@ func ExtractBearerToken(r *http.Request) string {
 		return tok
 	}
 	return ""
+}
+
+// contextKey is an unexported type for context keys defined in this package.
+type contextKey int
+
+const (
+	tokenInfoKey contextKey = iota
+	userSessionKey
+)
+
+// TokenInfoFromContext retrieves the validated TokenInfo stored by middleware.
+func TokenInfoFromContext(r *http.Request) *auth.TokenInfo {
+	if v, ok := r.Context().Value(tokenInfoKey).(*auth.TokenInfo); ok {
+		return v
+	}
+	return nil
+}
+
+// UserSessionFromContext retrieves the validated UserSessionInfo stored by middleware.
+func UserSessionFromContext(r *http.Request) *auth.UserSessionInfo {
+	if v, ok := r.Context().Value(userSessionKey).(*auth.UserSessionInfo); ok {
+		return v
+	}
+	return nil
 }
 
 // AgentAuthMiddleware protects endpoints requiring agent-role tokens.
@@ -42,14 +67,15 @@ func AgentAuthMiddleware(store *auth.Store) func(http.Handler) http.Handler {
 			}
 
 			tokInfo, err := store.ValidateToken(r.Context(), tokenStr)
-			if err == nil && (tokInfo.Role == "agent" || tokInfo.Role == "admin") {
-				next.ServeHTTP(w, r)
+			if err == nil && auth.HasPermission(tokInfo.Role, auth.PermAgent) {
+				ctx := context.WithValue(r.Context(), tokenInfoKey, &tokInfo)
+				next.ServeHTTP(w, r.WithContext(ctx))
 				return
 			}
 
 			// Fallback: try single-use PIN redemption.
 			newToken, role, pinErr := store.RedeemPIN(r.Context(), tokenStr)
-			if pinErr == nil && (role == "agent" || role == "admin") {
+			if pinErr == nil && auth.HasPermission(role, auth.PermAgent) {
 				w.Header().Set("X-SSET-Token", newToken)
 				next.ServeHTTP(w, r)
 				return
@@ -74,7 +100,7 @@ func AdminSessionMiddleware(store *auth.Store) func(http.Handler) http.Handler {
 			tokenStr := ExtractBearerToken(r)
 			if tokenStr != "" {
 				tokInfo, err := store.ValidateToken(r.Context(), tokenStr)
-				if err == nil && tokInfo.Role == "admin" {
+				if err == nil && auth.HasPermission(tokInfo.Role, auth.PermAdmin) {
 					next.ServeHTTP(w, r)
 					return
 				}
@@ -90,6 +116,34 @@ func AdminSessionMiddleware(store *auth.Store) func(http.Handler) http.Handler {
 			}
 
 			http.Error(w, "Unauthorized: admin session or token required", http.StatusUnauthorized)
+		})
+	}
+}
+
+// UserSessionMiddleware validates user session tokens (from ~/.ssetunnel/session).
+// It checks the user_sessions table and stores the UserSessionInfo in the request context.
+func UserSessionMiddleware(store *auth.Store) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if store == nil {
+				next.ServeHTTP(w, r)
+				return
+			}
+
+			tokenStr := ExtractBearerToken(r)
+			if tokenStr == "" {
+				http.Error(w, "Unauthorized: missing bearer token", http.StatusUnauthorized)
+				return
+			}
+
+			sessInfo, err := store.ValidateUserSession(r.Context(), tokenStr)
+			if err != nil {
+				http.Error(w, "Unauthorized: invalid user session", http.StatusUnauthorized)
+				return
+			}
+
+			ctx := context.WithValue(r.Context(), userSessionKey, sessInfo)
+			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
 }

@@ -27,6 +27,10 @@ type Agent struct {
 	MaxWait    time.Duration // batcher flush ceiling; 0 → default
 	Client     *http.Client  // nil → transport default
 
+	// RequestModifier, when set, takes precedence over Token.
+	// Used for session-based auth where the token is loaded from a file.
+	RequestModifier func(*http.Request)
+
 	// Cycle-2 upstream knobs (negotiated down to the server's
 	// advertisement; zero values give cycle-1 serial 16 KiB behavior).
 	BatchSize   int  // upstream batch ceiling; 0 → transport default
@@ -101,13 +105,14 @@ func newAgentBackoff() *backoff.ExponentialBackOff {
 // reconnect with a fresh session ID.
 func (a *Agent) runOnce(ctx context.Context) error {
 	conn, err := transport.DialAgent(ctx, transport.Config{
-		URL:          a.ServerURL,
-		Token:        a.Token,
-		MaxWait:      a.MaxWait,
-		Client:       a.Client,
-		MaxBatchSize: a.BatchSize,
-		Concurrency:  a.Concurrency,
-		Compress:     a.Compress,
+		URL:             a.ServerURL,
+		Token:           a.Token,
+		RequestModifier: a.RequestModifier,
+		MaxWait:         a.MaxWait,
+		Client:          a.Client,
+		MaxBatchSize:    a.BatchSize,
+		Concurrency:     a.Concurrency,
+		Compress:        a.Compress,
 		OnTokenUpgrade: func(newToken string) {
 			a.Token = newToken
 			log.Printf("agent: PIN redeemed, upgraded to persistent token")
