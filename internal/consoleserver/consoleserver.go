@@ -14,13 +14,19 @@ import (
 )
 
 // NewConsoleHandler builds an HTTP handler combining the JSON management API
-// under /api/v1/... and serving the React console SPA catch-all using litespaserver.
+// under /console/api/v1/... and serving the React console SPA catch-all at
+// /console/ using litespaserver.
 func NewConsoleHandler(ctx context.Context, pool *pgxpool.Pool, store *auth.Store, reg *server.Registry) http.Handler {
 	r := mux.NewRouter()
 
-	// API routes
+	// Redirect bare /console to /console/ so relative links work correctly.
+	r.HandleFunc("/console", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/console/", http.StatusMovedPermanently)
+	})
+
+	// API routes — strip /console so the inner router sees /api/v1/...
 	apiHandler := consoleapi.NewRouter(store, reg)
-	r.PathPrefix("/api/v1/").Handler(apiHandler)
+	r.PathPrefix("/console/api/v1/").Handler(http.StripPrefix("/console", apiHandler))
 
 	// SPA catch-all
 	spaCfg := litespaserver.Config{
@@ -30,7 +36,7 @@ func NewConsoleHandler(ctx context.Context, pool *pgxpool.Pool, store *auth.Stor
 		},
 	}
 	spaServer := litespaserver.NewServer(ctx, pool, spaCfg)
-	r.PathPrefix("/").HandlerFunc(spaServer.ServeRoot).Methods("GET")
+	r.PathPrefix("/console/").HandlerFunc(spaServer.ServeRoot).Methods("GET")
 
 	return r
 }

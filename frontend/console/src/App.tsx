@@ -96,7 +96,7 @@ export default function App() {
   const [sessionToken, setSessionToken] = useState(() => localStorage.getItem('sessionToken') || '');
   const [userRole, setUserRole] = useState(() => localStorage.getItem('userRole') || '');
   const isAdmin = userRole === 'admin';
-  // roleConfirmed is true once /api/v1/me has resolved, preventing double-fetch
+  // roleConfirmed is true once /console/api/v1/me has resolved, preventing double-fetch
   // before the actual role is known.
   const [roleConfirmed, setRoleConfirmed] = useState(false);
   const [username, setUsername] = useState('');
@@ -152,7 +152,7 @@ export default function App() {
 
   const fetchSessions = async () => {
     try {
-      const res = await fetch('/api/v1/sessions', { headers: authHeaders() });
+      const res = await fetch('/console/api/v1/sessions', { headers: authHeaders() });
       if (checkAuth(res) && res.ok) {
         const data = await res.json();
         setSessions(data);
@@ -164,7 +164,7 @@ export default function App() {
 
   const fetchUsers = async () => {
     try {
-      const res = await fetch('/api/v1/users', { headers: authHeaders() });
+      const res = await fetch('/console/api/v1/users', { headers: authHeaders() });
       if (checkAuth(res) && res.ok) setUsers(await res.json());
     } catch (e) {
       console.error(e);
@@ -173,7 +173,7 @@ export default function App() {
 
   const fetchAgents = async () => {
     try {
-      const res = await fetch('/api/v1/agents', { headers: authHeaders() });
+      const res = await fetch('/console/api/v1/agents', { headers: authHeaders() });
       if (checkAuth(res) && res.ok) setAgents(await res.json());
     } catch (e) {
       console.error(e);
@@ -183,7 +183,7 @@ export default function App() {
   // Validate restored token on mount
   useEffect(() => {
     if (sessionToken) {
-      fetch('/api/v1/me', { headers: { Authorization: `Bearer ${sessionToken}` } })
+      fetch('/console/api/v1/me', { headers: { Authorization: `Bearer ${sessionToken}` } })
         .then(async res => {
           if (res.ok) {
             const me = await res.json();
@@ -227,7 +227,7 @@ export default function App() {
     e.preventDefault();
     setError('');
     try {
-      const res = await fetch('/api/v1/user-login', {
+      const res = await fetch('/console/api/v1/user-login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username, password, totp_code: totpCode }),
@@ -251,7 +251,7 @@ export default function App() {
   };
 
   const handleLogout = () => {
-    fetch('/api/v1/logout', { method: 'POST', headers: authHeaders() }).catch(() => {});
+    fetch('/console/api/v1/logout', { method: 'POST', headers: authHeaders() }).catch(() => {});
     localStorage.removeItem('sessionToken');
     localStorage.removeItem('userRole');
     setSessionToken('');
@@ -264,7 +264,7 @@ export default function App() {
   const handleUsernameBlur = async () => {
     if (!username) return;
     try {
-      const res = await fetch('/api/v1/user-login-check', {
+      const res = await fetch('/console/api/v1/user-login-check', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username }),
@@ -284,7 +284,7 @@ export default function App() {
 
   const handleBeginTOTPSetup = async () => {
     try {
-      const res = await fetch('/api/v1/totp/begin-setup', {
+      const res = await fetch('/console/api/v1/totp/begin-setup', {
         method: 'POST',
         headers: { ...authHeaders(), 'Content-Type': 'application/json' },
       });
@@ -303,7 +303,7 @@ export default function App() {
 
   const handleVerifyTOTPSetup = async () => {
     try {
-      const res = await fetch('/api/v1/totp/verify-setup', {
+      const res = await fetch('/console/api/v1/totp/verify-setup', {
         method: 'POST',
         headers: { ...authHeaders(), 'Content-Type': 'application/json' },
         body: JSON.stringify({ secret: totpSecret, code: totpVerifyCode }),
@@ -359,7 +359,7 @@ export default function App() {
       try {
         const body: Record<string, unknown> = { role: formRole, perm_connect: formPermConnect, perm_agent: formPermAgent };
         if (formPassword) body.password = formPassword;
-        const res = await fetch(`/api/v1/users/${editingUserId}`, {
+        const res = await fetch(`/console/api/v1/users/${editingUserId}`, {
           method: 'PATCH',
           headers: { ...authHeaders(), 'Content-Type': 'application/json' },
           body: JSON.stringify(body),
@@ -371,7 +371,7 @@ export default function App() {
       }
     } else {
       try {
-        const res = await fetch('/api/v1/users', {
+        const res = await fetch('/console/api/v1/users', {
           method: 'POST',
           headers: { ...authHeaders(), 'Content-Type': 'application/json' },
           body: JSON.stringify({ username: formUsername, password: formPassword, role: formRole, perm_connect: formPermConnect, perm_agent: formPermAgent }),
@@ -386,7 +386,7 @@ export default function App() {
 
   const handleToggleUser = async (user: User) => {
     try {
-      const res = await fetch(`/api/v1/users/${user.id}`, {
+      const res = await fetch(`/console/api/v1/users/${user.id}`, {
         method: 'PATCH',
         headers: { ...authHeaders(), 'Content-Type': 'application/json' },
         body: JSON.stringify({ disabled: !user.disabled_at }),
@@ -400,7 +400,7 @@ export default function App() {
 
   const handleDeleteUser = async (id: number) => {
     try {
-      const res = await fetch(`/api/v1/users/${id}`, { method: 'DELETE', headers: authHeaders() });
+      const res = await fetch(`/console/api/v1/users/${id}`, { method: 'DELETE', headers: authHeaders() });
       if (res.ok) fetchUsers();
       else setError(await res.text() || 'Failed to delete user');
     } catch {
@@ -430,7 +430,7 @@ export default function App() {
       try {
         const body: Record<string, unknown> = { description: formDescription, allowed_targets: targets };
         if (formAgentID) body.agent_id = formAgentID;
-        const res = await fetch(`/api/v1/agents/${editingAgentId}`, {
+        const res = await fetch(`/console/api/v1/agents/${editingAgentId}`, {
           method: 'PATCH',
           headers: { ...authHeaders(), 'Content-Type': 'application/json' },
           body: JSON.stringify(body),
@@ -442,7 +442,7 @@ export default function App() {
       }
     } else {
       try {
-        const res = await fetch('/api/v1/agents', {
+        const res = await fetch('/console/api/v1/agents', {
           method: 'POST',
           headers: { ...authHeaders(), 'Content-Type': 'application/json' },
           body: JSON.stringify({ agent_id: formAgentID, description: formDescription, allowed_targets: targets }),
@@ -457,7 +457,7 @@ export default function App() {
 
   const handleDeleteAgent = async (id: number) => {
     try {
-      const res = await fetch(`/api/v1/agents/${id}`, { method: 'DELETE', headers: authHeaders() });
+      const res = await fetch(`/console/api/v1/agents/${id}`, { method: 'DELETE', headers: authHeaders() });
       if (res.ok) fetchAgents();
       else setError(await res.text() || 'Failed to delete agent');
     } catch {
