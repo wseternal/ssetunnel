@@ -24,6 +24,13 @@ type e2eEnv struct {
 
 func setupE2E(t *testing.T) *e2eEnv {
 	t.Helper()
+	return setupE2ETuned(t, nil)
+}
+
+// setupE2ETuned is setupE2E with a hook to tune the agent's config
+// (cycle-2: batch size / concurrency / compression).
+func setupE2ETuned(t *testing.T, tune func(*agent.Agent)) *e2eEnv {
+	t.Helper()
 	// Echo target behind the agent.
 	target, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -52,6 +59,9 @@ func setupE2E(t *testing.T) *e2eEnv {
 		ServerURL:  ts.URL,
 		Target:     target.Addr().String(),
 		MaxBackoff: 50 * time.Millisecond, // fast reconnect for tests
+	}
+	if tune != nil {
+		tune(ag)
 	}
 	go ag.Run(ctx)
 
@@ -120,6 +130,22 @@ func TestE2EEchoByteExact(t *testing.T) {
 	c := e.dialEntry(t)
 	defer c.Close()
 	roundTrip(t, c, pattern(1<<20)) // 1 MiB through entry→tunnel→target
+}
+
+// TestE2EEchoByteExactConcurrent: 1 MiB byte-exact echo with the agent
+// negotiated at 4 senders / 64 KiB batches / gzip through the real
+// server+entry path (cycle-2 plan step 7).
+func TestE2EEchoByteExactConcurrent(t *testing.T) {
+	t.Parallel()
+	e := setupE2ETuned(t, func(ag *agent.Agent) {
+		ag.BatchSize = 64 << 10
+		ag.Concurrency = 4
+		ag.Compress = true
+	})
+	e.waitSession(t, "", 5*time.Second)
+	c := e.dialEntry(t)
+	defer c.Close()
+	roundTrip(t, c, pattern(1<<20))
 }
 
 func TestE2ETwoConcurrent(t *testing.T) {

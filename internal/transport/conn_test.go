@@ -3,6 +3,7 @@ package transport_test
 import (
 	"bytes"
 	"context"
+	crand "crypto/rand"
 	"errors"
 	"io"
 	"net"
@@ -377,4 +378,358 @@ func TestConnWriteDeadlineExpires(t *testing.T) {
 	if !strings.Contains(err.Error(), "deadline exceeded") {
 		t.Fatalf("Write error = %v, want a deadline-exceeded timeout", err)
 	}
+}
+
+// dialCfg dials an agent with the given Config knobs (URL filled in).
+func dialCfg(t *testing.T, srv *httptest.Server, cfg transport.Config) *transport.Conn {
+	t.Helper()
+	cfg.URL = srv.URL
+	if cfg.MaxWait == 0 {
+		cfg.MaxWait = time.Millisecond
+	}
+	c, err := transport.DialAgent(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("DialAgent: %v", err)
+	}
+	return c
+}
+
+func patternBytes(n int) []byte {
+	b := make([]byte, n)
+	for i := range b {
+		b[i] = byte(i*31 + i>>8)
+	}
+	return b
+}
+
+// releaseGate parks gated POST handlers until Released; Release is
+// idempotent so a cleanup can release all gates without a double close.
+type releaseGate struct {
+	ch   chan struct{}
+	once sync.Once
+}
+
+func newReleaseGate() *releaseGate { return &releaseGate{ch: make(chan struct{})} }
+
+func (g *releaseGate) C() <-chan struct{} { return g.ch }
+
+func (g *releaseGate) Release() { g.once.Do(func() { close(g.ch) }) }
+
+// TestConnConcurrentReassembly: 4 sender workers + deterministically
+// shuffled POST delivery (release gates, no sleeps) must reassemble
+// byte-exact through the server-side reorder window.
+func TestConnConcurrentReassembly(t *testing.T) {
+	t.Parallel()
+	reg := server.NewRegistry()
+	h := server.NewHandler(reg, time.Hour)
+	gates := make(map[uint64]*releaseGate, 4)
+	for i := 0; i < 4; i++ {
+		gates[uint64(i)] = newReleaseGate()
+	}
+	var arrived atomic.Int64
+	h.OnUpPush = func(seq uint64) <-chan struct{} {
+		arrived.Add(1)
+		if g, ok := gates[seq]; ok {
+			return g.C()
+		}
+		return nil
+	}
+	srv := httptest.NewServer(h)
+	t.Cleanup(srv.Close)
+	// Failure-path safety: never leave a POST handler parked at cleanup.
+	t.Cleanup(func() {
+		for _, g := range gates {
+			g.Release()
+		}
+	})
+
+	c := dialCfg(t, srv, transport.Config{
+		SessionID:    "pool",
+		MaxBatchSize: 64 << 10,
+		Concurrency:  4,
+	})
+	defer c.Close()
+	sess := waitSession(t, reg, "pool")
+
+	payload := patternBytes(256 << 10) // exactly 4 x 64 KiB batches
+	if _, err := c.Write(payload); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	// All four POSTs reached the gate (workers in flight, none pushed).
+	waitForCond(t, "all POSTs gated", func() bool { return arrived.Load() == 4 })
+	// Release in a shuffled order: pushes hit the window out of order.
+	for _, seq := range []uint64{2, 0, 3, 1} {
+		gates[seq].Release()
+	}
+	sess.SetReadDeadline(time.Now().Add(5 * time.Second))
+	got := make([]byte, len(payload))
+	if _, err := io.ReadFull(sess, got); err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Fatal("reassembled bytes differ from written payload")
+	}
+}
+
+// TestConnEagerFlushConcurrent: with the pool idle, a small write must
+// flush immediately — the 30 s coalescing ceiling must never apply to
+// interactive traffic at concurrency 4 (plan decision 1).
+func TestConnEagerFlushConcurrent(t *testing.T) {
+	t.Parallel()
+	srv, reg := setup(t, time.Hour)
+	c := dialCfg(t, srv, transport.Config{
+		SessionID:   "eager",
+		Concurrency: 4,
+		MaxWait:     30 * time.Second, // huge: arrival proves the eager flush
+	})
+	defer c.Close()
+	sess := waitSession(t, reg, "eager")
+	if _, err := c.Write([]byte("ping")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	sess.SetReadDeadline(time.Now().Add(3 * time.Second)) // 10x margin
+	buf := make([]byte, 4)
+	if _, err := io.ReadFull(sess, buf); err != nil {
+		t.Fatalf("Read: %v (eager flush lost to coalescing?)", err)
+	}
+	if string(buf) != "ping" {
+		t.Fatalf("read %q, want %q", buf, "ping")
+	}
+}
+
+// TestConnCoalescingConcurrent: with the pool saturated (4 workers
+// parked, bounded channel full), small writes must coalesce into full
+// batches instead of trickling one POST per write (plan decision 1).
+func TestConnCoalescingConcurrent(t *testing.T) {
+	t.Parallel()
+	reg := server.NewRegistry()
+	h := server.NewHandler(reg, time.Hour)
+	park := newReleaseGate()
+	var posts atomic.Int64
+	h.OnUpPush = func(seq uint64) <-chan struct{} {
+		posts.Add(1)
+		return park.C()
+	}
+	srv := httptest.NewServer(h)
+	t.Cleanup(srv.Close)
+	t.Cleanup(park.Release)
+
+	c := dialCfg(t, srv, transport.Config{
+		SessionID:    "coal",
+		MaxBatchSize: 64 << 10,
+		Concurrency:  4,
+		MaxWait:      30 * time.Second, // never fires: batching is size-driven here
+	})
+	defer c.Close()
+	sess := waitSession(t, reg, "coal")
+
+	// 8 full batches: 4 workers parked at the gate + 4 in the bounded
+	// channel → the next submit blocks → batcher busy → coalescing.
+	big := patternBytes(8 * (64 << 10))
+	if _, err := c.Write(big); err != nil {
+		t.Fatalf("Write big: %v", err)
+	}
+	waitForCond(t, "pool saturated", func() bool { return posts.Load() == 4 })
+
+	// 65 KiB in 1 KiB writes: the first flushes eagerly (1 KiB), the
+	// remaining 64 KiB coalesce into exactly one full batch.
+	var small bytes.Buffer
+	for i := 0; i < 65; i++ {
+		chunk := bytes.Repeat([]byte{byte(i)}, 1<<10)
+		small.Write(chunk)
+		if _, err := c.Write(chunk); err != nil {
+			t.Fatalf("Write small %d: %v", i, err)
+		}
+	}
+
+	park.Release()
+	want := append(big, small.Bytes()...)
+	got := make([]byte, len(want))
+	sess.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if _, err := io.ReadFull(sess, got); err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatal("delivered bytes differ from written bytes")
+	}
+	// 8 big + 1 eager 1 KiB + 1 coalesced 64 KiB = 10 POSTs; without
+	// coalescing the small writes alone would cost up to 65.
+	if n := posts.Load(); n != 10 {
+		t.Fatalf("POST count = %d, want 10 (coalescing under saturation)", n)
+	}
+}
+
+// recordedPost captures one /up request's wire form.
+type recordedPost struct {
+	flags string
+	body  []byte
+}
+
+// recordingRT inspects outgoing /up bodies before forwarding.
+type recordingRT struct {
+	mu    sync.Mutex
+	posts []recordedPost
+}
+
+func (rt *recordingRT) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.URL.Path == "/up" {
+		body, err := io.ReadAll(req.Body)
+		if err != nil {
+			return nil, err
+		}
+		req.Body = io.NopCloser(bytes.NewReader(body))
+		rt.mu.Lock()
+		rt.posts = append(rt.posts, recordedPost{req.Header.Get("X-SSET-Flags"), body})
+		rt.mu.Unlock()
+	}
+	return http.DefaultTransport.RoundTrip(req)
+}
+
+func (rt *recordingRT) snapshot() []recordedPost {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	return append([]recordedPost(nil), rt.posts...)
+}
+
+// TestConnGzipWire: gzip is sent only when negotiated, only when smaller
+// (plan decision 5), and never on a serial (non-windowed) session.
+func TestConnGzipWire(t *testing.T) {
+	t.Parallel()
+	compressible := bytes.Repeat([]byte("the quick brown fox jumps over the lazy dog. "), 1500)[:64<<10]
+	incompressible := make([]byte, 64<<10)
+	if _, err := crand.Read(incompressible); err != nil {
+		t.Fatalf("rand: %v", err)
+	}
+	tests := []struct {
+		name        string
+		concurrency int
+		payload     []byte
+		wantFlags   string
+		wantSmaller bool // wire body strictly smaller than raw
+	}{
+		{"compressible negotiated", 4, compressible, "gzip", true},
+		{"incompressible negotiated", 4, incompressible, "", false},
+		{"compressible serial session", 1, compressible, "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			srv, reg := setup(t, time.Hour)
+			rt := &recordingRT{}
+			c := dialCfg(t, srv, transport.Config{
+				SessionID:    "gz",
+				Client:       &http.Client{Transport: rt},
+				MaxBatchSize: 64 << 10,
+				Concurrency:  tt.concurrency,
+				Compress:     true,
+			})
+			defer c.Close()
+			sess := waitSession(t, reg, "gz")
+			if _, err := c.Write(tt.payload); err != nil {
+				t.Fatalf("Write: %v", err)
+			}
+			// Server decodes byte-exact regardless of wire encoding.
+			got := make([]byte, len(tt.payload))
+			sess.SetReadDeadline(time.Now().Add(5 * time.Second))
+			if _, err := io.ReadFull(sess, got); err != nil {
+				t.Fatalf("Read: %v", err)
+			}
+			if !bytes.Equal(got, tt.payload) {
+				t.Fatal("server-side bytes differ from payload")
+			}
+			posts := rt.snapshot()
+			if len(posts) != 1 {
+				t.Fatalf("recorded %d POSTs, want 1", len(posts))
+			}
+			p := posts[0]
+			if p.flags != tt.wantFlags {
+				t.Fatalf("X-SSET-Flags = %q, want %q", p.flags, tt.wantFlags)
+			}
+			if tt.wantSmaller && len(p.body) >= len(tt.payload) {
+				t.Fatalf("wire body %d bytes, want < %d (compressible)", len(p.body), len(tt.payload))
+			}
+			if tt.wantFlags == "" && !bytes.Equal(p.body, tt.payload) {
+				t.Fatal("unflagged body is not the raw payload")
+			}
+		})
+	}
+}
+
+// TestConnCloseHungPOSTConcurrent: cancel-first Close must not hang even
+// with all 4 workers parked in unanswered POSTs (plan decision 9).
+func TestConnCloseHungPOSTConcurrent(t *testing.T) {
+	t.Parallel()
+	srv := hangingUpServer(t)
+	c := dialCfg(t, srv, transport.Config{
+		SessionID:    "hungp",
+		MaxBatchSize: 64 << 10,
+		Concurrency:  4,
+	})
+	// Occupy all 4 workers with POSTs against the hung handler.
+	if _, err := c.Write(make([]byte, 4*(64<<10))); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	time.Sleep(50 * time.Millisecond) // let the POSTs reach the handler
+	before := runtime.NumGoroutine()
+	done := make(chan struct{})
+	go func() {
+		c.Close()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close hung with 4 unanswered POSTs in flight")
+	}
+	// Workers must be reaped after the forced teardown.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if runtime.NumGoroutine() <= before+2 {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("goroutines did not settle: before=%d after=%d", before, runtime.NumGoroutine())
+}
+
+// TestConnGoroutinesSettleConcurrent mirrors TestConnGoroutinesSettle
+// with the sender pool active: no leaked workers after Close.
+func TestConnGoroutinesSettleConcurrent(t *testing.T) {
+	t.Parallel()
+	srv, reg := setup(t, time.Hour)
+	before := runtime.NumGoroutine()
+	c := dialCfg(t, srv, transport.Config{SessionID: "settlep", Concurrency: 4})
+	sess := waitSession(t, reg, "settlep")
+	go io.Copy(sess, sess)
+	if _, err := c.Write([]byte("x")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	c.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, err := c.Read(make([]byte, 1)); err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if err := c.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if n := runtime.NumGoroutine(); n <= before+2 {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("goroutines did not settle: before=%d after=%d", before, runtime.NumGoroutine())
+}
+
+// waitForCond polls cond with a loose 2s deadline (count-based, not timing).
+func waitForCond(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %s", what)
 }

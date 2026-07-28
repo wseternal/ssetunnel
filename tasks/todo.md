@@ -1,61 +1,63 @@
-# Todo: ssetunnel — Cycle 1 (Transport Core)
+# Todo: ssetunnel — Cycle 2 (Upstream Throughput)
 
-> Plan: `tasks/plan.md`. Each task: RED (failing test) → GREEN → REFACTOR
-> → `go test ./... -race -count=1 && go vet ./...` before moving on.
+> Plan: `tasks/plan.md`. Per task: RED → GREEN → REFACTOR →
+> `go test ./... -race -count=1 && go vet ./...` before moving on.
 
-- [x] **Step 1: Module scaffold**
-  - Acceptance: builds and vets clean; subcommand dispatch stub runs
-  - Verify: `go build ./... && go vet ./...`
-  - Files: `go.mod`, `cmd/ssetunnel/main.go`
+- [x] **Step 1: Reorder window pure core**
+  - Acceptance: 8! permutation property test byte-exact; dupes dropped;
+    window-full + gap-timeout errors; in-order passthrough; `-count=20` green
+  - Verify: `go test ./internal/transport/ -run TestReorder -race -count=20`
+  - Files: `internal/transport/reorder.go`, `internal/transport/reorder_test.go`
 
-- [x] **Step 2: SSE codec**
-  - Acceptance: round-trip incl. binary; heartbeats filtered; flush-per-frame;
-    split-line reassembly; oversized-line guard
-  - Verify: `go test ./internal/transport/ -run TestSSE -race`
-  - Files: `internal/transport/sse.go`, `internal/transport/sse_test.go`
-
-- [x] **Step 3: Eager-flush batcher**
-  - Acceptance: size flush at maxSize; eager flush when idle; 25ms ceiling
-    under saturation; no empty/double flush under `-race`; Close drains
-  - Verify: `go test ./internal/transport/ -run TestBatch -race`
-  - Files: `internal/transport/batcher.go`, `internal/transport/batcher_test.go`
-
-- [x] **Step 4: Server session + registry + handlers**
-  - Acceptance: POST→Read ordered; Write→SSE frames; 409 on seq gap and
-    unknown session; session replacement; EOF on close; read-deadline works
-  - Verify: `go test ./internal/server/ -race`
+- [x] **Step 2: Server window-gated push + caps + gzip decode**
+  - Acceptance: shuffled POSTs (deterministic release-gate) reassemble
+    byte-exact; legacy path verbatim and green; caps header well-formed;
+    gzip round-trip; 400 on unknown flag / non-negotiated gzip; 1MiB
+    boundary accepted; gap timeout kills session
+  - Verify: `go test ./internal/server/ -race -count=5`
   - Files: `internal/server/session.go`, `internal/server/handlers.go`,
     `internal/server/server_test.go`
 
-- [x] **Step 5: Agent-side net.Conn**
-  - Acceptance: full-duplex echo vs real handlers; batching observed;
-    close-with-unread-data doesn't hang; goroutines settle; 8-goroutine
-    concurrent Write under `-race`; POST failure surfaces as Write error
-  - Verify: `go test ./internal/transport/ -run TestConn -race`
-  - Files: `internal/transport/conn.go`, `internal/transport/conn_test.go`
+- [x] **Step 3: Compat matrix part 1 (old agent × new server)**
+  - Acceptance: caps-less agent × full-caps server echoes 1MiB byte-exact;
+    server uses legacy no-window path for that session
+  - Verify: `go test ./internal/server/ -run TestCompat -race`
+  - Files: `internal/testutil/middlebox.go`, `internal/server/compat_test.go`
 
-- [x] **Step 6: yamux mux**
-  - Acceptance: session over real adapter; stream echo; 32 streams with one
-    stalled reader (no HoL); >256KiB unread transfer (window proof)
-  - Verify: `go test ./internal/mux/ -race`
-  - Files: `internal/mux/mux.go`, `internal/mux/mux_test.go`
+- [x] **Step 4: Agent sender pool + negotiation + gzip**
+  - Acceptance: 4 workers + shuffled delivery byte-exact under `-count=20`;
+    eager flush preserved at conc=4; coalescing under saturation preserved;
+    gzip only-if-smaller; hung-POST Close doesn't hang; goroutines settle;
+    batcher.go byte-identical
+  - Verify: `go test ./internal/transport/ -race -count=20`
+  - Files: `internal/transport/caps.go`, `internal/transport/caps_test.go`,
+    `internal/transport/conn.go`, `internal/transport/conn_test.go`
 
-- [x] **Step 7: Server/agent wiring + e2e + binaries**
-  - Acceptance: byte-exact 1MiB e2e echo; reconnect <5s after SSE kill with
-    clean entry-side error; 2 concurrent connections; binaries smoke-test
-  - Verify: `go test ./... -race`; `go build ./cmd/ssetunnel`; manual `nc` smoke
-  - Files: `internal/server/server.go`, `internal/agent/agent.go`,
-    `internal/server/e2e_test.go`, `cmd/ssetunnel/main.go`
+- [x] **Step 5: Compat matrix part 2 + gzip quadrants**
+  - Acceptance: full-caps agent × stripped server → serial 16KiB fallback,
+    byte-exact, bodies ≤16KiB; gzip agent × stripped server → raw, no flag
+  - Verify: `go test ./... -race -count=1`
+  - Files: `internal/server/compat_test.go`
 
-- [x] **Step 8: Middlebox simulation**
-  - Acceptance: SSE survives 3× idle-kill at 4:1 heartbeat ratio; heartbeats-off
-    control dies; bulk transfer never trips body cap; reconnect after kill works
-  - Verify: `go test ./... -run Middlebox -race`
-  - Files: `internal/testutil/middlebox.go`, `internal/server/middlebox_test.go`
+- [x] **Step 6: Probe + /probe endpoint + middlebox throttles**
+  - Acceptance: probe detects 64KiB cliff within one step and classifies
+    per-conn vs aggregate throttle correctly against the middlebox;
+    /probe registers no session, enforces cap
+  - Verify: `go test ./internal/probe/ ./internal/server/ -race`
+  - Files: `internal/probe/probe.go`, `internal/probe/probe_test.go`,
+    `internal/server/handlers.go`, `internal/server/server_test.go`,
+    `internal/testutil/middlebox.go`
 
-- [x] **Step 9: Bench harness (budget proof)**
-  - Acceptance: all four budgets measured through latency-injecting middlebox
-    and printed PASS/FAIL — p50 added latency ≤50ms; ≥5MB/s single stream;
-    32-stream no-HoL; reconnect <5s ×100 cycles with goroutine/heap settle
-  - Verify: `go test ./internal/transport/ -run Bench -v -timeout 10m`
+- [x] **Step 7: CLI flags + concurrent e2e**
+  - Acceptance: --batch-size/--concurrency/--compress clamp correctly;
+    probe subcommand prints report; e2e 1MiB byte-exact at 4/64KiB/gzip
+  - Verify: `go build ./... && go test ./internal/server/ -run E2E -race`
+  - Files: `cmd/ssetunnel/main.go`, `internal/agent/agent.go`,
+    `internal/server/e2e_test.go`
+
+- [x] **Step 8: Bench — upstream budget + gzip proof + regression**
+  - Acceptance: upstream ≥4MB/s (4/64KiB, 10ms middlebox) with serial
+    control ratio printed; compressible wire ≤½ payload, incompressible
+    ≤1% overhead; ALL cycle-1 budgets re-run unmodified and PASS
+  - Verify: `go test ./internal/transport/ -run Bench -v -timeout 10m` (manual)
   - Files: `internal/transport/bench_test.go`

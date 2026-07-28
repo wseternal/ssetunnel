@@ -23,6 +23,12 @@ type Agent struct {
 	MaxBackoff time.Duration // reconnect cap; 0 → 1 s
 	MaxWait    time.Duration // batcher flush ceiling; 0 → default
 	Client     *http.Client  // nil → transport default
+
+	// Cycle-2 upstream knobs (negotiated down to the server's
+	// advertisement; zero values give cycle-1 serial 16 KiB behavior).
+	BatchSize   int  // upstream batch ceiling; 0 → transport default
+	Concurrency int  // upstream POST sender depth; 0 → 1 (serial)
+	Compress    bool // negotiate gzip-per-batch
 }
 
 // Run connects and reconnects until ctx is canceled. The first retry is
@@ -71,9 +77,12 @@ func (a *Agent) Run(ctx context.Context) error {
 // reconnect with a fresh session ID.
 func (a *Agent) runOnce(ctx context.Context) error {
 	conn, err := transport.DialAgent(ctx, transport.Config{
-		URL:     a.ServerURL,
-		MaxWait: a.MaxWait,
-		Client:  a.Client,
+		URL:          a.ServerURL,
+		MaxWait:      a.MaxWait,
+		Client:       a.Client,
+		MaxBatchSize: a.BatchSize,
+		Concurrency:  a.Concurrency,
+		Compress:     a.Compress,
 	})
 	if err != nil {
 		return fmt.Errorf("connect: %w", err)

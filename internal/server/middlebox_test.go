@@ -4,7 +4,9 @@ import (
 	"context"
 	"io"
 	"net"
+	"net/http"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -184,4 +186,79 @@ func TestMiddleboxReconnectAfterKill(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	t.Fatalf("saw %d distinct sessions, want >=2 (no reconnect after idle kill)", len(seen))
+}
+
+// TestMiddleboxPostBytes: the wire counter sums Content-Length of /up
+// and /probe requests.
+func TestMiddleboxPostBytes(t *testing.T) {
+	t.Parallel()
+	reg := NewRegistry()
+	ts := httptest.NewServer(NewHandler(reg, time.Hour))
+	t.Cleanup(ts.Close)
+	mb, err := testutil.StartMiddlebox(ts.URL, testutil.MiddleboxConfig{})
+	if err != nil {
+		t.Fatalf("StartMiddlebox: %v", err)
+	}
+	t.Cleanup(mb.Close)
+	reg.Replace(NewSession("s"))
+	if code := postUp(t, mb.URL, "s", 0, make([]byte, 1000)); code != http.StatusOK {
+		t.Fatalf("POST /up: got %d, want 200", code)
+	}
+	if code := probePost(t, mb.URL, make([]byte, 2000)); code != http.StatusOK {
+		t.Fatalf("POST /probe: got %d, want 200", code)
+	}
+	if n := mb.PostBytes.Load(); n != 3000 {
+		t.Fatalf("PostBytes = %d, want 3000", n)
+	}
+}
+
+// TestMiddleboxPerConnRate: a dumb per-request throttle — uploading
+// through it takes at least bytes/rate.
+func TestMiddleboxPerConnRate(t *testing.T) {
+	t.Parallel()
+	reg := NewRegistry()
+	ts := httptest.NewServer(NewHandler(reg, time.Hour))
+	t.Cleanup(ts.Close)
+	const rate = 1 << 20 // 1 MiB/s
+	mb, err := testutil.StartMiddlebox(ts.URL, testutil.MiddleboxConfig{PerConnRate: rate})
+	if err != nil {
+		t.Fatalf("StartMiddlebox: %v", err)
+	}
+	t.Cleanup(mb.Close)
+	start := time.Now()
+	if code := probePost(t, mb.URL, make([]byte, 256<<10)); code != http.StatusOK {
+		t.Fatalf("POST /probe: got %d, want 200", code)
+	}
+	if elapsed := time.Since(start); elapsed < 200*time.Millisecond {
+		t.Fatalf("256 KiB at 1 MiB/s took %v, want >= ~250ms (throttle missing)", elapsed)
+	}
+}
+
+// TestMiddleboxGlobalRate: one shared allowance across connections —
+// two parallel uploads take at least total/rate together.
+func TestMiddleboxGlobalRate(t *testing.T) {
+	t.Parallel()
+	reg := NewRegistry()
+	ts := httptest.NewServer(NewHandler(reg, time.Hour))
+	t.Cleanup(ts.Close)
+	const rate = 1 << 20 // 1 MiB/s shared
+	mb, err := testutil.StartMiddlebox(ts.URL, testutil.MiddleboxConfig{GlobalRate: rate})
+	if err != nil {
+		t.Fatalf("StartMiddlebox: %v", err)
+	}
+	t.Cleanup(mb.Close)
+	start := time.Now()
+	var wg sync.WaitGroup
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			probePost(t, mb.URL, make([]byte, 256<<10))
+		}()
+	}
+	wg.Wait()
+	// 512 KiB total at a shared 1 MiB/s ≈ 500ms; per-conn it would be ~250ms.
+	if elapsed := time.Since(start); elapsed < 400*time.Millisecond {
+		t.Fatalf("2x256 KiB at shared 1 MiB/s took %v, want >= ~500ms (global throttle missing)", elapsed)
+	}
 }
