@@ -78,6 +78,7 @@ func runServer(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("server", flag.ContinueOnError)
 	listen := fs.String("listen", ":8080", "HTTP listen address for tunnel endpoints")
 	agentAddr := fs.String("agent", ":9090", "TCP agent listen address for user connections")
+	fs.StringVar(agentAddr, "entry", ":9090", "DEPRECATED: use -agent")
 	consoleListen := fs.String("console-listen", ":8081", "HTTP listen address for admin console SPA")
 	heartbeat := fs.Duration("heartbeat", 15*time.Second, "SSE heartbeat interval")
 	dbURL := fs.String("db-url", os.Getenv("DATABASE_URL"), "PostgreSQL DB connection URL (default uses testcontainer if empty)")
@@ -246,6 +247,7 @@ func runAgent(ctx context.Context, args []string) error {
 func runConnect(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("connect", flag.ContinueOnError)
 	serverAgent := fs.String("server-agent", "127.0.0.1:9090", "tunnel server agent TCP address")
+	fs.StringVar(serverAgent, "server-entry", "127.0.0.1:9090", "DEPRECATED: use -server-agent")
 	agentID := fs.String("agent", "", "agent identifier to connect to (e.g. mydevbox)")
 	target := fs.String("target", "", "target address on the agent machine (e.g. 127.0.0.1:22)")
 	local := fs.String("local", "", "local listen TCP address (e.g. 127.0.0.1:3306) or '-' for Stdio mode")
