@@ -25,6 +25,11 @@ import (
 // and 413 means session death.
 const maxUpBody = 1<<20 + 64<<10
 
+// connectUpPipeCap is the connect-session up-pipe capacity.  It must
+// be at least maxUpBody so a single large POST never blocks on the pipe
+// before the yamux consumer has a chance to drain it.
+const connectUpPipeCap = 1 << 20
+
 // maxProbeBody caps one /probe body (cycle-2 plan decision 6: read and
 // discard, bounded surface).
 const maxProbeBody = 2 << 20
@@ -400,7 +405,7 @@ func (h *Handler) handleConnect(w http.ResponseWriter, r *http.Request) {
 	// has a chance to drain it.
 	cs := &connectSession{
 		id:     id,
-		up:     transport.NewPipe(1 << 20),
+		up:     transport.NewPipe(connectUpPipeCap),
 		cancel: func() {}, // no-op; cleanup is handled by the deferred teardown below
 	}
 	h.connectSessions.Store(id, cs)
@@ -510,31 +515,13 @@ func (h *Handler) handleConnectUp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// X-SSET-Flags: forward-looking gzip support for when connect-up gains
-	// a reorder window and concurrent POSTs. Currently dead code — the
-	// server does not advertise caps on /connect, so connect clients never
-	// negotiate gzip. Kept for parity with handleUp's flag validation.
+	// connect-up has no reorder window, so concurrent POSTs (and with
+	// them gzip-per-batch) are not supported.  Reject any X-SSET-Flags
+	// outright; when reordering is added, replace this with a per-session
+	// check (cf. handleUp's sess.hasWindow() guard).
 	if flags := r.Header.Get("X-SSET-Flags"); flags != "" {
-		for flag := range strings.SplitSeq(flags, ",") {
-			switch strings.TrimSpace(flag) {
-			case "gzip":
-				zr, err := gzip.NewReader(bytes.NewReader(body))
-				if err != nil {
-					http.Error(w, "bad gzip body", http.StatusBadRequest)
-					return
-				}
-				raw, err := io.ReadAll(io.LimitReader(zr, maxUpBody))
-				zr.Close()
-				if err != nil {
-					http.Error(w, "bad gzip body", http.StatusBadRequest)
-					return
-				}
-				body = raw
-			default:
-				http.Error(w, "unknown X-SSET-Flags value", http.StatusBadRequest)
-				return
-			}
-		}
+		http.Error(w, "X-SSET-Flags not supported on connect-up", http.StatusBadRequest)
+		return
 	}
 
 	// Best-effort early exit: if the client already disconnected, don't
