@@ -10,6 +10,8 @@ const (
 )
 
 // PermissionsFor returns the set of permissions granted by the given role.
+// The "agent" case is kept for backward compatibility with existing bearer
+// tokens in the tokens table; it is no longer a valid user role.
 func PermissionsFor(role string) []Permission {
 	switch role {
 	case "admin":
@@ -29,6 +31,24 @@ func HasPermission(role string, perm Permission) bool {
 		if p == perm {
 			return true
 		}
+	}
+	return false
+}
+
+// UserHasPermission checks whether a user has the given permission.
+// Admin role always grants all permissions regardless of column values.
+// Otherwise, the per-user boolean flags are checked.
+func UserHasPermission(role string, permConnect, permAgent bool, perm Permission) bool {
+	if role == "admin" {
+		return true
+	}
+	switch perm {
+	case PermConnect:
+		return permConnect
+	case PermAgent:
+		return permAgent
+	case PermAdmin:
+		return false
 	}
 	return false
 }

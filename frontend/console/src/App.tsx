@@ -30,6 +30,8 @@ import {
   MenuItem,
   FormControl,
   InputLabel,
+  Checkbox,
+  FormControlLabel,
 } from '@mui/material';
 import DeleteIcon from '@mui/icons-material/Delete';
 import RefreshIcon from '@mui/icons-material/Refresh';
@@ -63,6 +65,8 @@ interface User {
   id: number;
   username: string;
   role: string;
+  perm_connect: boolean;
+  perm_agent: boolean;
   created_at: string;
   disabled_at?: string;
 }
@@ -84,6 +88,8 @@ export default function App() {
   const [formUsername, setFormUsername] = useState('');
   const [formPassword, setFormPassword] = useState('');
   const [formRole, setFormRole] = useState('user');
+  const [formPermConnect, setFormPermConnect] = useState(true);
+  const [formPermAgent, setFormPermAgent] = useState(true);
 
   const authHeaders = (): HeadersInit => sessionToken ? { Authorization: `Bearer ${sessionToken}` } : {};
 
@@ -150,6 +156,8 @@ export default function App() {
     setFormUsername('');
     setFormPassword('');
     setFormRole('user');
+    setFormPermConnect(true);
+    setFormPermAgent(true);
     setOpenUserDialog(true);
   };
 
@@ -158,13 +166,15 @@ export default function App() {
     setFormUsername(user.username);
     setFormPassword('');
     setFormRole(user.role);
+    setFormPermConnect(user.perm_connect);
+    setFormPermAgent(user.perm_agent);
     setOpenUserDialog(true);
   };
 
   const handleSaveUser = async () => {
     if (editingUserId !== null) {
       try {
-        const body: Record<string, string> = { role: formRole };
+        const body: Record<string, unknown> = { role: formRole, perm_connect: formPermConnect, perm_agent: formPermAgent };
         if (formPassword) body.password = formPassword;
         const res = await fetch(`/api/v1/users/${editingUserId}`, {
           method: 'PATCH',
@@ -181,7 +191,7 @@ export default function App() {
         const res = await fetch('/api/v1/users', {
           method: 'POST',
           headers: { ...authHeaders(), 'Content-Type': 'application/json' },
-          body: JSON.stringify({ username: formUsername, password: formPassword, role: formRole }),
+          body: JSON.stringify({ username: formUsername, password: formPassword, role: formRole, perm_connect: formPermConnect, perm_agent: formPermAgent }),
         });
         if (res.ok) { setOpenUserDialog(false); fetchUsers(); }
         else setError(await res.text());
@@ -218,7 +228,6 @@ export default function App() {
   const roleColor = (role: string): 'error' | 'warning' | 'primary' | 'default' => {
     switch (role) {
       case 'admin': return 'error';
-      case 'agent': return 'warning';
       default: return 'primary';
     }
   };
@@ -368,7 +377,11 @@ export default function App() {
                           <TableRow key={u.id}>
                             <TableCell>{u.id}</TableCell>
                             <TableCell sx={{ fontWeight: 500 }}>{u.username}</TableCell>
-                            <TableCell><Chip label={u.role} color={roleColor(u.role)} size="small" /></TableCell>
+                            <TableCell>
+                              <Chip label={u.role} color={roleColor(u.role)} size="small" />
+                              {u.perm_connect && <Chip label="connect" size="small" sx={{ ml: 0.5 }} />}
+                              {u.perm_agent && <Chip label="agent" size="small" sx={{ ml: 0.5 }} />}
+                            </TableCell>
                             <TableCell>{new Date(u.created_at).toLocaleString()}</TableCell>
                             <TableCell>
                               {u.disabled_at
@@ -430,10 +443,17 @@ export default function App() {
                     onChange={(e) => setFormRole(e.target.value)}
                   >
                     <MenuItem value="user">user</MenuItem>
-                    <MenuItem value="agent">agent</MenuItem>
                     <MenuItem value="admin">admin</MenuItem>
                   </Select>
                 </FormControl>
+                <FormControlLabel
+                  control={<Checkbox checked={formPermConnect} onChange={(e) => setFormPermConnect(e.target.checked)} />}
+                  label="Can Connect (connect to agent tunnels)"
+                />
+                <FormControlLabel
+                  control={<Checkbox checked={formPermAgent} onChange={(e) => setFormPermAgent(e.target.checked)} />}
+                  label="Can Agent (register agent tunnels)"
+                />
               </DialogContent>
               <DialogActions>
                 <Button onClick={() => setOpenUserDialog(false)}>Cancel</Button>

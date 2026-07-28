@@ -94,7 +94,7 @@ func runE2E(m *testing.M) int {
 		fmt.Fprintf(os.Stderr, "e2e: hash password: %v\n", err)
 		return 1
 	}
-	testUser, err := authStore.CreateUser(ctx, "e2euser", pwHash, "admin")
+	testUser, err := authStore.CreateUser(ctx, "e2euser", pwHash, "admin", true, true)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "e2e: create user: %v\n", err)
 		return 1

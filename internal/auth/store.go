@@ -33,18 +33,22 @@ type TokenInfo struct {
 }
 
 type UserInfo struct {
-	ID           int64      `json:"id"`
-	Username     string     `json:"username"`
-	Role         string     `json:"role"`
-	TOTPSecret   string     `json:"-"`
-	CreatedAt    time.Time  `json:"created_at"`
-	DisabledAt   *time.Time `json:"disabled_at,omitempty"`
+	ID          int64      `json:"id"`
+	Username    string     `json:"username"`
+	Role        string     `json:"role"`
+	PermConnect bool       `json:"perm_connect"`
+	PermAgent   bool       `json:"perm_agent"`
+	TOTPSecret  string     `json:"-"`
+	CreatedAt   time.Time  `json:"created_at"`
+	DisabledAt  *time.Time `json:"disabled_at,omitempty"`
 }
 
 type UserSessionInfo struct {
-	UserID    int64     `json:"user_id"`
-	Role      string    `json:"role"`
-	ExpiresAt time.Time `json:"expires_at"`
+	UserID      int64     `json:"user_id"`
+	Role        string    `json:"role"`
+	PermConnect bool      `json:"perm_connect"`
+	PermAgent   bool      `json:"perm_agent"`
+	ExpiresAt   time.Time `json:"expires_at"`
 }
 
 type Store struct {
@@ -163,14 +167,14 @@ func (s *Store) ListTokens(ctx context.Context) ([]TokenInfo, error) {
 
 // --- User CRUD ---
 
-func (s *Store) CreateUser(ctx context.Context, username, passwordHash, role string) (*UserInfo, error) {
+func (s *Store) CreateUser(ctx context.Context, username, passwordHash, role string, permConnect, permAgent bool) (*UserInfo, error) {
 	query := `
-		INSERT INTO users (username, password_hash, role)
-		VALUES ($1, $2, $3)
+		INSERT INTO users (username, password_hash, role, perm_connect, perm_agent)
+		VALUES ($1, $2, $3, $4, $5)
 		RETURNING id, created_at
 	`
-	u := &UserInfo{Username: username, Role: role}
-	err := s.pool.QueryRow(ctx, query, username, passwordHash, role).Scan(&u.ID, &u.CreatedAt)
+	u := &UserInfo{Username: username, Role: role, PermConnect: permConnect, PermAgent: permAgent}
+	err := s.pool.QueryRow(ctx, query, username, passwordHash, role, permConnect, permAgent).Scan(&u.ID, &u.CreatedAt)
 	if err != nil {
 		if isUniqueViolation(err) {
 			return nil, ErrDuplicateUser
@@ -181,11 +185,11 @@ func (s *Store) CreateUser(ctx context.Context, username, passwordHash, role str
 }
 
 func (s *Store) GetUserByUsername(ctx context.Context, username string) (*UserInfo, error) {
-	query := `SELECT id, username, password_hash, role, totp_secret, created_at, disabled_at FROM users WHERE username = $1`
+	query := `SELECT id, username, password_hash, role, perm_connect, perm_agent, totp_secret, created_at, disabled_at FROM users WHERE username = $1`
 	var u UserInfo
 	var pwHash string
 	err := s.pool.QueryRow(ctx, query, username).Scan(
-		&u.ID, &u.Username, &pwHash, &u.Role, &u.TOTPSecret, &u.CreatedAt, &u.DisabledAt,
+		&u.ID, &u.Username, &pwHash, &u.Role, &u.PermConnect, &u.PermAgent, &u.TOTPSecret, &u.CreatedAt, &u.DisabledAt,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -224,7 +228,7 @@ func (s *Store) ValidatePassword(ctx context.Context, username, password string)
 }
 
 func (s *Store) ListUsers(ctx context.Context) ([]UserInfo, error) {
-	query := `SELECT id, username, role, totp_secret, created_at, disabled_at FROM users ORDER BY created_at DESC`
+	query := `SELECT id, username, role, perm_connect, perm_agent, totp_secret, created_at, disabled_at FROM users ORDER BY created_at DESC`
 	rows, err := s.pool.Query(ctx, query)
 	if err != nil {
 		return nil, fmt.Errorf("list users: %w", err)
@@ -234,7 +238,7 @@ func (s *Store) ListUsers(ctx context.Context) ([]UserInfo, error) {
 	var users []UserInfo
 	for rows.Next() {
 		var u UserInfo
-		if err := rows.Scan(&u.ID, &u.Username, &u.Role, &u.TOTPSecret, &u.CreatedAt, &u.DisabledAt); err != nil {
+		if err := rows.Scan(&u.ID, &u.Username, &u.Role, &u.PermConnect, &u.PermAgent, &u.TOTPSecret, &u.CreatedAt, &u.DisabledAt); err != nil {
 			return nil, fmt.Errorf("scan user row: %w", err)
 		}
 		users = append(users, u)
@@ -242,20 +246,40 @@ func (s *Store) ListUsers(ctx context.Context) ([]UserInfo, error) {
 	return users, nil
 }
 
-func (s *Store) UpdateUser(ctx context.Context, id int64, role *string, passwordHash *string) error {
-	switch {
-	case role != nil && passwordHash != nil:
-		_, err := s.pool.Exec(ctx, `UPDATE users SET role = $1, password_hash = $2 WHERE id = $3`, *role, *passwordHash, id)
-		return err
-	case role != nil:
-		_, err := s.pool.Exec(ctx, `UPDATE users SET role = $1 WHERE id = $2`, *role, id)
-		return err
-	case passwordHash != nil:
-		_, err := s.pool.Exec(ctx, `UPDATE users SET password_hash = $1 WHERE id = $2`, *passwordHash, id)
-		return err
-	default:
+func (s *Store) UpdateUser(ctx context.Context, id int64, role *string, passwordHash *string, permConnect *bool, permAgent *bool) error {
+	setClauses := make([]string, 0, 4)
+	args := make([]interface{}, 0, 4)
+	n := 0
+
+	if role != nil {
+		n++
+		setClauses = append(setClauses, fmt.Sprintf("role = $%d", n))
+		args = append(args, *role)
+	}
+	if passwordHash != nil {
+		n++
+		setClauses = append(setClauses, fmt.Sprintf("password_hash = $%d", n))
+		args = append(args, *passwordHash)
+	}
+	if permConnect != nil {
+		n++
+		setClauses = append(setClauses, fmt.Sprintf("perm_connect = $%d", n))
+		args = append(args, *permConnect)
+	}
+	if permAgent != nil {
+		n++
+		setClauses = append(setClauses, fmt.Sprintf("perm_agent = $%d", n))
+		args = append(args, *permAgent)
+	}
+	if len(setClauses) == 0 {
 		return nil
 	}
+
+	n++
+	query := fmt.Sprintf("UPDATE users SET %s WHERE id = $%d", strings.Join(setClauses, ", "), n)
+	args = append(args, id)
+	_, err := s.pool.Exec(ctx, query, args...)
+	return err
 }
 
 func (s *Store) DisableUser(ctx context.Context, id int64) error {
@@ -304,7 +328,7 @@ func (s *Store) EnsureAdminUser(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("hash admin password: %w", err)
 	}
 
-	if _, err := s.CreateUser(ctx, "admin", hash, "admin"); err != nil {
+	if _, err := s.CreateUser(ctx, "admin", hash, "admin", true, true); err != nil {
 		return "", fmt.Errorf("seed admin user: %w", err)
 	}
 
@@ -329,14 +353,14 @@ func (s *Store) ValidateUserSession(ctx context.Context, rawToken string) (*User
 	digest := ComputeDigest(rawToken)
 
 	query := `
-		SELECT us.user_id, us.expires_at, u.role
+		SELECT us.user_id, us.expires_at, u.role, u.perm_connect, u.perm_agent
 		FROM user_sessions us
 		JOIN users u ON u.id = us.user_id
 		WHERE us.digest = $1 AND us.expires_at > CURRENT_TIMESTAMP AND u.disabled_at IS NULL
 	`
 
 	var info UserSessionInfo
-	err := s.pool.QueryRow(ctx, query, digest).Scan(&info.UserID, &info.ExpiresAt, &info.Role)
+	err := s.pool.QueryRow(ctx, query, digest).Scan(&info.UserID, &info.ExpiresAt, &info.Role, &info.PermConnect, &info.PermAgent)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrInvalidSession

@@ -34,6 +34,16 @@ table "users" {
     type    = timestamptz
     default = sql("CURRENT_TIMESTAMP")
   }
+  column "perm_connect" {
+    null    = false
+    type    = boolean
+    default = true
+  }
+  column "perm_agent" {
+    null    = false
+    type    = boolean
+    default = true
+  }
   column "disabled_at" {
     null = true
     type = timestamptz

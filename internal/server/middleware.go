@@ -47,6 +47,8 @@ func UserSessionFromContext(r *http.Request) *auth.UserSessionInfo {
 }
 
 // AgentAuthMiddleware protects endpoints requiring agent-role tokens.
+// It tries bearer-token validation first (tokens table), then falls back to
+// user-session validation (user_sessions table, from `ssetunnel login`).
 // If store is nil, auth is disabled and requests pass through.
 func AgentAuthMiddleware(store *auth.Store) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
@@ -62,9 +64,18 @@ func AgentAuthMiddleware(store *auth.Store) func(http.Handler) http.Handler {
 				return
 			}
 
+			// Try bearer token first (standalone tokens from the tokens table).
 			tokInfo, err := store.ValidateToken(r.Context(), tokenStr)
 			if err == nil && auth.HasPermission(tokInfo.Role, auth.PermAgent) {
 				ctx := context.WithValue(r.Context(), tokenInfoKey, &tokInfo)
+				next.ServeHTTP(w, r.WithContext(ctx))
+				return
+			}
+
+			// Fallback: user session token (from `ssetunnel login`).
+			sessInfo, err := store.ValidateUserSession(r.Context(), tokenStr)
+			if err == nil && auth.UserHasPermission(sessInfo.Role, sessInfo.PermConnect, sessInfo.PermAgent, auth.PermAgent) {
+				ctx := context.WithValue(r.Context(), userSessionKey, sessInfo)
 				next.ServeHTTP(w, r.WithContext(ctx))
 				return
 			}
