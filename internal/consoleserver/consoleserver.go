@@ -26,11 +26,7 @@ func NewConsoleHandler(ctx context.Context, pool *pgxpool.Pool, store *auth.Stor
 	spaCfg := litespaserver.Config{
 		EmbeddedContent: frontend.ConsoleWebRootFs,
 		CSP: litespaserver.CSPConfig{
-			ScriptSrcs:   litespaserver.ScriptSrcAll,
-			StyleSrcs:    litespaserver.StyleSrcAll,
-			ConnectSrcs:  litespaserver.ConnectSrcAll,
-			FontSrcs:     litespaserver.FontSrcAll,
-			ManifestSrcs: litespaserver.ManifestSrcAll,
+			Disable: true,
 		},
 	}
 	spaServer := litespaserver.NewServer(ctx, pool, spaCfg)
