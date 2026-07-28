@@ -175,8 +175,8 @@ func setupStrippedCaps(t *testing.T, sessionID string) (*transport.Conn, *Sessio
 
 // TestCompatNewAgentStrippedServer is compat quadrant 2 (cycle-2 plan
 // step 5): a full-caps agent whose server's caps advertisement is
-// stripped must fail closed to the cycle-1 profile — serial 16 KiB
-// POSTs, byte-exact delivery.
+// stripped must fail closed to the cycle-1 profile — serial POSTs at
+// DefaultMaxBatchSize, byte-exact delivery.
 func TestCompatNewAgentStrippedServer(t *testing.T) {
 	t.Parallel()
 	c, sess, rec := setupStrippedCaps(t, "stripped")
@@ -191,12 +191,12 @@ func TestCompatNewAgentStrippedServer(t *testing.T) {
 		t.Fatal("1 MiB through stripped middlebox not byte-exact")
 	}
 	posts := rec.snapshot()
-	if len(posts) != 64 {
-		t.Fatalf("POST count = %d, want 64 (1 MiB / 16 KiB serial fallback)", len(posts))
+	if len(posts) != 16 {
+		t.Fatalf("POST count = %d, want 16 (1 MiB / 64 KiB agent-requested batch)", len(posts))
 	}
 	for i, p := range posts {
-		if len(p.body) > 16<<10 {
-			t.Fatalf("POST %d body = %d bytes, want <= 16 KiB (cycle-1 fallback)", i, len(p.body))
+		if len(p.body) > 64<<10 {
+			t.Fatalf("POST %d body = %d bytes, want <= 64 KiB (agent-requested batch)", i, len(p.body))
 		}
 	}
 }

@@ -202,7 +202,7 @@ func runAgent(ctx context.Context, args []string) error {
 	basePath := fs.String("base", "", "HTTP path prefix for tunnel endpoints (must match server --base)")
 	target := fs.String("target", "", "TCP address to forward streams to (empty = dynamic target mode)")
 	agentID := fs.String("id", "", "agent identifier for routing (e.g. mydevbox)")
-	batchSize := fs.Int("batch-size", 16384, "upstream batch ceiling in bytes (1024..1048576)")
+	batchSize := fs.Int("batch-size", 262144, "upstream batch ceiling in bytes (1024..1048576)")
 	concurrency := fs.Int("concurrency", 1, "upstream POST sender depth (1..4)")
 	compress := fs.Bool("compress", false, "negotiate gzip-per-batch upstream encoding")
 
@@ -261,6 +261,7 @@ func runConnect(ctx context.Context, args []string) error {
 	agentID := fs.String("agent", "", "agent identifier to connect to (e.g. mydevbox)")
 	target := fs.String("target", "", "target address on the agent machine (e.g. 127.0.0.1:22)")
 	local := fs.String("local", "", "local listen TCP address (e.g. 127.0.0.1:3306) or '-' for Stdio mode")
+	batchSize := fs.Int("batch-size", 0, "upstream batch ceiling in bytes (0 = 256 KiB default; 1024..1048576)")
 
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -286,6 +287,7 @@ func runConnect(ctx context.Context, args []string) error {
 	}
 
 	client := connect.NewClient(url, sessToken, *agentID, *target, *basePath)
+	client.BatchSize = *batchSize
 
 	if *local == "-" {
 		log.Printf("connect: running in Stdio mode connecting to %s (agent=%s, target=%s)", url, *agentID, *target)

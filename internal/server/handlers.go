@@ -395,9 +395,12 @@ func (h *Handler) handleConnect(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Create the connect bridge: up pipe for POST bodies → yamux stream.
+	// The pipe capacity matches the server's batch ceiling (1 MiB) so a
+	// single large POST never blocks on the pipe before the yamux consumer
+	// has a chance to drain it.
 	cs := &connectSession{
 		id:     id,
-		up:     transport.NewPipe(downPipeCap),
+		up:     transport.NewPipe(1 << 20),
 		cancel: func() {}, // no-op; cleanup is handled by the deferred teardown below
 	}
 	h.connectSessions.Store(id, cs)
@@ -429,6 +432,11 @@ func (h *Handler) handleConnect(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Set up SSE response headers.
+	// NOTE: We deliberately do NOT advertise concurrency on the connect
+	// path — handleConnectUp writes directly to a pipe without a reorder
+	// window, so concurrent POSTs would arrive out of order and corrupt
+	// the byte stream. The connect client still benefits from larger
+	// batch sizes (256 KiB default) and the yamux window increase.
 	w.Header().Set("X-SSET-Session", id)
 	transport.WriteHeaders(w)
 	f.Flush()
@@ -500,6 +508,33 @@ func (h *Handler) handleConnectUp(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "read body", http.StatusBadRequest)
 		}
 		return
+	}
+
+	// X-SSET-Flags: forward-looking gzip support for when connect-up gains
+	// a reorder window and concurrent POSTs. Currently dead code — the
+	// server does not advertise caps on /connect, so connect clients never
+	// negotiate gzip. Kept for parity with handleUp's flag validation.
+	if flags := r.Header.Get("X-SSET-Flags"); flags != "" {
+		for flag := range strings.SplitSeq(flags, ",") {
+			switch strings.TrimSpace(flag) {
+			case "gzip":
+				zr, err := gzip.NewReader(bytes.NewReader(body))
+				if err != nil {
+					http.Error(w, "bad gzip body", http.StatusBadRequest)
+					return
+				}
+				raw, err := io.ReadAll(io.LimitReader(zr, maxUpBody))
+				zr.Close()
+				if err != nil {
+					http.Error(w, "bad gzip body", http.StatusBadRequest)
+					return
+				}
+				body = raw
+			default:
+				http.Error(w, "unknown X-SSET-Flags value", http.StatusBadRequest)
+				return
+			}
+		}
 	}
 
 	// Best-effort early exit: if the client already disconnected, don't

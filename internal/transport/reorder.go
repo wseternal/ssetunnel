@@ -13,8 +13,8 @@ var (
 )
 
 // ReorderWindowSize bounds buffered out-of-order batches. Memory bound:
-// 8 slots x 1 MiB batch ceiling = 8 MiB worst case per session.
-const ReorderWindowSize = 8
+// 16 slots x 1 MiB batch ceiling = 16 MiB worst case per session.
+const ReorderWindowSize = 16
 
 // defaultGapTimeout fails an unhealed gap fast; yamux keepalive (30 s)
 // guarantees upstream traffic within that span, so the piggybacked check

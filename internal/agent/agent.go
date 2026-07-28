@@ -36,7 +36,7 @@ type Agent struct {
 	RequestModifier func(*http.Request)
 
 	// Cycle-2 upstream knobs (negotiated down to the server's
-	// advertisement; zero values give cycle-1 serial 16 KiB behavior).
+	// advertisement; zero values give cycle-1 serial behavior at 256 KiB batches).
 	BatchSize   int  // upstream batch ceiling; 0 → transport default
 	Concurrency int  // upstream POST sender depth; 0 → 1 (serial)
 	Compress    bool // negotiate gzip-per-batch

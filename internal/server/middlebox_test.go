@@ -17,7 +17,15 @@ import (
 )
 
 // dialThroughMiddlebox builds agent conn → middlebox → real handlers.
+// maxBatch=0 uses the transport default (DefaultMaxBatchSize).
 func dialThroughMiddlebox(t *testing.T, heartbeat time.Duration, cfg testutil.MiddleboxConfig) (*transport.Conn, *Session, *testutil.Middlebox) {
+	return dialThroughMiddleboxWithBatch(t, heartbeat, cfg, 0)
+}
+
+// dialThroughMiddleboxWithBatch is like dialThroughMiddlebox but with an
+// explicit MaxBatchSize so tests that constrain the middlebox body limit
+// can keep batches below it regardless of the DefaultMaxBatchSize.
+func dialThroughMiddleboxWithBatch(t *testing.T, heartbeat time.Duration, cfg testutil.MiddleboxConfig, maxBatch int) (*transport.Conn, *Session, *testutil.Middlebox) {
 	t.Helper()
 	reg := NewRegistry()
 	ts := httptest.NewServer(NewHandler(reg, heartbeat))
@@ -28,9 +36,10 @@ func dialThroughMiddlebox(t *testing.T, heartbeat time.Duration, cfg testutil.Mi
 	}
 	t.Cleanup(mb.Close)
 	c, err := transport.DialAgent(context.Background(), transport.Config{
-		URL:       mb.URL,
-		SessionID: "mb-test",
-		MaxWait:   time.Millisecond,
+		URL:          mb.URL,
+		SessionID:    "mb-test",
+		MaxWait:      time.Millisecond,
+		MaxBatchSize: maxBatch,
 	})
 	if err != nil {
 		t.Fatalf("DialAgent through middlebox: %v", err)
@@ -92,9 +101,9 @@ func TestMiddleboxIdleKillerControl(t *testing.T) {
 
 func TestMiddleboxBulkNever413(t *testing.T) {
 	t.Parallel()
-	c, sess, mb := dialThroughMiddlebox(t, time.Hour, testutil.MiddleboxConfig{
+	c, sess, mb := dialThroughMiddleboxWithBatch(t, time.Hour, testutil.MiddleboxConfig{
 		MaxBody: 32 << 10, // above the 16 KiB batch ceiling
-	})
+	}, 16<<10)
 	var received atomic.Int64
 	done := make(chan struct{})
 	go func() {
