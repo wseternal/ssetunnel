@@ -630,85 +630,85 @@ export default function App() {
                 </Paper>
 
                 {tabIndex === 0 && (
-              <Box>
-                <PageHeader
-                  title={`Live Tunnel Sessions (${sessions.length})`}
-                  actions={
-                    <Button startIcon={<RefreshIcon />} onClick={fetchSessions} size="small">
-                      Refresh
-                    </Button>
-                  }
-                />
-                <AdminTable
-                  columns={SESSION_COLUMNS}
-                  rows={sessions}
-                  rowKey="id"
-                  empty={
-                    <EmptyState
-                      icon={<CableIcon sx={{ fontSize: 48, color: 'text.disabled' }} />}
-                      title="No active tunnel sessions"
+                  <Box>
+                    <PageHeader
+                      title={`Live Tunnel Sessions (${sessions.length})`}
+                      actions={
+                        <Button startIcon={<RefreshIcon />} onClick={fetchSessions} size="small">
+                          Refresh
+                        </Button>
+                      }
                     />
-                  }
-                />
-              </Box>
-            )}
+                    <AdminTable
+                      columns={SESSION_COLUMNS}
+                      rows={sessions}
+                      rowKey="id"
+                      empty={
+                        <EmptyState
+                          icon={<CableIcon sx={{ fontSize: 48, color: 'text.disabled' }} />}
+                          title="No active tunnel sessions"
+                        />
+                      }
+                    />
+                  </Box>
+                )}
 
                 {tabIndex === 1 && (
-              <Box>
-                <PageHeader
-                  title={`Users (${users.length})`}
-                  actions={
-                    <Box sx={{ display: 'flex', gap: 1 }}>
-                      <Button startIcon={<RefreshIcon />} onClick={fetchUsers} size="small">
-                        Refresh
-                      </Button>
-                      <Button variant="contained" startIcon={<PersonAddIcon />} onClick={openCreateUserDialog}>
-                        Create User
-                      </Button>
-                    </Box>
-                  }
-                />
-                <AdminTable
-                  columns={userColumns}
-                  rows={users}
-                  rowKey="id"
-                  empty={
-                    <EmptyState
-                      icon={<GroupIcon sx={{ fontSize: 48, color: 'text.disabled' }} />}
-                      title="No users"
+                  <Box>
+                    <PageHeader
+                      title={`Users (${users.length})`}
+                      actions={
+                        <Box sx={{ display: 'flex', gap: 1 }}>
+                          <Button startIcon={<RefreshIcon />} onClick={fetchUsers} size="small">
+                            Refresh
+                          </Button>
+                          <Button variant="contained" startIcon={<PersonAddIcon />} onClick={openCreateUserDialog}>
+                            Create User
+                          </Button>
+                        </Box>
+                      }
                     />
-                  }
-                />
-              </Box>
-            )}
+                    <AdminTable
+                      columns={userColumns}
+                      rows={users}
+                      rowKey="id"
+                      empty={
+                        <EmptyState
+                          icon={<GroupIcon sx={{ fontSize: 48, color: 'text.disabled' }} />}
+                          title="No users"
+                        />
+                      }
+                    />
+                  </Box>
+                )}
 
                 {tabIndex === 2 && (
-              <Box>
-                <PageHeader
-                  title={`Agent Configs (${agents.length})`}
-                  actions={
-                    <Box sx={{ display: 'flex', gap: 1 }}>
-                      <Button startIcon={<RefreshIcon />} onClick={fetchAgents} size="small">
-                        Refresh
-                      </Button>
-                      <Button variant="contained" startIcon={<AddIcon />} onClick={openCreateAgentDialog}>
-                        Add Agent
-                      </Button>
-                    </Box>
-                  }
-                />
-                <AdminTable
-                  columns={agentColumns}
-                  rows={agents}
-                  rowKey="id"
-                  empty={
-                    <EmptyState
-                      icon={<RouterIcon sx={{ fontSize: 48, color: 'text.disabled' }} />}
-                      title="No agent configs"
+                  <Box>
+                    <PageHeader
+                      title={`Agent Configs (${agents.length})`}
+                      actions={
+                        <Box sx={{ display: 'flex', gap: 1 }}>
+                          <Button startIcon={<RefreshIcon />} onClick={fetchAgents} size="small">
+                            Refresh
+                          </Button>
+                          <Button variant="contained" startIcon={<AddIcon />} onClick={openCreateAgentDialog}>
+                            Add Agent
+                          </Button>
+                        </Box>
+                      }
                     />
-                  }
-                />
-              </Box>
+                    <AdminTable
+                      columns={agentColumns}
+                      rows={agents}
+                      rowKey="id"
+                      empty={
+                        <EmptyState
+                          icon={<RouterIcon sx={{ fontSize: 48, color: 'text.disabled' }} />}
+                          title="No agent configs"
+                        />
+                      }
+                    />
+                  </Box>
                 )}
               </>
             ) : (
@@ -719,7 +719,7 @@ export default function App() {
                     Welcome
                   </Typography>
                   <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
-                    You are signed in as <strong>{localStorage.getItem('userRole') || 'user'}</strong>.
+                    You are signed in as <strong>{userRole || 'user'}</strong>.
                     {totpEnrolled
                       ? ' Two-factor authentication is enabled.'
                       : ' Two-factor authentication is not set up — click the shield icon above to configure it.'}
