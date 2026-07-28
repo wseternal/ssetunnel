@@ -61,7 +61,7 @@ The NULL `agent_id` row serves as the default config for agents without a specif
 
 ## User Permissions
 
-Users have boolean flags: `can_connect` and `can_create_agent`. Checked during token validation and entry handshake.
+Users have boolean flags: `can_connect` and `can_create_agent`. Checked during token validation and agent handshake.
 
 ## Rules
 * Tokens are stored as SHA-256 digests — raw tokens are never persisted.

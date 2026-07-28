@@ -56,13 +56,13 @@ func TestConnectClient_LocalPortMode(t *testing.T) {
 	srv := server.NewServer(15 * time.Second)
 	srv.SetAuthStore(store)
 
-	entryListener, err := net.Listen("tcp", "127.0.0.1:0")
+	agentListener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		t.Fatalf("failed to listen entry: %v", err)
+		t.Fatalf("failed to listen agent: %v", err)
 	}
-	defer entryListener.Close()
+	defer agentListener.Close()
 
-	go srv.ServeEntry(ctx, entryListener)
+	go srv.ServeAgent(ctx, agentListener)
 
 	// Create echo target listener
 	echoListener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -144,7 +144,7 @@ func TestConnectClient_LocalPortMode(t *testing.T) {
 	}
 	defer localListener.Close()
 
-	client := connect.NewClient(entryListener.Addr().String(), userToken, "", "")
+	client := connect.NewClient(agentListener.Addr().String(), userToken, "", "")
 
 	go func() {
 		_ = client.ServeListener(ctx, localListener)
@@ -210,12 +210,12 @@ func TestServeRW_ServerClosesReturns(t *testing.T) {
 	// Server (no auth, direct yamux pipe)
 	srv := server.NewServer(15 * time.Second)
 
-	entryLn, err := net.Listen("tcp", "127.0.0.1:0")
+	agentLn, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		t.Fatalf("listen entry: %v", err)
+		t.Fatalf("listen agent: %v", err)
 	}
-	defer entryLn.Close()
-	go srv.ServeEntry(ctx, entryLn)
+	defer agentLn.Close()
+	go srv.ServeAgent(ctx, agentLn)
 
 	// Agent side: pipe-based yamux
 	pipeLn, err := net.Listen("tcp", "127.0.0.1:0")
@@ -280,7 +280,7 @@ func TestServeRW_ServerClosesReturns(t *testing.T) {
 		t.Fatalf("pipe stdout: %v", err)
 	}
 
-	client := connect.NewClient(entryLn.Addr().String(), "", "", "")
+	client := connect.NewClient(agentLn.Addr().String(), "", "", "")
 	done := make(chan error, 1)
 	go func() {
 		done <- client.ServeRW(ctx, stdinR, stdoutW)
@@ -341,7 +341,7 @@ func TestServeRW_HandshakeFailureWritesToWriter(t *testing.T) {
 	if !strings.Contains(output, "ssetunnel:") {
 		t.Errorf("expected friendly error in stdout, got: %q", output)
 	}
-	if !strings.Contains(output, "dial entry") {
+	if !strings.Contains(output, "dial agent") {
 		t.Errorf("expected dial error detail in stdout, got: %q", output)
 	}
 }

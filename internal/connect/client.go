@@ -23,15 +23,15 @@ var bufferPool = sync.Pool{
 }
 
 type Client struct {
-	serverEntryAddr string
-	token           string
-	agentID         string // agent routing key (empty = first-match)
-	target          string // dynamic target address (empty = no dynamic target)
+	agentAddr string
+	token     string
+	agentID   string // agent routing key (empty = first-match)
+	target    string // dynamic target address (empty = no dynamic target)
 }
 
-func NewClient(serverEntryAddr, token, agentID, target string) *Client {
+func NewClient(agentAddr, token, agentID, target string) *Client {
 	return &Client{
-		serverEntryAddr: serverEntryAddr,
+		agentAddr: agentAddr,
 		token:           token,
 		agentID:         agentID,
 		target:          target,
@@ -71,7 +71,7 @@ func (c *Client) ServeStdio(ctx context.Context) error {
 	return c.ServeRW(ctx, os.Stdin, os.Stdout)
 }
 
-// ServeRW connects to the entry server and copies bidirectionally between
+// ServeRW connects to the agent server and copies bidirectionally between
 // the provided reader/writer and the server connection. When the server
 // side closes (EOF on read), the connection is torn down immediately so
 // that the writer's consumer (e.g. an SSH client reading from a pipe)
@@ -166,9 +166,9 @@ func clientBackoff() *backoff.ExponentialBackOff {
 
 func (c *Client) dialAndHandshake(ctx context.Context) (net.Conn, error) {
 	d := net.Dialer{Timeout: 10 * time.Second}
-	conn, err := d.DialContext(ctx, "tcp", c.serverEntryAddr)
+	conn, err := d.DialContext(ctx, "tcp", c.agentAddr)
 	if err != nil {
-		return nil, fmt.Errorf("dial entry %s: %w", c.serverEntryAddr, err)
+		return nil, fmt.Errorf("dial agent %s: %w", c.agentAddr, err)
 	}
 
 	if c.token != "" {

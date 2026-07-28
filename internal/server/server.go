@@ -25,7 +25,7 @@ var bufferPool = sync.Pool{
 }
 
 // Server is the public side of the tunnel: the HTTP endpoints plus the
-// TCP entry listener users connect to.
+// TCP agent listener users connect to.
 type Server struct {
 	// Reg is the live session registry (exported for tests and the console).
 	Reg *Registry
@@ -108,8 +108,8 @@ func (s *Server) NewHTTPServer(addr string) *http.Server {
 	}
 }
 
-// ServeEntry accepts user TCP conns until ctx is done.
-func (s *Server) ServeEntry(ctx context.Context, ln net.Listener) error {
+// ServeAgent accepts user TCP conns until ctx is done.
+func (s *Server) ServeAgent(ctx context.Context, ln net.Listener) error {
 	go func() {
 		<-ctx.Done()
 		ln.Close()
@@ -120,35 +120,35 @@ func (s *Server) ServeEntry(ctx context.Context, ln net.Listener) error {
 			if ctx.Err() != nil {
 				return nil
 			}
-			return fmt.Errorf("accept entry conn: %w", err)
+			return fmt.Errorf("accept agent conn: %w", err)
 		}
-		go s.proxyEntry(c)
+		go s.proxyAgent(c)
 	}
 }
 
-// entryRequest holds the parsed fields from the entry handshake line.
-type entryRequest struct {
+// agentRequest holds the parsed fields from the agent handshake line.
+type agentRequest struct {
 	token   string // bearer token (always present)
 	agentID string // agent routing key (empty = first-match)
 	target  string // dynamic target address (empty = no dynamic target)
 }
 
-// proxyEntry opens a yamux stream on the agent's session and copies bidirectionally.
+// proxyAgent opens a yamux stream on the agent's session and copies bidirectionally.
 // It handles agent ID routing, target validation, and target header writing.
-func (s *Server) proxyEntry(c net.Conn) {
-	var req *entryRequest
+func (s *Server) proxyAgent(c net.Conn) {
+	var req *agentRequest
 	if s.store != nil {
 		// Auth mode: read TOKEN [agent_id [target]]\n handshake.
-		req = s.parseEntryHandshake(c)
+		req = s.parseAgentHandshake(c)
 		if req == nil {
 			return // handshake failed, connection already closed
 		}
-		if !s.validateEntryAuth(c, req.token) {
+		if !s.validateAgentAuth(c, req.token) {
 			return
 		}
 	} else {
 		// No-auth mode: backward compat — no handshake, data flows directly.
-		req = &entryRequest{}
+		req = &agentRequest{}
 	}
 
 	// Find the target agent session (before sending OK so errors are reported
@@ -158,7 +158,7 @@ func (s *Server) proxyEntry(c net.Conn) {
 	if req.agentID != "" {
 		ms, sess = s.findYamuxByAgentID(req.agentID)
 		if ms == nil || ms.IsClosed() {
-			log.Printf("server: entry conn from %s: agent %q not found", c.RemoteAddr(), req.agentID)
+			log.Printf("server: agent conn from %s: agent %q not found", c.RemoteAddr(), req.agentID)
 			fmt.Fprintf(c, "ERR agent %q not connected\n", req.agentID) //nolint:errcheck
 			c.Close()
 			return
@@ -166,7 +166,7 @@ func (s *Server) proxyEntry(c net.Conn) {
 	} else {
 		ms = s.findYamux()
 		if ms == nil || ms.IsClosed() {
-			log.Printf("server: entry conn from %s: no active session", c.RemoteAddr())
+			log.Printf("server: agent conn from %s: no active session", c.RemoteAddr())
 			fmt.Fprintf(c, "ERR no active agent session\n") //nolint:errcheck
 			c.Close()
 			return
@@ -228,7 +228,7 @@ func (s *Server) proxyEntry(c net.Conn) {
 		_, _ = io.CopyBuffer(stream, c, *buf)
 		// Close the yamux stream to signal EOF to the agent.
 		// yamux has no half-close, so this kills both directions —
-		// the stream→entry copy will get an error and exit.
+		// the stream→agent copy will get an error and exit.
 		stream.Close()
 	}()
 	go func() {
@@ -236,7 +236,7 @@ func (s *Server) proxyEntry(c net.Conn) {
 		buf := bufferPool.Get().(*[]byte)
 		defer bufferPool.Put(buf)
 		_, _ = io.CopyBuffer(c, stream, *buf)
-		// Half-close the TCP write side to signal EOF to the entry client.
+		// Half-close the TCP write side to signal EOF to the agent client.
 		if cw, ok := c.(interface{ CloseWrite() error }); ok {
 			_ = cw.CloseWrite()
 		} else {
@@ -248,14 +248,14 @@ func (s *Server) proxyEntry(c net.Conn) {
 	c.Close()
 }
 
-// parseEntryHandshake reads the first line from c and parses it as
+// parseAgentHandshake reads the first line from c and parses it as
 // TOKEN [agent_id [target]]\n. Returns nil on failure (connection closed).
-func (s *Server) parseEntryHandshake(c net.Conn) *entryRequest {
+func (s *Server) parseAgentHandshake(c net.Conn) *agentRequest {
 	c.SetReadDeadline(time.Now().Add(5 * time.Second))
 	reader := bufio.NewReader(c)
 	line, err := reader.ReadString('\n')
 	if err != nil {
-		log.Printf("server: entry handshake failed from %s: %v", c.RemoteAddr(), err)
+		log.Printf("server: agent handshake failed from %s: %v", c.RemoteAddr(), err)
 		fmt.Fprintf(c, "ERR unauthorized\n") //nolint:errcheck
 		c.Close()
 		return nil
@@ -265,7 +265,7 @@ func (s *Server) parseEntryHandshake(c net.Conn) *entryRequest {
 	line = strings.TrimSpace(line)
 	parts := strings.SplitN(line, " ", 3)
 
-	req := &entryRequest{token: parts[0]}
+	req := &agentRequest{token: parts[0]}
 	if len(parts) >= 2 {
 		req.agentID = parts[1]
 	}
@@ -283,15 +283,15 @@ func (s *Server) parseEntryHandshake(c net.Conn) *entryRequest {
 	return req
 }
 
-// validateEntryAuth checks the token against the auth store with a bounded timeout.
-func (s *Server) validateEntryAuth(c net.Conn, token string) bool {
+// validateAgentAuth checks the token against the auth store with a bounded timeout.
+func (s *Server) validateAgentAuth(c net.Conn, token string) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	sessInfo, err := s.store.ValidateUserSession(ctx, token)
 	if err == nil && auth.UserHasPermission(sessInfo.Role, sessInfo.PermConnect, sessInfo.PermAgent, auth.PermConnect) {
 		return true
 	}
-	log.Printf("server: entry handshake rejected invalid token from %s", c.RemoteAddr())
+	log.Printf("server: agent handshake rejected invalid token from %s", c.RemoteAddr())
 	fmt.Fprintf(c, "ERR unauthorized\n") //nolint:errcheck
 	c.Close()
 	return false

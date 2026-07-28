@@ -77,7 +77,7 @@ func main() {
 func runServer(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("server", flag.ContinueOnError)
 	listen := fs.String("listen", ":8080", "HTTP listen address for tunnel endpoints")
-	entry := fs.String("entry", ":9090", "TCP entry listen address for users")
+	agentAddr := fs.String("agent", ":9090", "TCP agent listen address for user connections")
 	consoleListen := fs.String("console-listen", ":8081", "HTTP listen address for admin console SPA")
 	heartbeat := fs.Duration("heartbeat", 15*time.Second, "SSE heartbeat interval")
 	dbURL := fs.String("db-url", os.Getenv("DATABASE_URL"), "PostgreSQL DB connection URL (default uses testcontainer if empty)")
@@ -90,11 +90,11 @@ func runServer(ctx context.Context, args []string) error {
 
 	srv := server.NewServer(*heartbeat)
 
-	// Open the entry listener eagerly so address-in-use errors surface
+	// Open the agent listener eagerly so address-in-use errors surface
 	// immediately instead of after other resources are allocated.
-	entryLn, err := net.Listen("tcp", *entry)
+	agentLn, err := net.Listen("tcp", *agentAddr)
 	if err != nil {
-		return fmt.Errorf("listen entry %s: %w", *entry, err)
+		return fmt.Errorf("listen agent %s: %w", *agentAddr, err)
 	}
 
 	var store *auth.Store
@@ -110,7 +110,7 @@ func runServer(ctx context.Context, args []string) error {
 		}
 		pool, err = orcapostgres.OpenPool(ctx, dbcfg, orcapostgres.NewMigrator(migrations.FS, nil))
 		if err != nil {
-			entryLn.Close()
+			agentLn.Close()
 			return fmt.Errorf("open postgres pool: %w", err)
 		}
 		store = auth.NewStore(pool)
@@ -118,7 +118,7 @@ func runServer(ctx context.Context, args []string) error {
 
 		// Seed an admin user on first startup so the console is accessible.
 		if adminPW, err := store.EnsureAdminUser(ctx); err != nil {
-			entryLn.Close()
+			agentLn.Close()
 			if consoleLn != nil {
 				consoleLn.Close()
 			}
@@ -131,7 +131,7 @@ func runServer(ctx context.Context, args []string) error {
 		if *consoleListen != "" {
 			consoleLn, err = net.Listen("tcp", *consoleListen)
 			if err != nil {
-				entryLn.Close()
+				agentLn.Close()
 				return fmt.Errorf("listen console %s: %w", *consoleListen, err)
 			}
 		}
@@ -141,7 +141,7 @@ func runServer(ctx context.Context, args []string) error {
 	// before we start serving on the other listeners.
 	httpLn, err := net.Listen("tcp", *listen)
 	if err != nil {
-		entryLn.Close()
+		agentLn.Close()
 		if consoleLn != nil {
 			consoleLn.Close()
 		}
@@ -150,8 +150,8 @@ func runServer(ctx context.Context, args []string) error {
 
 	// All listeners are open; start serving.
 	go func() {
-		if err := srv.ServeEntry(ctx, entryLn); err != nil {
-			log.Printf("server: entry listener: %v", err)
+		if err := srv.ServeAgent(ctx, agentLn); err != nil {
+			log.Printf("server: agent listener: %v", err)
 		}
 	}()
 
@@ -183,7 +183,7 @@ func runServer(ctx context.Context, args []string) error {
 	}()
 
 	log.Printf("server: ssetunnel %s", BuildVersion())
-	log.Printf("server: http %s, entry %s", *listen, *entry)
+	log.Printf("server: http %s, agent %s", *listen, *agentAddr)
 	if err := httpSrv.Serve(httpLn); !errors.Is(err, http.ErrServerClosed) {
 		return fmt.Errorf("serve http: %w", err)
 	}
@@ -245,7 +245,7 @@ func runAgent(ctx context.Context, args []string) error {
 
 func runConnect(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("connect", flag.ContinueOnError)
-	serverEntry := fs.String("server-entry", "127.0.0.1:9090", "tunnel server entry TCP address")
+	serverAgent := fs.String("server-agent", "127.0.0.1:9090", "tunnel server agent TCP address")
 	agentID := fs.String("agent", "", "agent identifier to connect to (e.g. mydevbox)")
 	target := fs.String("target", "", "target address on the agent machine (e.g. 127.0.0.1:22)")
 	local := fs.String("local", "", "local listen TCP address (e.g. 127.0.0.1:3306) or '-' for Stdio mode")
@@ -265,10 +265,10 @@ func runConnect(ctx context.Context, args []string) error {
 		log.Printf("connect: using session from ~/.ssetunnel/session")
 	}
 
-	client := connect.NewClient(*serverEntry, sessToken, *agentID, *target)
+	client := connect.NewClient(*serverAgent, sessToken, *agentID, *target)
 
 	if *local == "-" {
-		log.Printf("connect: running in Stdio mode connecting to %s (agent=%s, target=%s)", *serverEntry, *agentID, *target)
+		log.Printf("connect: running in Stdio mode connecting to %s (agent=%s, target=%s)", *serverAgent, *agentID, *target)
 		return client.ServeStdio(ctx)
 	}
 
@@ -276,7 +276,7 @@ func runConnect(ctx context.Context, args []string) error {
 	if err != nil {
 		return fmt.Errorf("listen local %s: %w", *local, err)
 	}
-	log.Printf("connect: listening on local port %s -> entry %s (agent=%s, target=%s)", *local, *serverEntry, *agentID, *target)
+	log.Printf("connect: listening on local port %s -> agent %s (agent=%s, target=%s)", *local, *serverAgent, *agentID, *target)
 	return client.ServeListener(ctx, ln)
 }
 

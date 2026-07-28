@@ -5,7 +5,7 @@ type Permission string
 
 const (
 	PermAgent   Permission = "agent"   // register and maintain an agent tunnel
-	PermConnect Permission = "connect" // connect to an agent via entry TCP
+	PermConnect Permission = "connect" // connect to an agent via agent TCP
 	PermAdmin   Permission = "admin"   // manage users, tokens, and configuration
 )
 

@@ -56,17 +56,17 @@ func TestHTTPServer_IdleTimeoutStability(t *testing.T) {
 		}
 	}()
 
-	// Entry listener.
-	entryLn, err := net.Listen("tcp", "127.0.0.1:0")
+	// Agent listener.
+	agentLn, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		t.Fatalf("listen entry: %v", err)
+		t.Fatalf("listen agent: %v", err)
 	}
-	defer entryLn.Close()
-	entryAddr := entryLn.Addr().String()
+	defer agentLn.Close()
+	agentAddr := agentLn.Addr().String()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go srv.ServeEntry(ctx, entryLn)
+	go srv.ServeAgent(ctx, agentLn)
 
 	// Connect agent.
 	ag := &agent.Agent{
@@ -91,7 +91,7 @@ func TestHTTPServer_IdleTimeoutStability(t *testing.T) {
 	}
 
 	// Verify the tunnel works with a round-trip.
-	doEntryRoundTrip(t, entryAddr, []byte("before idle"))
+	doAgentRoundTrip(t, agentAddr, []byte("before idle"))
 
 	// Wait well past the idle timeout (500ms). The agent's yamux
 	// keepalive fires every 30s, so between keepalives the POST
@@ -108,7 +108,7 @@ func TestHTTPServer_IdleTimeoutStability(t *testing.T) {
 	}
 
 	// The tunnel must still work.
-	doEntryRoundTrip(t, entryAddr, []byte("after idle"))
+	doAgentRoundTrip(t, agentAddr, []byte("after idle"))
 
 	// Wait again past the idle timeout to ensure stability.
 	time.Sleep(2 * time.Second)
@@ -117,15 +117,15 @@ func TestHTTPServer_IdleTimeoutStability(t *testing.T) {
 	if len(ids) == 0 || ids[0] != sessID {
 		t.Fatalf("session unstable across idle periods: was %s, now %v", sessID, ids)
 	}
-	doEntryRoundTrip(t, entryAddr, []byte("still working"))
+	doAgentRoundTrip(t, agentAddr, []byte("still working"))
 }
 
-// doEntryRoundTrip dials the entry listener and verifies a byte-exact echo.
-func doEntryRoundTrip(t *testing.T, entry string, data []byte) {
+// doAgentRoundTrip dials the agent listener and verifies a byte-exact echo.
+func doAgentRoundTrip(t *testing.T, agent string, data []byte) {
 	t.Helper()
-	c, err := net.Dial("tcp", entry)
+	c, err := net.Dial("tcp", agent)
 	if err != nil {
-		t.Fatalf("dial entry: %v", err)
+		t.Fatalf("dial agent: %v", err)
 	}
 	defer c.Close()
 	c.SetDeadline(time.Now().Add(10 * time.Second))

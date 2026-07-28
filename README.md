@@ -25,12 +25,12 @@
 └─────────────────┘                                    └─────────────────┘
 ```
 
-1. **`ssetunnel server`**: Serves as the public relay point. Receives SSE-down connections and batched HTTP POST requests from agents, provides TCP entry listeners for users, manages PostgreSQL token authentication, and hosts an embedded React Admin Management Console SPA.
+1. **`ssetunnel server`**: Serves as the public relay point. Receives SSE-down connections and batched HTTP POST requests from agents, provides TCP agent listeners for users, manages PostgreSQL token authentication, and hosts an embedded React Admin Management Console SPA.
 2. **`ssetunnel agent`**: Runs inside the restricted network. Connects outbound to the public server via SSE + HTTP POST, negotiates stream window parameters (`yamux`), and proxies TCP traffic to local target services.
-3. **`ssetunnel connect`**: Client wrapper for users/CLI applications. Exposes a local TCP port or Stdio interface (`--local -`), performs token handshake with the server's TCP entry listener, and transparently forwards TCP streams.
+3. **`ssetunnel connect`**: Client wrapper for users/CLI applications. Exposes a local TCP port or Stdio interface (`--local -`), performs token handshake with the server's TCP agent listener, and transparently forwards TCP streams.
 4. **`ssetunnel probe`**: Diagnostic tool to measure path capabilities (POST body ceilings, response latency, throttling) between restricted network environments and the server.
 
-> **Multi-user multiplexing**: A single agent tunnel supports multiple concurrent user connections simultaneously. Each user gets an independent yamux stream over the shared agent tunnel, and the agent opens a separate TCP connection to the target service for each stream. No additional agents or tunnels are needed — just point more users at the same entry listener.
+> **Multi-user multiplexing**: A single agent tunnel supports multiple concurrent user connections simultaneously. Each user gets an independent yamux stream over the shared agent tunnel, and the agent opens a separate TCP connection to the target service for each stream. No additional agents or tunnels are needed — just point more users at the same agent listener.
 
 ---
 
@@ -53,7 +53,7 @@ go build -o ssetunnel ./cmd/ssetunnel
 
 **Start Server** (dev mode, authentication disabled):
 ```bash
-./ssetunnel server --listen :8080 --entry :9090 --console-listen :8081 --disable-auth
+./ssetunnel server --listen :8080 --agent :9090 --console-listen :8081 --disable-auth
 ```
 
 **Run Agent** (forwarding to a local web server at `127.0.0.1:3000`):
@@ -63,7 +63,7 @@ go build -o ssetunnel ./cmd/ssetunnel
 
 **Connect Client Wrapper**:
 ```bash
-./ssetunnel connect --server-entry 127.0.0.1:9090 --local 127.0.0.1:8000
+./ssetunnel connect --server-agent 127.0.0.1:9090 --local 127.0.0.1:8000
 ```
 
 Now accessing `http://127.0.0.1:8000` routes directly to the private target at `127.0.0.1:3000`!
@@ -76,7 +76,7 @@ Now accessing `http://127.0.0.1:8000` routes directly to the private target at `
 
 ### `ssetunnel server`
 
-Runs the public tunnel relay server, TCP entry listener, and embedded Admin Management Console.
+Runs the public tunnel relay server, TCP agent listener, and embedded Admin Management Console.
 
 ```bash
 ssetunnel server [flags]
@@ -85,7 +85,7 @@ ssetunnel server [flags]
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--listen` | `:8080` | HTTP listen address for agent tunnel endpoints (`/events`, `/up`) |
-| `--entry` | `:9090` | TCP entry listen address for user connections |
+| `--agent` | `:9090` | TCP agent listen address for user connections |
 | `--console-listen` | `:8081` | HTTP listen address for embedded Admin Console SPA & Management API |
 | `--heartbeat` | `15s` | SSE heartbeat interval |
 | `--db-url` | `DATABASE_URL` or `postgres:tc:` | PostgreSQL database connection string (defaults to TestContainer if empty) |
@@ -117,15 +117,15 @@ Uses session token from `~/.ssetunnel/session` (created by `ssetunnel login`) if
 
 ### `ssetunnel connect`
 
-User-side client wrapper that injects authentication token handshakes and bridges local TCP/Stdio to the server entry listener.
+User-side client wrapper that injects authentication token handshakes and bridges local TCP/Stdio to the server agent listener.
 
 ```bash
-ssetunnel connect --server-entry <TCP_ADDR> --local <LISTEN_ADDR> [--agent <ID>] [--target <ADDR>] [flags]
+ssetunnel connect --server-agent <TCP_ADDR> --local <LISTEN_ADDR> [--agent <ID>] [--target <ADDR>] [flags]
 ```
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--server-entry` | `127.0.0.1:9090` | Tunnel server entry TCP address |
+| `--server-agent` | `127.0.0.1:9090` | Tunnel server agent TCP address |
 | `--agent` | *(empty)* | Agent identifier to route to (for multi-agent setups) |
 | `--target` | *(empty)* | Target address on the agent (for dynamic target mode) |
 | `--local` | *(Required)* | Local TCP listen address (e.g. `127.0.0.1:3306`) or `-` for Stdio mode |
@@ -136,7 +136,7 @@ Uses session token from `~/.ssetunnel/session` (created by `ssetunnel login`) if
 ```bash
 # In ~/.ssh/config:
 Host private-server
-    ProxyCommand ssetunnel connect --server-entry tunnel.example.com:9090 --agent dev --target 127.0.0.1:22 --local -
+    ProxyCommand ssetunnel connect --server-agent tunnel.example.com:9090 --agent dev --target 127.0.0.1:22 --local -
 ```
 
 ---
@@ -200,7 +200,7 @@ ssetunnel version
 │   ├── consoleserver/      # Consolidated SPA + API HTTP server
 │   ├── mux/                # Yamux session wrapper
 │   ├── probe/              # Network path capability probe
-│   ├── server/             # Server session registry and TCP entry listener
+│   ├── server/             # Server session registry and TCP agent listener
 │   └── transport/          # SSE-down and batched-POST-up transport
 ├── migrations/             # Atlas-generated SQL migration files
 ├── schema.hcl              # Atlas PostgreSQL declarative schema definition
@@ -254,7 +254,7 @@ When multiple agents are registered, use `--agent <id>` to route to a specific a
 ./ssetunnel agent --server http://localhost:8080 --id devbox
 
 # User connects to specific agent
-./ssetunnel connect --server-entry 127.0.0.1:9090 --agent devbox --target 127.0.0.1:22 --local -
+./ssetunnel connect --server-agent 127.0.0.1:9090 --agent devbox --target 127.0.0.1:22 --local -
 ```
 
 **Dynamic target mode**: When the agent runs without `--target`, it reads the target address from each stream's header. This allows one agent to proxy to multiple services:

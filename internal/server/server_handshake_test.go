@@ -15,7 +15,7 @@ import (
 	orcapostgres "github.com/visdomtech/orcacommon/postgres"
 )
 
-func TestEntryListenerHandshake(t *testing.T) {
+func TestAgentListenerHandshake(t *testing.T) {
 	ctx := context.Background()
 
 	dbcfg := orcapostgres.DBConfig{
@@ -51,19 +51,19 @@ func TestEntryListenerHandshake(t *testing.T) {
 	srv := server.NewServerWithRegistry(reg, 15*time.Second)
 	srv.SetAuthStore(store)
 
-	// Listen on ephemeral local port for entry connections
-	entryListener, err := net.Listen("tcp", "127.0.0.1:0")
+	// Listen on ephemeral local port for agent connections
+	agentListener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		t.Fatalf("failed to listen on entry port: %v", err)
+		t.Fatalf("failed to listen on agent port: %v", err)
 	}
-	defer entryListener.Close()
+	defer agentListener.Close()
 
-	go srv.ServeEntry(ctx, entryListener)
+	go srv.ServeAgent(ctx, agentListener)
 
 	// 1. Connect with invalid token -> expect "ERR unauthorized\n"
-	conn, err := net.Dial("tcp", entryListener.Addr().String())
+	conn, err := net.Dial("tcp", agentListener.Addr().String())
 	if err != nil {
-		t.Fatalf("failed to dial entry port: %v", err)
+		t.Fatalf("failed to dial agent port: %v", err)
 	}
 	_, err = fmt.Fprintf(conn, "invalid-token\n")
 	if err != nil {
@@ -81,9 +81,9 @@ func TestEntryListenerHandshake(t *testing.T) {
 	_ = conn.Close()
 
 	// 2. Connect with valid user session but no active agent session -> expect ERR
-	conn2, err := net.Dial("tcp", entryListener.Addr().String())
+	conn2, err := net.Dial("tcp", agentListener.Addr().String())
 	if err != nil {
-		t.Fatalf("failed to dial entry port: %v", err)
+		t.Fatalf("failed to dial agent port: %v", err)
 	}
 	defer conn2.Close()
 
@@ -118,9 +118,9 @@ func TestEntryListenerHandshake(t *testing.T) {
 	}
 	agentSess.SetYamuxSession(yamuxServer)
 
-	conn3, err := net.Dial("tcp", entryListener.Addr().String())
+	conn3, err := net.Dial("tcp", agentListener.Addr().String())
 	if err != nil {
-		t.Fatalf("failed to dial entry port: %v", err)
+		t.Fatalf("failed to dial agent port: %v", err)
 	}
 	defer conn3.Close()
 
