@@ -115,6 +115,16 @@ func AdminSessionMiddleware(store *auth.Store) func(http.Handler) http.Handler {
 				}
 			}
 
+			// 3. Check user session (Bearer token from user-login)
+			if tokenStr != "" {
+				sessInfo, err := store.ValidateUserSession(r.Context(), tokenStr)
+				if err == nil && auth.HasPermission(sessInfo.Role, auth.PermAdmin) {
+					ctx := context.WithValue(r.Context(), userSessionKey, sessInfo)
+					next.ServeHTTP(w, r.WithContext(ctx))
+					return
+				}
+			}
+
 			http.Error(w, "Unauthorized: admin session or token required", http.StatusUnauthorized)
 		})
 	}
