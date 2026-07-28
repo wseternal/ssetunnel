@@ -25,7 +25,6 @@ func NewConsoleHandler(ctx context.Context, pool *pgxpool.Pool, store *auth.Stor
 	// SPA catch-all
 	spaCfg := litespaserver.Config{
 		EmbeddedContent: frontend.ConsoleWebRootFs,
-		StaticPaths:     []string{"/assets/**"},
 		CSP: litespaserver.CSPConfig{
 			ScriptSrcs:   litespaserver.ScriptSrcAll,
 			StyleSrcs:    litespaserver.StyleSrcAll,

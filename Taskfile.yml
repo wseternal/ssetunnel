@@ -87,22 +87,22 @@ tasks:
   # ── Frontend ────────────────────────────────────────────────────────
 
   fe:install:
-    desc: Install frontend npm dependencies
+    desc: Install frontend dependencies
     dir: "{{.FRONTEND_DIR}}"
     cmds:
-      - npm install
+      - bun install
 
   fe:build:
     desc: Build frontend SPA
     dir: "{{.FRONTEND_DIR}}"
     cmds:
-      - npm run build
+      - bun run build
 
   fe:dev:
     desc: Run frontend dev server
     dir: "{{.FRONTEND_DIR}}"
     cmds:
-      - npm run dev
+      - bun run dev
 
   fe:clean:
     desc: Clean frontend build output
