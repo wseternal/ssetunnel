@@ -24,9 +24,9 @@ func NewConsoleHandler(ctx context.Context, pool *pgxpool.Pool, store *auth.Stor
 		http.Redirect(w, r, "/console/", http.StatusMovedPermanently)
 	})
 
-	// API routes
+	// API routes — strip /console so the inner router sees /api/v1/...
 	apiHandler := consoleapi.NewRouter(store, reg)
-	r.PathPrefix("/console/api/v1/").Handler(apiHandler)
+	r.PathPrefix("/console/api/v1/").Handler(http.StripPrefix("/console", apiHandler))
 
 	// SPA catch-all
 	spaCfg := litespaserver.Config{
