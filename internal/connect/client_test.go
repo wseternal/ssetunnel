@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"testing"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 	"github.com/wseternal/ssetunnel/internal/server"
 	"github.com/wseternal/ssetunnel/migrations"
 	orcapostgres "github.com/visdomtech/orcacommon/postgres"
+	"bytes"
 )
 
 func TestConnectClient_LocalPortMode(t *testing.T) {
@@ -160,4 +162,143 @@ func TestConnectClient_LocalPortMode(t *testing.T) {
 	if echoResp != testData {
 		t.Errorf("expected echo %q, got %q", testData, echoResp)
 	}
+}
+
+// TestServeRW_ServerClosesReturns verifies that ServeRW returns promptly
+// when the remote target closes its connection, even if the local reader
+// (stdin) is still open. This is the SSH ProxyCommand deadlock scenario:
+// sshd sends the keyboard-interactive prompt and closes, but the SSH client
+// is waiting for the prompt and won't close stdin. ServeRW must detect the
+// server-side EOF and exit so the SSH client sees EOF on the pipe.
+func TestServeRW_ServerClosesReturns(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Target: sends a greeting then closes (simulating sshd sending a
+	// keyboard-interactive prompt and then closing).
+	targetLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen target: %v", err)
+	}
+	defer targetLn.Close()
+	go func() {
+		for {
+			c, err := targetLn.Accept()
+			if err != nil {
+				return
+			}
+			go func(conn net.Conn) {
+				defer conn.Close()
+				conn.Write([]byte("Password: "))
+				// Target closes immediately after sending,
+				// simulating sshd behaviour on macOS without PAM.
+			}(c)
+		}
+	}()
+
+	// Server (no auth, direct yamux pipe)
+	srv := server.NewServer(15 * time.Second)
+
+	entryLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen entry: %v", err)
+	}
+	defer entryLn.Close()
+	go srv.ServeEntry(ctx, entryLn)
+
+	// Agent side: pipe-based yamux
+	pipeLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen pipe: %v", err)
+	}
+	defer pipeLn.Close()
+
+	agentConnCh := make(chan net.Conn, 1)
+	go func() {
+		c, err := pipeLn.Accept()
+		if err == nil {
+			agentConnCh <- c
+		}
+	}()
+
+	srvConn, err := net.Dial("tcp", pipeLn.Addr().String())
+	if err != nil {
+		t.Fatalf("dial pipe: %v", err)
+	}
+	defer srvConn.Close()
+
+	agentConn := <-agentConnCh
+	defer agentConn.Close()
+
+	agentYamux, err := mux.Client(agentConn)
+	if err != nil {
+		t.Fatalf("agent yamux: %v", err)
+	}
+
+	// Agent: accept streams and proxy to target
+	go func() {
+		for {
+			stream, err := agentYamux.AcceptStream()
+			if err != nil {
+				return
+			}
+			go func(st net.Conn) {
+				tgt, err := net.Dial("tcp", targetLn.Addr().String())
+				if err != nil {
+					st.Close()
+					return
+				}
+				go func() { io.Copy(tgt, st); tgt.Close() }()
+				go func() { io.Copy(st, tgt); st.Close() }()
+			}(stream)
+		}
+	}()
+
+	srv.AttachConn(srvConn)
+
+	// Wait for session
+	time.Sleep(200 * time.Millisecond)
+
+	// Connect with ServeRW using pipes (simulating SSH ProxyCommand).
+	stdinR, stdinW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe stdin: %v", err)
+	}
+	stdoutR, stdoutW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe stdout: %v", err)
+	}
+
+	client := connect.NewClient(entryLn.Addr().String(), "")
+	done := make(chan error, 1)
+	go func() {
+		done <- client.ServeRW(ctx, stdinR, stdoutW)
+	}()
+
+	// Read the greeting from the target (simulating SSH client reading
+	// the keyboard-interactive prompt).
+	buf := make([]byte, 1024)
+	stdoutR.SetReadDeadline(time.Now().Add(5 * time.Second))
+	n, err := stdoutR.Read(buf)
+	if err != nil {
+		t.Fatalf("read greeting: %v", err)
+	}
+	if !bytes.Contains(buf[:n], []byte("Password: ")) {
+		t.Fatalf("unexpected greeting: %q", buf[:n])
+	}
+
+	// Now stdin is still open (SSH client waiting for user input).
+	// ServeRW should return because the server side closed.
+	select {
+	case err := <-done:
+		// err may be non-nil (connection reset from Close) — that's fine.
+		_ = err
+	case <-time.After(5 * time.Second):
+		stdinW.Close()
+		t.Fatal("ServeRW deadlocked: did not return after server-side close")
+	}
+
+	// Cleanup
+	stdinW.Close()
+	stdoutR.Close()
 }
