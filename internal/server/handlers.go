@@ -101,6 +101,12 @@ func (h *Handler) handleEvents(w http.ResponseWriter, r *http.Request) {
 	if r.Header.Get("X-SSET-Target") == "true" {
 		sess.SetWantTarget(true)
 	}
+	// Capture user ownership from auth context for console session filtering.
+	if sessInfo := UserSessionFromContext(r); sessInfo != nil {
+		sess.SetUserID(sessInfo.UserID)
+	} else if tokInfo := TokenInfoFromContext(r); tokInfo != nil && tokInfo.UserID != nil {
+		sess.SetUserID(*tokInfo.UserID)
+	}
 	h.reg.Replace(sess)
 	defer h.reg.Remove(id, sess) // deregister on death; no-op if replaced
 	if h.OnSession != nil {

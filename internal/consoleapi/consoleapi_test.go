@@ -334,6 +334,111 @@ func TestLogin_RecoveryCode(t *testing.T) {
 	}
 }
 
+func TestNonAdminSessionFiltering(t *testing.T) {
+	ctx := context.Background()
+
+	dbcfg := orcapostgres.DBConfig{DatabaseURLTemplate: "postgres:tc:"}
+	pool, err := orcapostgres.OpenPool(ctx, dbcfg, orcapostgres.NewMigrator(migrations.FS, nil))
+	if err != nil {
+		t.Fatalf("failed to open pool: %v", err)
+	}
+	store := auth.NewStore(pool)
+	reg := server.NewRegistry()
+	router := consoleapi.NewRouter(store, reg)
+
+	// Create admin user + session.
+	adminHash, _ := auth.HashPassword("adminpass123")
+	adminUser, _ := store.CreateUser(ctx, "nonadmin_test_admin", adminHash, "admin", true, true)
+	adminToken, _ := auth.GenerateToken()
+	_ = store.CreateUserSession(ctx, adminUser.ID, adminToken, 24*time.Hour)
+
+	// Create regular user + session.
+	userHash, _ := auth.HashPassword("userpass12345")
+	regUser, _ := store.CreateUser(ctx, "nonadmin_test_user", userHash, "user", true, true)
+	userToken, _ := auth.GenerateToken()
+	_ = store.CreateUserSession(ctx, regUser.ID, userToken, 24*time.Hour)
+
+	// Create sessions in the registry with different user attributions.
+	adminSess := server.NewSession("sess-admin-1")
+	adminSess.SetUserID(adminUser.ID)
+	reg.Replace(adminSess)
+
+	userSess := server.NewSession("sess-user-1")
+	userSess.SetUserID(regUser.ID)
+	reg.Replace(userSess)
+
+	unattrSess := server.NewSession("sess-unattr")
+	// userID remains 0 (unattributed)
+	reg.Replace(unattrSess)
+
+	// Admin sees ALL sessions.
+	req := httptest.NewRequest("GET", "/api/v1/sessions", nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("admin: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var adminSessions []map[string]interface{}
+	_ = json.Unmarshal(rec.Body.Bytes(), &adminSessions)
+	if len(adminSessions) != 3 {
+		t.Errorf("admin: expected 3 sessions, got %d", len(adminSessions))
+	}
+
+	// Regular user sees ONLY their own sessions.
+	req = httptest.NewRequest("GET", "/api/v1/sessions", nil)
+	req.Header.Set("Authorization", "Bearer "+userToken)
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("user: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var userSessions []map[string]interface{}
+	_ = json.Unmarshal(rec.Body.Bytes(), &userSessions)
+	if len(userSessions) != 1 {
+		t.Errorf("user: expected 1 session, got %d", len(userSessions))
+	}
+	if len(userSessions) > 0 && userSessions[0]["id"] != "sess-user-1" {
+		t.Errorf("user: expected sess-user-1, got %v", userSessions[0]["id"])
+	}
+
+	// Regular user can also list agents (read-only, all configs).
+	_, _ = store.CreateAgentConfig(ctx, "test-agent", "test", []string{"*"})
+
+	req = httptest.NewRequest("GET", "/api/v1/agents", nil)
+	req.Header.Set("Authorization", "Bearer "+userToken)
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("user agents: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var userAgents []map[string]interface{}
+	_ = json.Unmarshal(rec.Body.Bytes(), &userAgents)
+	// Should see at least the default config + the one we created.
+	if len(userAgents) < 2 {
+		t.Errorf("user agents: expected >=2 configs, got %d", len(userAgents))
+	}
+
+	// Regular user CANNOT create agents (admin-only).
+	body, _ := json.Marshal(map[string]interface{}{"agent_id": "rogue", "allowed_targets": []string{"*"}})
+	req = httptest.NewRequest("POST", "/api/v1/agents", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+userToken)
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("user POST agents: expected 401, got %d", rec.Code)
+	}
+
+	// Regular user CANNOT access user management.
+	req = httptest.NewRequest("GET", "/api/v1/users", nil)
+	req.Header.Set("Authorization", "Bearer "+userToken)
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("user GET users: expected 401, got %d", rec.Code)
+	}
+}
+
 func TestTOTPSetupFlow(t *testing.T) {
 	router, _, _, token := setupTestEnv(t)
 
