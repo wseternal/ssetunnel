@@ -210,14 +210,14 @@ func TestLoginCheck(t *testing.T) {
 		t.Error("expected totp_required=true for user with TOTP")
 	}
 
-	// Non-existent user should return false.
+	// Non-existent user should return true (anti-enumeration).
 	body2, _ := json.Marshal(map[string]string{"username": "nonexistent"})
 	req = httptest.NewRequest("POST", "/api/v1/user-login-check", bytes.NewReader(body2))
 	rec = httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
-	if resp["totp_required"] {
-		t.Error("expected totp_required=false for non-existent user")
+	if !resp["totp_required"] {
+		t.Error("expected totp_required=true for non-existent user (anti-enumeration)")
 	}
 }
 
@@ -296,7 +296,7 @@ func TestLogin_RecoveryCode(t *testing.T) {
 	codes, _ := auth.GenerateRecoveryCodes(3)
 	digests := make([]string, len(codes))
 	for i, c := range codes {
-		digests[i] = auth.ComputeDigest(c)
+		digests[i] = store.RecoveryCodeDigest(c)
 	}
 	_ = store.SaveRecoveryCodes(ctx, user.ID, digests)
 
@@ -401,5 +401,14 @@ func TestTOTPSetupFlow(t *testing.T) {
 	router.ServeHTTP(rec, req)
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("expected 400 on bad verify code, got %d", rec.Code)
+	}
+
+	// 6. Begin setup again while enrolled should fail (409 Conflict).
+	req = httptest.NewRequest("POST", "/api/v1/totp/begin-setup", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusConflict {
+		t.Errorf("expected 409 on begin-setup while enrolled, got %d", rec.Code)
 	}
 }

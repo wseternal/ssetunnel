@@ -246,7 +246,10 @@ export default function App() {
         const data = await res.json();
         setTotpRequired(data.totp_required ?? false);
       }
-    } catch { /* ignore */ }
+    } catch {
+      // Fail open: show TOTP field on error so user can still provide a code.
+      setTotpRequired(true);
+    }
   };
 
   const handleBeginTOTPSetup = async () => {
