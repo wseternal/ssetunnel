@@ -27,6 +27,10 @@ import {
   DialogContent,
   DialogActions,
   Grid,
+  Select,
+  MenuItem,
+  FormControl,
+  InputLabel,
 } from '@mui/material';
 import DeleteIcon from '@mui/icons-material/Delete';
 import RefreshIcon from '@mui/icons-material/Refresh';
@@ -223,8 +227,8 @@ export default function App() {
             <Box sx={{ borderBottom: 1, borderColor: 'divider', mb: 3 }}>
               <Tabs value={tabIndex} onChange={(_, v) => setTabIndex(v)}>
                 <Tab label="Active Sessions" />
-                <Tab label="Tokens" />
-                <Tab label="Agent Enrollment" />
+                <Tab label="Bearer Tokens" />
+                <Tab label="Enrollment PINs" />
               </Tabs>
             </Box>
 
@@ -316,7 +320,7 @@ export default function App() {
               <Box>
                 <Typography variant="h6" gutterBottom>Enroll Agent with Single-Use PIN</Typography>
                 <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
-                  Generate a 15-minute temporary PIN for agent registration
+                  Generate a 15-minute temporary PIN for one-time agent registration. The PIN is redeemed for a persistent token on first connection.
                 </Typography>
                 <Button variant="contained" onClick={handleEnroll} sx={{ mb: 3 }}>
                   Generate Enrollment PIN
@@ -343,8 +347,20 @@ export default function App() {
 
             {/* Create Token Dialog */}
             <Dialog open={openTokenDialog} onClose={() => setOpenTokenDialog(false)} maxWidth="xs" fullWidth>
-              <DialogTitle>Generate Bearer Token</DialogTitle>
+              <DialogTitle>Generate {newTokenRole.charAt(0).toUpperCase() + newTokenRole.slice(1)} Token</DialogTitle>
               <DialogContent>
+                <FormControl fullWidth margin="normal">
+                  <InputLabel>Role</InputLabel>
+                  <Select
+                    value={newTokenRole}
+                    label="Role"
+                    onChange={(e) => setNewTokenRole(e.target.value)}
+                  >
+                    <MenuItem value="agent">agent</MenuItem>
+                    <MenuItem value="user">user</MenuItem>
+                    <MenuItem value="admin">admin</MenuItem>
+                  </Select>
+                </FormControl>
                 <TextField
                   fullWidth
                   label="Description"

@@ -71,6 +71,25 @@ func (s *Store) VerifyAndUsePIN(ctx context.Context, rawPIN string) (string, err
 	return role, nil
 }
 
+// RedeemPIN atomically consumes a single-use PIN and creates a persistent
+// bearer token with the same role. Returns the raw token (caller must
+// deliver it to the agent) and the role. Fails with ErrInvalidPIN if the
+// PIN is expired, already used, or does not exist.
+func (s *Store) RedeemPIN(ctx context.Context, rawPIN string) (rawToken, role string, err error) {
+	role, err = s.VerifyAndUsePIN(ctx, rawPIN)
+	if err != nil {
+		return "", "", err
+	}
+	rawToken, err = GenerateToken()
+	if err != nil {
+		return "", "", fmt.Errorf("generate token for PIN redemption: %w", err)
+	}
+	if err := s.CreateToken(ctx, rawToken, role, "auto-generated from PIN redemption", nil); err != nil {
+		return "", "", fmt.Errorf("store redeemed token: %w", err)
+	}
+	return rawToken, role, nil
+}
+
 func (s *Store) CreateToken(ctx context.Context, rawToken, role, description string, expiresAt *time.Time) error {
 	digest := ComputeDigest(rawToken)
 

@@ -6,6 +6,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/hashicorp/yamux"
 	"github.com/wseternal/ssetunnel/internal/transport"
 )
 
@@ -42,6 +43,9 @@ type Session struct {
 	createdAt     time.Time
 	bytesSent     atomic.Uint64
 	bytesReceived atomic.Uint64
+
+	yamuxMu   sync.Mutex
+	yamuxSess *yamux.Session // per-session yamux; set by attach after mux.Server
 
 	closeOnce sync.Once
 }
@@ -143,14 +147,33 @@ func (s *Session) Read(b []byte) (int, error) { return s.up.Read(b) }
 // Write queues downstream bytes for the SSE stream.
 func (s *Session) Write(b []byte) (int, error) { return s.down.Write(b) }
 
-// Close tears down the session: readers get io.EOF once buffered bytes
-// drain, writers get io.ErrClosedPipe.
+// Close tears down the session: pipes are closed first, which causes
+// the SSE handler to return and the HTTP response to close — the agent
+// detects this and reconnects. The yamux session shuts itself down via
+// its recv goroutine which detects the pipe closure; we must NOT call
+// ms.Close() here because yamux's Close() calls s.conn.Close() (this
+// Session), causing a deadlock between closeOnce and yamux's shutdownLock.
 func (s *Session) Close() error {
 	s.closeOnce.Do(func() {
 		s.up.Close()
 		s.down.Close()
 	})
 	return nil
+}
+
+// SetYamuxSession attaches a yamux session to this tunnel session.
+func (s *Session) SetYamuxSession(ms *yamux.Session) {
+	s.yamuxMu.Lock()
+	s.yamuxSess = ms
+	s.yamuxMu.Unlock()
+}
+
+// YamuxSession returns the attached yamux session, or nil.
+func (s *Session) YamuxSession() *yamux.Session {
+	s.yamuxMu.Lock()
+	ms := s.yamuxSess
+	s.yamuxMu.Unlock()
+	return ms
 }
 
 // tunnelAddr is a placeholder net.Addr: a tunnel conn has no meaningful

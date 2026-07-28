@@ -23,6 +23,10 @@ func ExtractBearerToken(r *http.Request) string {
 
 // AgentAuthMiddleware protects endpoints requiring agent-role tokens.
 // If store is nil, auth is disabled and requests pass through.
+// When the presented credential is not a known token, the middleware
+// attempts PIN redemption as a fallback; on success the new persistent
+// token is returned via the X-SSET-Token response header so the agent
+// can use it for subsequent requests.
 func AgentAuthMiddleware(store *auth.Store) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -38,12 +42,20 @@ func AgentAuthMiddleware(store *auth.Store) func(http.Handler) http.Handler {
 			}
 
 			tokInfo, err := store.ValidateToken(r.Context(), tokenStr)
-			if err != nil || (tokInfo.Role != "agent" && tokInfo.Role != "admin") {
-				http.Error(w, "Unauthorized: invalid or insufficient permissions", http.StatusUnauthorized)
+			if err == nil && (tokInfo.Role == "agent" || tokInfo.Role == "admin") {
+				next.ServeHTTP(w, r)
 				return
 			}
 
-			next.ServeHTTP(w, r)
+			// Fallback: try single-use PIN redemption.
+			newToken, role, pinErr := store.RedeemPIN(r.Context(), tokenStr)
+			if pinErr == nil && (role == "agent" || role == "admin") {
+				w.Header().Set("X-SSET-Token", newToken)
+				next.ServeHTTP(w, r)
+				return
+			}
+
+			http.Error(w, "Unauthorized: invalid or insufficient permissions", http.StatusUnauthorized)
 		})
 	}
 }
