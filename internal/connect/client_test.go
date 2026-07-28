@@ -143,7 +143,7 @@ func TestConnectClient_LocalPortMode(t *testing.T) {
 	}
 	defer localListener.Close()
 
-	client := connect.NewClient(entryListener.Addr().String(), userToken)
+	client := connect.NewClient(entryListener.Addr().String(), userToken, "", "")
 
 	go func() {
 		_ = client.ServeListener(ctx, localListener)
@@ -279,7 +279,7 @@ func TestServeRW_ServerClosesReturns(t *testing.T) {
 		t.Fatalf("pipe stdout: %v", err)
 	}
 
-	client := connect.NewClient(entryLn.Addr().String(), "")
+	client := connect.NewClient(entryLn.Addr().String(), "", "", "")
 	done := make(chan error, 1)
 	go func() {
 		done <- client.ServeRW(ctx, stdinR, stdoutW)

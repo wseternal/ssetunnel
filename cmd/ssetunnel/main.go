@@ -190,16 +190,14 @@ func runServer(ctx context.Context, args []string) error {
 func runAgent(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("agent", flag.ContinueOnError)
 	serverURL := fs.String("server", "http://127.0.0.1:8080", "tunnel server URL")
-	target := fs.String("target", "", "TCP address to forward streams to, e.g. 127.0.0.1:3000")
+	target := fs.String("target", "", "TCP address to forward streams to (empty = dynamic target mode)")
+	agentID := fs.String("id", "", "agent identifier for routing (e.g. mydevbox)")
 	batchSize := fs.Int("batch-size", 16384, "upstream batch ceiling in bytes (1024..1048576)")
 	concurrency := fs.Int("concurrency", 1, "upstream POST sender depth (1..4)")
 	compress := fs.Bool("compress", false, "negotiate gzip-per-batch upstream encoding")
 
 	if err := fs.Parse(args); err != nil {
 		return err
-	}
-	if *target == "" {
-		return errors.New("--target is required")
 	}
 	batch, conc := clampAgentFlags(*batchSize, *concurrency)
 
@@ -221,12 +219,18 @@ func runAgent(ctx context.Context, args []string) error {
 	}
 
 	log.Printf("agent: ssetunnel %s", BuildVersion())
-	log.Printf("agent: target %s -> server %s (batch-size %d, concurrency %d, compress %v)",
-		*target, *serverURL, batch, conc, *compress)
+	if *target != "" {
+		log.Printf("agent: target %s -> server %s (id=%s, batch-size %d, concurrency %d, compress %v)",
+			*target, *serverURL, *agentID, batch, conc, *compress)
+	} else {
+		log.Printf("agent: dynamic target mode -> server %s (id=%s, batch-size %d, concurrency %d, compress %v)",
+			*serverURL, *agentID, batch, conc, *compress)
+	}
 
 	ag := &agent.Agent{
 		ServerURL:       *serverURL,
 		Target:          *target,
+		AgentID:         *agentID,
 		Token:           sessToken,
 		RequestModifier: reqMod,
 		BatchSize:       batch,
@@ -239,6 +243,8 @@ func runAgent(ctx context.Context, args []string) error {
 func runConnect(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("connect", flag.ContinueOnError)
 	serverEntry := fs.String("server-entry", "127.0.0.1:9090", "tunnel server entry TCP address")
+	agentID := fs.String("agent", "", "agent identifier to connect to (e.g. mydevbox)")
+	target := fs.String("target", "", "target address on the agent machine (e.g. 127.0.0.1:22)")
 	local := fs.String("local", "", "local listen TCP address (e.g. 127.0.0.1:3306) or '-' for Stdio mode")
 
 	if err := fs.Parse(args); err != nil {
@@ -256,10 +262,10 @@ func runConnect(ctx context.Context, args []string) error {
 		log.Printf("connect: using session from ~/.ssetunnel/session")
 	}
 
-	client := connect.NewClient(*serverEntry, sessToken)
+	client := connect.NewClient(*serverEntry, sessToken, *agentID, *target)
 
 	if *local == "-" {
-		log.Printf("connect: running in Stdio mode connecting to %s", *serverEntry)
+		log.Printf("connect: running in Stdio mode connecting to %s (agent=%s, target=%s)", *serverEntry, *agentID, *target)
 		return client.ServeStdio(ctx)
 	}
 
@@ -267,7 +273,7 @@ func runConnect(ctx context.Context, args []string) error {
 	if err != nil {
 		return fmt.Errorf("listen local %s: %w", *local, err)
 	}
-	log.Printf("connect: listening on local port %s -> entry %s", *local, *serverEntry)
+	log.Printf("connect: listening on local port %s -> entry %s (agent=%s, target=%s)", *local, *serverEntry, *agentID, *target)
 	return client.ServeListener(ctx, ln)
 }
 

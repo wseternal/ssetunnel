@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -8,6 +9,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/cenkalti/backoff/v4"
@@ -21,7 +23,8 @@ import (
 // recover from drops automatically).
 type Agent struct {
 	ServerURL  string        // tunnel server base URL
-	Target     string        // TCP address to forward streams to
+	Target     string        // TCP address to forward streams to (empty = dynamic mode)
+	AgentID    string        // human-readable agent identifier (e.g. "mydevbox")
 	Token      string        // Bearer token or single-use PIN for authentication
 	MaxBackoff time.Duration // reconnect cap; 0 → 30 s
 	MaxWait    time.Duration // batcher flush ceiling; 0 → default
@@ -105,14 +108,16 @@ func newAgentBackoff() *backoff.ExponentialBackOff {
 // reconnect with a fresh session ID.
 func (a *Agent) runOnce(ctx context.Context) error {
 	conn, err := transport.DialAgent(ctx, transport.Config{
-		URL:             a.ServerURL,
-		Token:           a.Token,
-		RequestModifier: a.RequestModifier,
-		MaxWait:         a.MaxWait,
-		Client:          a.Client,
-		MaxBatchSize:    a.BatchSize,
-		Concurrency:     a.Concurrency,
-		Compress:        a.Compress,
+		URL:              a.ServerURL,
+		Token:            a.Token,
+		RequestModifier:  a.RequestModifier,
+		MaxWait:          a.MaxWait,
+		Client:           a.Client,
+		MaxBatchSize:     a.BatchSize,
+		Concurrency:      a.Concurrency,
+		Compress:         a.Compress,
+		AgentID:          a.AgentID,
+		WantTargetHeader: a.Target == "", // dynamic mode: read target from stream
 		OnTokenUpgrade: func(newToken string) {
 			a.Token = newToken
 			log.Printf("agent: PIN redeemed, upgraded to persistent token")
@@ -145,14 +150,57 @@ func (a *Agent) runOnce(ctx context.Context) error {
 	}
 }
 
-// proxy forwards one stream to the configured target, bidirectionally.
+// proxy forwards one stream to a target, bidirectionally.
+// In fixed-target mode (a.Target != ""), dials a.Target directly.
+// In dynamic mode (a.Target == ""), reads the target address from the
+// first \n-terminated line of the stream, then dials it.
 func (a *Agent) proxy(stream net.Conn) {
-	target, err := net.DialTimeout("tcp", a.Target, 10*time.Second)
+	target := a.Target
+
+	if target == "" {
+		// Dynamic mode: read target from stream header.
+		reader := bufio.NewReader(stream)
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			log.Printf("agent: read target header: %v", err)
+			stream.Close()
+			return
+		}
+		target = strings.TrimSpace(line)
+		if target == "" || target == "*" {
+			log.Printf("agent: empty or wildcard target header, closing stream")
+			stream.Close()
+			return
+		}
+
+		// Wrap stream to preserve buffered data for the bidirectional copy.
+		// Any bytes the bufio.Reader consumed beyond the \n are prepended
+		// to subsequent reads from the stream.
+		stream = &readerConn{Reader: reader, Conn: stream}
+	}
+
+	conn, err := net.DialTimeout("tcp", target, 10*time.Second)
 	if err != nil {
-		log.Printf("agent: dial target %s: %v", a.Target, err)
+		log.Printf("agent: dial target %s: %v", target, err)
 		stream.Close()
 		return
 	}
-	go func() { io.Copy(target, stream); target.Close() }()
-	go func() { io.Copy(stream, target); stream.Close() }()
+	go func() { io.Copy(conn, stream); conn.Close() }()
+	go func() { io.Copy(stream, conn); stream.Close() }()
+}
+
+// readerConn wraps a bufio.Reader over a net.Conn so that bytes already
+// buffered by the reader are not lost when switching from header parsing
+// to raw io.Copy.
+type readerConn struct {
+	*bufio.Reader
+	net.Conn
+}
+
+func (r *readerConn) Read(b []byte) (int, error) {
+	return r.Reader.Read(b)
+}
+
+func (r *readerConn) Close() error {
+	return r.Conn.Close()
 }

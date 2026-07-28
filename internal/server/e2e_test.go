@@ -374,7 +374,7 @@ func TestE2E_Auth_FullCycle(t *testing.T) {
 	clientCtx, clientCancel := context.WithCancel(ctx)
 	defer clientCancel()
 
-	client := connect.NewClient(authEntry, userSessionToken)
+	client := connect.NewClient(authEntry, userSessionToken, "", "")
 	go client.ServeListener(clientCtx, localLn)
 
 	// 2. Dial the local client wrapper and echo a message.
@@ -446,7 +446,7 @@ func TestE2E_Auth_InvalidTokenRejected(t *testing.T) {
 	}
 	defer ln.Close()
 
-	client := connect.NewClient(authEntry, "invalid-token-should-be-rejected")
+	client := connect.NewClient(authEntry, "invalid-token-should-be-rejected", "", "")
 	err = client.ServeListener(ctx, ln)
 	if err == nil {
 		t.Fatal("expected ServeListener to fail with invalid token, got nil")
@@ -477,7 +477,7 @@ func TestE2E_NoAuth_StdioRoundTrip(t *testing.T) {
 		t.Fatalf("pipe stdout: %v", err)
 	}
 
-	client := connect.NewClient(noAuthEntry, "")
+	client := connect.NewClient(noAuthEntry, "", "", "")
 
 	done := make(chan error, 1)
 	go func() {
