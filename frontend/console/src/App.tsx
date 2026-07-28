@@ -14,6 +14,7 @@ import {
   Paper,
   Chip,
   IconButton,
+  Tooltip,
   Alert,
   Dialog,
   DialogTitle,
@@ -534,14 +535,15 @@ export default function App() {
           </Typography>
           {isLoggedIn && (
             <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
-              <IconButton
-                color="default"
-                size="small"
-                onClick={() => setOpenTOTPDialog(true)}
-                title="Security (TOTP)"
-              >
-                <SecurityIcon />
-              </IconButton>
+              <Tooltip title={totpEnrolled ? 'Two-factor authentication enabled' : 'Two-factor authentication not set up — click to configure'}>
+                <IconButton
+                  color={totpEnrolled ? 'default' : 'warning'}
+                  size="small"
+                  onClick={() => setOpenTOTPDialog(true)}
+                >
+                  <SecurityIcon />
+                </IconButton>
+              </Tooltip>
               <Button color="inherit" size="small" onClick={handleLogout}>
                 Logout
               </Button>
@@ -610,20 +612,6 @@ export default function App() {
                 <Tab label="Agents" />
               </Tabs>
             </Paper>
-
-            {!totpEnrolled && (
-              <Alert
-                severity="info"
-                sx={{ mb: 2 }}
-                action={
-                  <Button color="inherit" size="small" onClick={() => setOpenTOTPDialog(true)}>
-                    Set Up
-                  </Button>
-                }
-              >
-                Two-factor authentication is not configured. Click "Set Up" to enable TOTP.
-              </Alert>
-            )}
 
             {tabIndex === 0 && (
               <Box>
