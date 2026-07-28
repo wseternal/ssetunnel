@@ -177,7 +177,9 @@ func (s *Server) proxyEntry(c net.Conn) {
 	if req.target != "" && s.store != nil {
 		// Look up agent config (falls back to NULL default row).
 		agentID := req.agentID
-		cfg, err := s.store.GetAgentConfig(context.Background(), agentID)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		cfg, err := s.store.GetAgentConfig(ctx, agentID)
 		if err != nil {
 			log.Printf("server: agent config lookup for %q: %v", agentID, err)
 			fmt.Fprintf(c, "ERR agent config not found for %q\n", agentID) //nolint:errcheck
@@ -217,18 +219,33 @@ func (s *Server) proxyEntry(c net.Conn) {
 		}
 	}
 
+	var wg sync.WaitGroup
+	wg.Add(2)
 	go func() {
+		defer wg.Done()
 		buf := bufferPool.Get().(*[]byte)
 		defer bufferPool.Put(buf)
 		_, _ = io.CopyBuffer(stream, c, *buf)
+		// Close the yamux stream to signal EOF to the agent.
+		// yamux has no half-close, so this kills both directions —
+		// the stream→entry copy will get an error and exit.
 		stream.Close()
 	}()
 	go func() {
+		defer wg.Done()
 		buf := bufferPool.Get().(*[]byte)
 		defer bufferPool.Put(buf)
 		_, _ = io.CopyBuffer(c, stream, *buf)
-		c.Close()
+		// Half-close the TCP write side to signal EOF to the entry client.
+		if cw, ok := c.(interface{ CloseWrite() error }); ok {
+			_ = cw.CloseWrite()
+		} else {
+			c.Close()
+		}
 	}()
+	wg.Wait()
+	stream.Close()
+	c.Close()
 }
 
 // parseEntryHandshake reads the first line from c and parses it as
@@ -266,9 +283,11 @@ func (s *Server) parseEntryHandshake(c net.Conn) *entryRequest {
 	return req
 }
 
-// validateEntryAuth checks the token against the auth store.
+// validateEntryAuth checks the token against the auth store with a bounded timeout.
 func (s *Server) validateEntryAuth(c net.Conn, token string) bool {
-	sessInfo, err := s.store.ValidateUserSession(context.Background(), token)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	sessInfo, err := s.store.ValidateUserSession(ctx, token)
 	if err == nil && auth.UserHasPermission(sessInfo.Role, sessInfo.PermConnect, sessInfo.PermAgent, auth.PermConnect) {
 		return true
 	}

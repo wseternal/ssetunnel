@@ -10,16 +10,26 @@ import (
 
 const SessionCookieName = "ssetunnel_session"
 
-// ExtractBearerToken extracts bearer token from Authorization header or URL query parameter `token`.
+// ExtractBearerToken extracts bearer token from Authorization header.
+// The URL query parameter `token` is intentionally not checked here to avoid
+// token leakage via server logs, browser history, and referrer headers.
+// The /events SSE endpoint extracts query tokens separately in the handler.
 func ExtractBearerToken(r *http.Request) string {
 	authHeader := r.Header.Get("Authorization")
 	if strings.HasPrefix(authHeader, "Bearer ") {
 		return strings.TrimPrefix(authHeader, "Bearer ")
 	}
-	if tok := r.URL.Query().Get("token"); tok != "" {
+	return ""
+}
+
+// ExtractBearerTokenWithQuery is like ExtractBearerToken but also checks the
+// URL query parameter `token`. Used only for SSE EventSource endpoints that
+// cannot set custom headers.
+func ExtractBearerTokenWithQuery(r *http.Request) string {
+	if tok := ExtractBearerToken(r); tok != "" {
 		return tok
 	}
-	return ""
+	return r.URL.Query().Get("token")
 }
 
 // contextKey is an unexported type for context keys defined in this package.
@@ -58,7 +68,9 @@ func AgentAuthMiddleware(store *auth.Store) func(http.Handler) http.Handler {
 				return
 			}
 
-			tokenStr := ExtractBearerToken(r)
+			// Use WithQuery because /events SSE endpoint uses EventSource
+			// which cannot set custom headers.
+			tokenStr := ExtractBearerTokenWithQuery(r)
 			if tokenStr == "" {
 				http.Error(w, "Unauthorized: missing bearer token", http.StatusUnauthorized)
 				return

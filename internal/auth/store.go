@@ -228,7 +228,7 @@ func (s *Store) ValidatePassword(ctx context.Context, username, password string)
 }
 
 func (s *Store) ListUsers(ctx context.Context) ([]UserInfo, error) {
-	query := `SELECT id, username, role, perm_connect, perm_agent, totp_secret, created_at, disabled_at FROM users ORDER BY created_at DESC`
+	query := `SELECT id, username, role, perm_connect, perm_agent, created_at, disabled_at FROM users ORDER BY created_at DESC`
 	rows, err := s.pool.Query(ctx, query)
 	if err != nil {
 		return nil, fmt.Errorf("list users: %w", err)
@@ -238,7 +238,7 @@ func (s *Store) ListUsers(ctx context.Context) ([]UserInfo, error) {
 	var users []UserInfo
 	for rows.Next() {
 		var u UserInfo
-		if err := rows.Scan(&u.ID, &u.Username, &u.Role, &u.PermConnect, &u.PermAgent, &u.TOTPSecret, &u.CreatedAt, &u.DisabledAt); err != nil {
+		if err := rows.Scan(&u.ID, &u.Username, &u.Role, &u.PermConnect, &u.PermAgent, &u.CreatedAt, &u.DisabledAt); err != nil {
 			return nil, fmt.Errorf("scan user row: %w", err)
 		}
 		users = append(users, u)
@@ -246,11 +246,21 @@ func (s *Store) ListUsers(ctx context.Context) ([]UserInfo, error) {
 	return users, nil
 }
 
-func (s *Store) UpdateUser(ctx context.Context, id int64, role *string, passwordHash *string, permConnect *bool, permAgent *bool) error {
-	setClauses := make([]string, 0, 4)
-	args := make([]interface{}, 0, 4)
-	n := 0
+func (s *Store) UpdateUserWithDisabled(ctx context.Context, id int64, role *string, passwordHash *string, permConnect *bool, permAgent *bool, disabled *bool) error {
+	// Validate role if provided.
+	if role != nil && *role != "admin" && *role != "user" && *role != "agent" {
+		return fmt.Errorf("invalid role: %q", *role)
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
 
+	// Build and execute the field update.
+	setClauses := make([]string, 0, 5)
+	args := make([]interface{}, 0, 5)
+	n := 0
 	if role != nil {
 		n++
 		setClauses = append(setClauses, fmt.Sprintf("role = $%d", n))
@@ -271,42 +281,63 @@ func (s *Store) UpdateUser(ctx context.Context, id int64, role *string, password
 		setClauses = append(setClauses, fmt.Sprintf("perm_agent = $%d", n))
 		args = append(args, *permAgent)
 	}
-	if len(setClauses) == 0 {
-		return nil
+	if disabled != nil {
+		n++
+		if *disabled {
+			setClauses = append(setClauses, fmt.Sprintf("disabled_at = $%d", n))
+			args = append(args, time.Now().UTC())
+		} else {
+			setClauses = append(setClauses, "disabled_at = NULL")
+		}
 	}
 
-	n++
-	query := fmt.Sprintf("UPDATE users SET %s WHERE id = $%d", strings.Join(setClauses, ", "), n)
-	args = append(args, id)
-	_, err := s.pool.Exec(ctx, query, args...)
-	return err
-}
+	if len(setClauses) > 0 {
+		n++
+		query := fmt.Sprintf("UPDATE users SET %s WHERE id = $%d", strings.Join(setClauses, ", "), n)
+		args = append(args, id)
+		tag, err := tx.Exec(ctx, query, args...)
+		if err != nil {
+			return fmt.Errorf("update user: %w", err)
+		}
+		if tag.RowsAffected() == 0 {
+			return ErrUserNotFound
+		}
+	}
 
-func (s *Store) DisableUser(ctx context.Context, id int64) error {
-	_, err := s.pool.Exec(ctx, `UPDATE users SET disabled_at = CURRENT_TIMESTAMP WHERE id = $1`, id)
-	return err
-}
-
-func (s *Store) EnableUser(ctx context.Context, id int64) error {
-	_, err := s.pool.Exec(ctx, `UPDATE users SET disabled_at = NULL WHERE id = $1`, id)
-	return err
+	return tx.Commit(ctx)
 }
 
 func (s *Store) DeleteUser(ctx context.Context, id int64) error {
-	tag, err := s.pool.Exec(ctx, `DELETE FROM users WHERE id = $1`, id)
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+
+	// Delete dependent sessions first to avoid FK violation.
+	if _, err := tx.Exec(ctx, `DELETE FROM user_sessions WHERE user_id = $1`, id); err != nil {
+		return fmt.Errorf("delete user sessions: %w", err)
+	}
+	// Delete dependent tokens.
+	if _, err := tx.Exec(ctx, `DELETE FROM tokens WHERE user_id = $1`, id); err != nil {
+		return fmt.Errorf("delete user tokens: %w", err)
+	}
+
+	tag, err := tx.Exec(ctx, `DELETE FROM users WHERE id = $1`, id)
 	if err != nil {
 		return fmt.Errorf("delete user: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
 		return ErrUserNotFound
 	}
-	return nil
+	return tx.Commit(ctx)
 }
 
 // EnsureAdminUser checks whether any admin users exist. If none do, it creates
 // one with username "admin" and a cryptographically random password, returning
 // the plaintext password so the operator can log it. Returns ("" , nil) when an
-// admin already exists.
+// admin already exists. Uses INSERT ... ON CONFLICT DO NOTHING to handle
+// concurrent startup races gracefully.
 func (s *Store) EnsureAdminUser(ctx context.Context) (string, error) {
 	var count int
 	if err := s.pool.QueryRow(ctx, `SELECT COUNT(*) FROM users WHERE role = 'admin'`).Scan(&count); err != nil {
@@ -328,7 +359,12 @@ func (s *Store) EnsureAdminUser(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("hash admin password: %w", err)
 	}
 
-	if _, err := s.CreateUser(ctx, "admin", hash, "admin", true, true); err != nil {
+	_, err = s.CreateUser(ctx, "admin", hash, "admin", true, true)
+	if err != nil {
+		if errors.Is(err, ErrDuplicateUser) {
+			// Another instance created the admin user concurrently.
+			return "", nil
+		}
 		return "", fmt.Errorf("seed admin user: %w", err)
 	}
 
