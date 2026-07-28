@@ -114,6 +114,7 @@ func (s *Session) push(seq uint64, body []byte) int {
 		s.Close()
 		return 409
 	}
+	s.bytesReceived.Add(uint64(len(body)))
 	s.nextSeq++
 	return 200
 }
@@ -137,6 +138,7 @@ func (s *Session) pushWindowed(seq uint64, body []byte) int {
 			s.Close()
 			return 409
 		}
+		s.bytesReceived.Add(uint64(len(batch)))
 	}
 	return 200
 }
@@ -145,7 +147,13 @@ func (s *Session) pushWindowed(seq uint64, body []byte) int {
 func (s *Session) Read(b []byte) (int, error) { return s.up.Read(b) }
 
 // Write queues downstream bytes for the SSE stream.
-func (s *Session) Write(b []byte) (int, error) { return s.down.Write(b) }
+func (s *Session) Write(b []byte) (int, error) {
+	n, err := s.down.Write(b)
+	if n > 0 {
+		s.bytesSent.Add(uint64(n))
+	}
+	return n, err
+}
 
 // Close tears down the session: pipes are closed first, which causes
 // the SSE handler to return and the HTTP response to close — the agent
