@@ -28,13 +28,14 @@ import (
 	"time"
 
 	"github.com/wseternal/ssetunnel/internal/agent"
+	"github.com/wseternal/ssetunnel/internal/connect"
 	"github.com/wseternal/ssetunnel/internal/server"
 	"github.com/wseternal/ssetunnel/internal/testutil"
 )
 
 // benchEnv is a full in-process deployment behind the middlebox.
 type benchEnv struct {
-	agentAddr string
+	serverURL string
 	reg       *server.Registry
 	mb        *testutil.Middlebox
 	cancel    context.CancelFunc
@@ -148,12 +149,7 @@ func setupBench(t *testing.T, target net.Listener) *benchEnv {
 	if err != nil {
 		t.Fatalf("StartMiddlebox: %v", err)
 	}
-	agentLn, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen agent: %v", err)
-	}
 	ctx, cancel := context.WithCancel(context.Background())
-	go srv.ServeAgent(ctx, agentLn)
 	ag := &agent.Agent{
 		ServerURL:  mb.URL,
 		Target:     target.Addr().String(),
@@ -172,16 +168,18 @@ func setupBench(t *testing.T, target net.Listener) *benchEnv {
 	}
 	t.Cleanup(func() {
 		cancel()
-		agentLn.Close()
 		ts.Close()
 		mb.Close()
 	})
-	return &benchEnv{agentAddr: agentLn.Addr().String(), reg: srv.Reg, mb: mb, cancel: cancel}
+	return &benchEnv{serverURL: ts.URL, reg: srv.Reg, mb: mb, cancel: cancel}
 }
 
 func (e *benchEnv) dialAgent(t *testing.T) net.Conn {
 	t.Helper()
-	c, err := net.Dial("tcp", e.agentAddr)
+	client := connect.NewClient(e.serverURL, "", "", "")
+	client.BatchSize = 64 << 10
+	client.MaxWait = 10 * time.Millisecond
+	c, err := client.Dial(context.Background())
 	if err != nil {
 		t.Fatalf("dial agent: %v", err)
 	}
@@ -472,12 +470,7 @@ func setupBenchTuned(t *testing.T, target net.Listener, tune func(*agent.Agent))
 	if err != nil {
 		t.Fatalf("StartMiddlebox: %v", err)
 	}
-	agentLn, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen agent: %v", err)
-	}
 	ctx, cancel := context.WithCancel(context.Background())
-	go srv.ServeAgent(ctx, agentLn)
 	ag := &agent.Agent{
 		ServerURL:  mb.URL,
 		Target:     target.Addr().String(),
@@ -499,11 +492,10 @@ func setupBenchTuned(t *testing.T, target net.Listener, tune func(*agent.Agent))
 	}
 	t.Cleanup(func() {
 		cancel()
-		agentLn.Close()
 		ts.Close()
 		mb.Close()
 	})
-	return &benchEnv{agentAddr: agentLn.Addr().String(), reg: srv.Reg, mb: mb, cancel: cancel}
+	return &benchEnv{serverURL: ts.URL, reg: srv.Reg, mb: mb, cancel: cancel}
 }
 
 // TestBenchUpstreamThroughput measures target→agent throughput (the

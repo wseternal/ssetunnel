@@ -125,6 +125,48 @@ func AdminSessionMiddleware(store *auth.Store) func(http.Handler) http.Handler {
 	}
 }
 
+// ConnectAuthMiddleware protects the /connect endpoint, requiring connect-level
+// permissions. Like AgentAuthMiddleware, it supports both bearer tokens (from the
+// tokens table) and user session tokens (from `ssetunnel login`). Query token
+// extraction is enabled for SSE endpoints that cannot set custom headers.
+// If store is nil, auth is disabled and requests pass through.
+func ConnectAuthMiddleware(store *auth.Store) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if store == nil {
+				next.ServeHTTP(w, r)
+				return
+			}
+
+			// Use WithQuery because /connect SSE endpoint uses EventSource
+			// which cannot set custom headers.
+			tokenStr := ExtractBearerTokenWithQuery(r)
+			if tokenStr == "" {
+				http.Error(w, "Unauthorized: missing bearer token", http.StatusUnauthorized)
+				return
+			}
+
+			// Try bearer token first (standalone tokens from the tokens table).
+			tokInfo, err := store.ValidateToken(r.Context(), tokenStr)
+			if err == nil && auth.HasPermission(tokInfo.Role, auth.PermConnect) {
+				ctx := context.WithValue(r.Context(), tokenInfoKey, &tokInfo)
+				next.ServeHTTP(w, r.WithContext(ctx))
+				return
+			}
+
+			// Fallback: user session token (from `ssetunnel login`).
+			sessInfo, err := store.ValidateUserSession(r.Context(), tokenStr)
+			if err == nil && auth.UserHasPermission(sessInfo.Role, sessInfo.PermConnect, sessInfo.PermAgent, auth.PermConnect) {
+				ctx := context.WithValue(r.Context(), userSessionKey, sessInfo)
+				next.ServeHTTP(w, r.WithContext(ctx))
+				return
+			}
+
+			http.Error(w, "Unauthorized: invalid or insufficient permissions", http.StatusUnauthorized)
+		})
+	}
+}
+
 // UserSessionMiddleware validates user session tokens (from ~/.ssetunnel/session).
 // It checks the user_sessions table and stores the UserSessionInfo in the request context.
 func UserSessionMiddleware(store *auth.Store) func(http.Handler) http.Handler {
