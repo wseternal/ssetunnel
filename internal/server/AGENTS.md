@@ -9,8 +9,8 @@ HTTP :8080                                  HTTP :8081
   │                                           │
 Handler (mux.ServeMux)                   ConsoleHandler
   │                                           │
-├── /events      (SSE, agent)            ├── /api/v1/* (consoleapi)
-├── /up          (POST, agent)           └── /* (SPA)
+├── /events      (SSE, agent)            ├── /console/api/v1/* (consoleapi)
+├── /up          (POST, agent)           └── /console/* (SPA)
 ├── /connect     (SSE, connect client)
 ├── /connect-up  (POST, connect client)
 └── /probe

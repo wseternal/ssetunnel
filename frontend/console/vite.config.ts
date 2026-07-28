@@ -3,6 +3,7 @@ import react from '@vitejs/plugin-react';
 import { viteSingleFile } from 'vite-plugin-singlefile';
 
 export default defineConfig({
+  base: '/console/',
   plugins: [react(), viteSingleFile()],
   build: {
     cssCodeSplit: false,
@@ -10,7 +11,7 @@ export default defineConfig({
   server: {
     port: 3000,
     proxy: {
-      '/api': 'http://localhost:8080',
+      '/console/api': 'http://localhost:8081',
     },
   },
 });

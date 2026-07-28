@@ -54,11 +54,11 @@ Uses `AdminTable` for data tables, `StatusPill` for status badges, `PageHeader` 
 
 ## Session Persistence
 
-Login state is persisted to `localStorage` and validated via `/api/v1/me` on page refresh.
+Login state is persisted to `localStorage` and validated via `/console/api/v1/me` on page refresh.
 
 ## Integration
 
-The SPA is served by `consoleserver.NewConsoleHandler` via `litespaserver.ServeRoot` at the console listen address (`:8081`). API routes under `/api/v1/` are handled by `consoleapi`.
+The SPA is served by `consoleserver.NewConsoleHandler` via `litespaserver.ServeRoot` at `/console/` on the console listen address (`:8081`). API routes under `/console/api/v1/` are handled by `consoleapi`.
 
 ## Rules
 * Always rebuild `dist/` before committing Go changes that touch the frontend.

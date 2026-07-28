@@ -69,6 +69,11 @@ tasks:
     cmds:
       - go run -ldflags "{{.LDFLAGS}}" ./cmd/ssetunnel {{.CLI_ARGS}}
 
+  go:release-linux:
+    desc: release for linux amd64
+    cmds:
+      - mkdir -p {{.BUILD_DIR}}
+      - GOOS=linux   GOARCH=amd64 go build -ldflags "{{.LDFLAGS}}" -o {{.BUILD_DIR}}/{{.BIN}}-linux-amd64    ./cmd/ssetunnel
   go:release:
     desc: Cross-compile Go CLI for all platforms
     cmds:
