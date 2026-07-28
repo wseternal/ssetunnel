@@ -1,0 +1,28 @@
+name: CI
+on:
+  push:
+    branches-ignore:
+      - main
+permissions:
+  contents: "read"
+  repository-projects: "read"
+  id-token: "write"
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26.5"
+          cache: true
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.2"
+      - name: Install Task
+        uses: arduino/setup-task@v2
+        with:
+          version: 3.x
+      - name: CI
+        run: task ci
