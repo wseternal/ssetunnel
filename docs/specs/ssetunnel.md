@@ -34,7 +34,7 @@ drops automatically, and all management happens in the console UI.
 
 ## Tech Stack
 
-- **Backend:** Go 1.22+, module `github.com/wseternal/ssetunnel`
+- **Backend:** Go 1.26.5, module `github.com/wseternal/ssetunnel`
 - **Deps (backend, exhaustive):** `github.com/hashicorp/yamux`,
   `github.com/pquerna/otp` — nothing else without asking
 - **Console:** React 18 + TypeScript + Vite, built to
