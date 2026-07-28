@@ -174,7 +174,6 @@ func runAgent(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("agent", flag.ContinueOnError)
 	serverURL := fs.String("server", "http://127.0.0.1:8080", "tunnel server URL")
 	target := fs.String("target", "", "TCP address to forward streams to, e.g. 127.0.0.1:3000")
-	token := fs.String("token", os.Getenv("SSETUNNEL_TOKEN"), "Bearer token or single-use PIN for authentication")
 	batchSize := fs.Int("batch-size", 16384, "upstream batch ceiling in bytes (1024..1048576)")
 	concurrency := fs.Int("concurrency", 1, "upstream POST sender depth (1..4)")
 	compress := fs.Bool("compress", false, "negotiate gzip-per-batch upstream encoding")
@@ -187,23 +186,20 @@ func runAgent(ctx context.Context, args []string) error {
 	}
 	batch, conc := clampAgentFlags(*batchSize, *concurrency)
 
-	// Load session from file if no token provided
-	var reqMod func(*http.Request)
-	if *token == "" {
-		sessToken, sessErr := auth.LoadSession()
-		if sessErr != nil {
-			log.Printf("agent: warning: failed to load session: %v", sessErr)
-		} else if sessToken != "" {
-			*token = sessToken
-			log.Printf("agent: using session from ~/.ssetunnel/session")
-		}
+	// Load session token from ~/.ssetunnel/session
+	sessToken, sessErr := auth.LoadSession()
+	if sessErr != nil {
+		log.Printf("agent: warning: failed to load session: %v", sessErr)
+	} else if sessToken != "" {
+		log.Printf("agent: using session from ~/.ssetunnel/session")
 	}
 
 	// Build request modifier for session-based auth
-	if *token != "" {
-		sessionToken := *token // capture current value
+	var reqMod func(*http.Request)
+	if sessToken != "" {
+		token := sessToken // capture for closure
 		reqMod = func(req *http.Request) {
-			req.Header.Set("Authorization", "Bearer "+sessionToken)
+			req.Header.Set("Authorization", "Bearer "+token)
 		}
 	}
 
@@ -213,7 +209,7 @@ func runAgent(ctx context.Context, args []string) error {
 	ag := &agent.Agent{
 		ServerURL:       *serverURL,
 		Target:          *target,
-		Token:           *token,
+		Token:           sessToken,
 		RequestModifier: reqMod,
 		BatchSize:       batch,
 		Concurrency:     conc,
@@ -225,7 +221,6 @@ func runAgent(ctx context.Context, args []string) error {
 func runConnect(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("connect", flag.ContinueOnError)
 	serverEntry := fs.String("server-entry", "127.0.0.1:9090", "tunnel server entry TCP address")
-	token := fs.String("token", os.Getenv("SSETUNNEL_TOKEN"), "Bearer token for connection authentication")
 	local := fs.String("local", "", "local listen TCP address (e.g. 127.0.0.1:3306) or '-' for Stdio mode")
 
 	if err := fs.Parse(args); err != nil {
@@ -235,18 +230,15 @@ func runConnect(ctx context.Context, args []string) error {
 		return errors.New("--local is required (e.g. --local 127.0.0.1:3306 or --local -)")
 	}
 
-	// Load session from file if no token provided
-	if *token == "" {
-		sessToken, sessErr := auth.LoadSession()
-		if sessErr != nil {
-			log.Printf("connect: warning: failed to load session: %v", sessErr)
-		} else if sessToken != "" {
-			*token = sessToken
-			log.Printf("connect: using session from ~/.ssetunnel/session")
-		}
+	// Load session token from ~/.ssetunnel/session
+	sessToken, sessErr := auth.LoadSession()
+	if sessErr != nil {
+		log.Printf("connect: warning: failed to load session: %v", sessErr)
+	} else if sessToken != "" {
+		log.Printf("connect: using session from ~/.ssetunnel/session")
 	}
 
-	client := connect.NewClient(*serverEntry, *token)
+	client := connect.NewClient(*serverEntry, sessToken)
 
 	if *local == "-" {
 		log.Printf("connect: running in Stdio mode connecting to %s", *serverEntry)

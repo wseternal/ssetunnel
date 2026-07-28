@@ -42,7 +42,7 @@ var (
 	authEntry  string // entry listener address
 	authStore  *auth.Store
 	agentToken string
-	userToken  string
+	userSessionToken string
 	totpSecret string
 	consoleURL string
 )
@@ -75,7 +75,7 @@ func runE2E(m *testing.M) int {
 		return 1
 	}
 	authStore = auth.NewStore(pool)
-	totpSecret = "JBSWY3DPEHPK3PXP"
+	totpSecret = ""
 
 	// Pre-create tokens used by auth tests.
 	agentToken, err = auth.GenerateToken()
@@ -87,13 +87,25 @@ func runE2E(m *testing.M) int {
 		fmt.Fprintf(os.Stderr, "e2e: store agent token: %v\n", err)
 		return 1
 	}
-	userToken, err = auth.GenerateToken()
+
+	// Create a user and user session for connect client tests.
+	pwHash, err := auth.HashPassword("e2epass")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "e2e: generate user token: %v\n", err)
+		fmt.Fprintf(os.Stderr, "e2e: hash password: %v\n", err)
 		return 1
 	}
-	if err := authStore.CreateToken(ctx, userToken, "user", "e2e user", nil); err != nil {
-		fmt.Fprintf(os.Stderr, "e2e: store user token: %v\n", err)
+	testUser, err := authStore.CreateUser(ctx, "e2euser", pwHash, "admin")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "e2e: create user: %v\n", err)
+		return 1
+	}
+	userSessionToken, err = auth.GenerateToken()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "e2e: generate user session: %v\n", err)
+		return 1
+	}
+	if err := authStore.CreateUserSession(ctx, testUser.ID, userSessionToken, 24*time.Hour); err != nil {
+		fmt.Fprintf(os.Stderr, "e2e: create user session: %v\n", err)
 		return 1
 	}
 
@@ -362,7 +374,7 @@ func TestE2E_Auth_FullCycle(t *testing.T) {
 	clientCtx, clientCancel := context.WithCancel(ctx)
 	defer clientCancel()
 
-	client := connect.NewClient(authEntry, userToken)
+	client := connect.NewClient(authEntry, userSessionToken)
 	go client.ServeListener(clientCtx, localLn)
 
 	// 2. Dial the local client wrapper and echo a message.
@@ -385,13 +397,12 @@ func TestE2E_Auth_FullCycle(t *testing.T) {
 		t.Fatalf("echo: want %q, got %q", testMsg, echoResp)
 	}
 
-	// 3. Console API: TOTP login.
-	totpCode, err := auth.GenerateTOTPCode(totpSecret)
-	if err != nil {
-		t.Fatalf("generate TOTP: %v", err)
-	}
-	loginBody, _ := json.Marshal(map[string]string{"totp_code": totpCode})
-	loginResp, err := http.Post(consoleURL+"/api/v1/login", "application/json", bytes.NewReader(loginBody))
+	// 3. Console API: user-login with credentials.
+	loginBody, _ := json.Marshal(map[string]string{
+		"username": "e2euser",
+		"password": "e2epass",
+	})
+	loginResp, err := http.Post(consoleURL+"/api/v1/user-login", "application/json", bytes.NewReader(loginBody))
 	if err != nil {
 		t.Fatalf("login: %v", err)
 	}
@@ -400,11 +411,13 @@ func TestE2E_Auth_FullCycle(t *testing.T) {
 		t.Fatalf("login status: %d", loginResp.StatusCode)
 	}
 
-	// 4. Console API: list active sessions with admin cookie.
+	var loginResult map[string]interface{}
+	json.NewDecoder(loginResp.Body).Decode(&loginResult)
+	consoleToken, _ := loginResult["token"].(string)
+
+	// 4. Console API: list active sessions with bearer token.
 	sessReq, _ := http.NewRequest("GET", consoleURL+"/api/v1/sessions", nil)
-	for _, c := range loginResp.Cookies() {
-		sessReq.AddCookie(c)
-	}
+	sessReq.Header.Set("Authorization", "Bearer "+consoleToken)
 	sessionsResp, err := (&http.Client{}).Do(sessReq)
 	if err != nil {
 		t.Fatalf("sessions: %v", err)

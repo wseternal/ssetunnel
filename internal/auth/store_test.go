@@ -3,14 +3,13 @@ package auth_test
 import (
 	"context"
 	"testing"
-	"time"
 
 	"github.com/wseternal/ssetunnel/internal/auth"
 	"github.com/wseternal/ssetunnel/migrations"
 	orcapostgres "github.com/visdomtech/orcacommon/postgres"
 )
 
-func TestAuthStore_TokenAndPINAndSession(t *testing.T) {
+func TestAuthStore_TokenLifecycle(t *testing.T) {
 	ctx := context.Background()
 
 	// Spin up testcontainer postgres pool with automatic migrations
@@ -24,36 +23,7 @@ func TestAuthStore_TokenAndPINAndSession(t *testing.T) {
 
 	store := auth.NewStore(pool)
 
-	// 1. PIN Test
-	pinStr, err := auth.GeneratePIN()
-	if err != nil {
-		t.Fatalf("GeneratePIN failed: %v", err)
-	}
-	if len(pinStr) < 8 {
-		t.Errorf("expected PIN length >= 8, got %d", len(pinStr))
-	}
-
-	err = store.CreatePIN(ctx, pinStr, "agent", 15*time.Minute)
-	if err != nil {
-		t.Fatalf("CreatePIN failed: %v", err)
-	}
-
-	// Verify and use PIN (first time -> success)
-	role, err := store.VerifyAndUsePIN(ctx, pinStr)
-	if err != nil {
-		t.Fatalf("VerifyAndUsePIN first call failed: %v", err)
-	}
-	if role != "agent" {
-		t.Errorf("expected role 'agent', got %q", role)
-	}
-
-	// Single-use check (second time -> fails)
-	_, err = store.VerifyAndUsePIN(ctx, pinStr)
-	if err == nil {
-		t.Errorf("expected second VerifyAndUsePIN call to fail, but succeeded")
-	}
-
-	// 2. Bearer Token Test
+	// Create token
 	rawToken, err := auth.GenerateToken()
 	if err != nil {
 		t.Fatalf("GenerateToken failed: %v", err)
@@ -92,84 +62,6 @@ func TestAuthStore_TokenAndPINAndSession(t *testing.T) {
 	_, err = store.ValidateToken(ctx, rawToken)
 	if err == nil {
 		t.Errorf("expected ValidateToken on revoked token to fail, but succeeded")
-	}
-
-	// 3. Admin Session Test
-	sessToken, err := auth.GenerateToken()
-	if err != nil {
-		t.Fatalf("GenerateToken for session failed: %v", err)
-	}
-
-	err = store.CreateAdminSession(ctx, sessToken, 12*time.Hour)
-	if err != nil {
-		t.Fatalf("CreateAdminSession failed: %v", err)
-	}
-
-	err = store.ValidateAdminSession(ctx, sessToken)
-	if err != nil {
-		t.Fatalf("ValidateAdminSession failed: %v", err)
-	}
-
-	// Invalid session token check
-	err = store.ValidateAdminSession(ctx, "invalid-session-token")
-	if err == nil {
-		t.Errorf("expected ValidateAdminSession with invalid token to fail, but succeeded")
-	}
-}
-
-func TestRedeemPIN(t *testing.T) {
-	ctx := context.Background()
-
-	dbcfg := orcapostgres.DBConfig{
-		DatabaseURLTemplate: "postgres:tc:",
-	}
-	pool, err := orcapostgres.OpenPool(ctx, dbcfg, orcapostgres.NewMigrator(migrations.FS, nil))
-	if err != nil {
-		t.Fatalf("failed to open pool: %v", err)
-	}
-
-	store := auth.NewStore(pool)
-
-	// Create a PIN
-	pinStr, err := auth.GeneratePIN()
-	if err != nil {
-		t.Fatalf("GeneratePIN failed: %v", err)
-	}
-	if err := store.CreatePIN(ctx, pinStr, "agent", 15*time.Minute); err != nil {
-		t.Fatalf("CreatePIN failed: %v", err)
-	}
-
-	// Redeem PIN -> should succeed with a new token
-	newToken, role, err := store.RedeemPIN(ctx, pinStr)
-	if err != nil {
-		t.Fatalf("RedeemPIN failed: %v", err)
-	}
-	if role != "agent" {
-		t.Errorf("expected role 'agent', got %q", role)
-	}
-	if len(newToken) != 64 {
-		t.Errorf("expected 64-char hex token, got %d chars", len(newToken))
-	}
-
-	// Validate the redeemed token
-	tokInfo, err := store.ValidateToken(ctx, newToken)
-	if err != nil {
-		t.Fatalf("ValidateToken on redeemed token failed: %v", err)
-	}
-	if tokInfo.Role != "agent" {
-		t.Errorf("expected redeemed token role 'agent', got %q", tokInfo.Role)
-	}
-
-	// Redeem same PIN again -> should fail (single-use)
-	_, _, err = store.RedeemPIN(ctx, pinStr)
-	if err == nil {
-		t.Errorf("expected second RedeemPIN to fail (single-use), but succeeded")
-	}
-
-	// Redeem non-existent PIN
-	_, _, err = store.RedeemPIN(ctx, "NOTREAL1")
-	if err == nil {
-		t.Errorf("expected RedeemPIN with invalid PIN to fail, but succeeded")
 	}
 }
 

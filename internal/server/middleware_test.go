@@ -5,7 +5,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
-	"time"
 
 	"github.com/wseternal/ssetunnel/internal/auth"
 	"github.com/wseternal/ssetunnel/internal/server"
@@ -13,7 +12,7 @@ import (
 	orcapostgres "github.com/visdomtech/orcacommon/postgres"
 )
 
-func TestAuthMiddlewares(t *testing.T) {
+func TestAgentAuthMiddleware(t *testing.T) {
 	ctx := context.Background()
 
 	dbcfg := orcapostgres.DBConfig{
@@ -72,44 +71,5 @@ func TestAuthMiddlewares(t *testing.T) {
 	server.AgentAuthMiddleware(nil)(handler).ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Errorf("expected status 200 with auth disabled (nil store), got %d", rec.Code)
-	}
-
-	// 5. AgentAuthMiddleware with valid PIN -> 200 + X-SSET-Token header
-	pinStr, err := auth.GeneratePIN()
-	if err != nil {
-		t.Fatalf("failed to generate PIN: %v", err)
-	}
-	if err := store.CreatePIN(ctx, pinStr, "agent", 15*time.Minute); err != nil {
-		t.Fatalf("failed to create PIN: %v", err)
-	}
-
-	rec = httptest.NewRecorder()
-	req = httptest.NewRequest("GET", "/events?id=test", nil)
-	req.Header.Set("Authorization", "Bearer "+pinStr)
-	server.AgentAuthMiddleware(store)(handler).ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Errorf("expected status 200 with valid PIN, got %d", rec.Code)
-	}
-	upgradedToken := rec.Header().Get("X-SSET-Token")
-	if upgradedToken == "" {
-		t.Error("expected X-SSET-Token header on PIN redemption, got empty")
-	}
-
-	// 6. The upgraded token should work for subsequent requests
-	rec = httptest.NewRecorder()
-	req = httptest.NewRequest("GET", "/events?id=test", nil)
-	req.Header.Set("Authorization", "Bearer "+upgradedToken)
-	server.AgentAuthMiddleware(store)(handler).ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Errorf("expected status 200 with upgraded token, got %d", rec.Code)
-	}
-
-	// 7. Same PIN again -> 401 (single-use, already consumed)
-	rec = httptest.NewRecorder()
-	req = httptest.NewRequest("GET", "/events?id=test", nil)
-	req.Header.Set("Authorization", "Bearer "+pinStr)
-	server.AgentAuthMiddleware(store)(handler).ServeHTTP(rec, req)
-	if rec.Code != http.StatusUnauthorized {
-		t.Errorf("expected status 401 with already-used PIN, got %d", rec.Code)
 	}
 }

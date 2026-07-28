@@ -14,8 +14,7 @@ import (
 
 var (
 	ErrInvalidToken   = errors.New("invalid or revoked token")
-	ErrInvalidPIN     = errors.New("invalid, expired, or already used PIN")
-	ErrInvalidSession = errors.New("invalid or expired admin session")
+	ErrInvalidSession = errors.New("invalid or expired session")
 	ErrUserNotFound   = errors.New("user not found")
 	ErrUserDisabled   = errors.New("user account is disabled")
 	ErrDuplicateUser  = errors.New("username already exists")
@@ -54,78 +53,6 @@ func NewStore(pool *pgxpool.Pool) *Store {
 	return &Store{
 		pool: pool,
 	}
-}
-
-func (s *Store) CreatePIN(ctx context.Context, rawPIN, role string, ttl time.Duration) error {
-	digest := ComputeDigest(rawPIN)
-	expiresAt := time.Now().UTC().Add(ttl)
-
-	query := `INSERT INTO pins (digest, role, expires_at) VALUES ($1, $2, $3)`
-	_, err := s.pool.Exec(ctx, query, digest, role, expiresAt)
-	if err != nil {
-		return fmt.Errorf("failed to insert pin: %w", err)
-	}
-	return nil
-}
-
-func (s *Store) VerifyAndUsePIN(ctx context.Context, rawPIN string) (string, error) {
-	return s.verifyAndUsePINTx(ctx, s.pool, rawPIN)
-}
-
-// verifyAndUsePINTx executes the single-use PIN consumption against the given
-// queryable (either a *pgxpool.Pool or a pgx.Tx). This enables callers to
-// include the PIN check in a broader atomic transaction.
-func (s *Store) verifyAndUsePINTx(ctx context.Context, q interface {
-	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
-}, rawPIN string) (string, error) {
-	digest := ComputeDigest(rawPIN)
-
-	query := `
-		UPDATE pins
-		SET used_at = CURRENT_TIMESTAMP
-		WHERE digest = $1 AND used_at IS NULL AND expires_at > CURRENT_TIMESTAMP
-		RETURNING role
-	`
-
-	var role string
-	err := q.QueryRow(ctx, query, digest).Scan(&role)
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return "", ErrInvalidPIN
-		}
-		return "", fmt.Errorf("failed to verify pin: %w", err)
-	}
-
-	return role, nil
-}
-
-// RedeemPIN atomically consumes a single-use PIN and creates a persistent
-// bearer token with the same role. Both operations execute in a single DB
-// transaction so that a failure in token creation leaves the PIN unconsumed.
-// Returns the raw token (caller must deliver it to the agent) and the role.
-// Fails with ErrInvalidPIN if the PIN is expired, already used, or does not exist.
-func (s *Store) RedeemPIN(ctx context.Context, rawPIN string) (rawToken, role string, err error) {
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
-	if err != nil {
-		return "", "", fmt.Errorf("begin redeem transaction: %w", err)
-	}
-	defer tx.Rollback(ctx) //nolint:errcheck // rollback errors are non-fatal after commit
-
-	role, err = s.verifyAndUsePINTx(ctx, tx, rawPIN)
-	if err != nil {
-		return "", "", err
-	}
-	rawToken, err = GenerateToken()
-	if err != nil {
-		return "", "", fmt.Errorf("generate token for PIN redemption: %w", err)
-	}
-	if err := s.createTokenTx(ctx, tx, rawToken, role, "auto-generated from PIN redemption", nil); err != nil {
-		return "", "", fmt.Errorf("store redeemed token: %w", err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return "", "", fmt.Errorf("commit redeem transaction: %w", err)
-	}
-	return rawToken, role, nil
 }
 
 func (s *Store) CreateToken(ctx context.Context, rawToken, role, description string, expiresAt *time.Time) error {
@@ -230,39 +157,6 @@ func (s *Store) ListTokens(ctx context.Context) ([]TokenInfo, error) {
 	}
 
 	return tokens, nil
-}
-
-func (s *Store) CreateAdminSession(ctx context.Context, rawSessionToken string, ttl time.Duration) error {
-	digest := ComputeDigest(rawSessionToken)
-	expiresAt := time.Now().UTC().Add(ttl)
-
-	query := `INSERT INTO admin_sessions (digest, expires_at) VALUES ($1, $2)`
-	_, err := s.pool.Exec(ctx, query, digest, expiresAt)
-	if err != nil {
-		return fmt.Errorf("failed to create admin session: %w", err)
-	}
-	return nil
-}
-
-func (s *Store) ValidateAdminSession(ctx context.Context, rawSessionToken string) error {
-	digest := ComputeDigest(rawSessionToken)
-
-	query := `
-		SELECT expires_at
-		FROM admin_sessions
-		WHERE digest = $1 AND expires_at > CURRENT_TIMESTAMP
-	`
-
-	var expiresAt time.Time
-	err := s.pool.QueryRow(ctx, query, digest).Scan(&expiresAt)
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return ErrInvalidSession
-		}
-		return fmt.Errorf("failed to validate admin session: %w", err)
-	}
-
-	return nil
 }
 
 // --- User CRUD ---
