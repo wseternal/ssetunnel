@@ -30,6 +30,8 @@
 3. **`ssetunnel connect`**: Client wrapper for users/CLI applications. Exposes a local TCP port or Stdio interface (`--local -`), performs token handshake with the server's TCP entry listener, and transparently forwards TCP streams.
 4. **`ssetunnel probe`**: Diagnostic tool to measure path capabilities (POST body ceilings, response latency, throttling) between restricted network environments and the server.
 
+> **Multi-user multiplexing**: A single agent tunnel supports multiple concurrent user connections simultaneously. Each user gets an independent yamux stream over the shared agent tunnel, and the agent opens a separate TCP connection to the target service for each stream. No additional agents or tunnels are needed — just point more users at the same entry listener.
+
 ---
 
 ## Quick Start
