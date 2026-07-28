@@ -146,24 +146,20 @@ func (s *Server) proxyEntry(c net.Conn) {
 		if !s.validateEntryAuth(c, req.token) {
 			return
 		}
-		// Send OK immediately after auth validation so the client can proceed.
-		if _, err := fmt.Fprintf(c, "OK\n"); err != nil {
-			c.Close()
-			return
-		}
 	} else {
 		// No-auth mode: backward compat — no handshake, data flows directly.
 		req = &entryRequest{}
 	}
 
-	// Find the target agent session.
+	// Find the target agent session (before sending OK so errors are reported
+	// as handshake failures, not mid-stream disconnections).
 	var ms *yamux.Session
 	var sess *Session
 	if req.agentID != "" {
 		ms, sess = s.findYamuxByAgentID(req.agentID)
 		if ms == nil || ms.IsClosed() {
 			log.Printf("server: entry conn from %s: agent %q not found", c.RemoteAddr(), req.agentID)
-			fmt.Fprintf(c, "ERR agent not found\n") //nolint:errcheck
+			fmt.Fprintf(c, "ERR agent %q not connected\n", req.agentID) //nolint:errcheck
 			c.Close()
 			return
 		}
@@ -171,6 +167,7 @@ func (s *Server) proxyEntry(c net.Conn) {
 		ms = s.findYamux()
 		if ms == nil || ms.IsClosed() {
 			log.Printf("server: entry conn from %s: no active session", c.RemoteAddr())
+			fmt.Fprintf(c, "ERR no active agent session\n") //nolint:errcheck
 			c.Close()
 			return
 		}
@@ -183,13 +180,21 @@ func (s *Server) proxyEntry(c net.Conn) {
 		cfg, err := s.store.GetAgentConfig(context.Background(), agentID)
 		if err != nil {
 			log.Printf("server: agent config lookup for %q: %v", agentID, err)
-			fmt.Fprintf(c, "ERR agent not found\n") //nolint:errcheck
+			fmt.Fprintf(c, "ERR agent config not found for %q\n", agentID) //nolint:errcheck
 			c.Close()
 			return
 		}
 		if !auth.TargetAllowed(cfg.AllowedTargets, req.target) {
 			log.Printf("server: target %s not allowed for agent %q", req.target, agentID)
-			fmt.Fprintf(c, "ERR target not allowed\n") //nolint:errcheck
+			fmt.Fprintf(c, "ERR target %q not allowed\n", req.target) //nolint:errcheck
+			c.Close()
+			return
+		}
+	}
+
+	// All validations passed — send OK so the client can proceed.
+	if s.store != nil {
+		if _, err := fmt.Fprintf(c, "OK\n"); err != nil {
 			c.Close()
 			return
 		}

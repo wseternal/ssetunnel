@@ -81,6 +81,12 @@ func (c *Client) ServeStdio(ctx context.Context) error {
 func (c *Client) ServeRW(ctx context.Context, r io.Reader, w io.Writer) error {
 	serverConn, err := c.dialAndHandshake(ctx)
 	if err != nil {
+		// Print a user-friendly error to stderr for direct terminal users,
+		// and to w (stdout in ProxyCommand mode) so the SSH client displays
+		// it before the generic "Connection closed by UNKNOWN port 65535".
+		msg := fmt.Sprintf("ssetunnel: %s\n", err)
+		fmt.Fprint(os.Stderr, msg)
+		fmt.Fprint(w, msg)
 		return fmt.Errorf("stdio connect handshake failed: %w", err)
 	}
 	defer serverConn.Close()
@@ -188,9 +194,12 @@ func (c *Client) dialAndHandshake(ctx context.Context) (net.Conn, error) {
 			return nil, fmt.Errorf("read handshake response: %w", err)
 		}
 
-		if strings.TrimSpace(respLine) != "OK" {
+		resp := strings.TrimSpace(respLine)
+		if resp != "OK" {
 			conn.Close()
-			return nil, fmt.Errorf("handshake rejected: %s", strings.TrimSpace(respLine))
+			// Strip "ERR " prefix for cleaner user-facing messages.
+			msg := strings.TrimPrefix(resp, "ERR ")
+			return nil, fmt.Errorf("%s", msg)
 		}
 		conn.SetReadDeadline(time.Time{})
 	}

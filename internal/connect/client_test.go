@@ -2,11 +2,13 @@ package connect_test
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"fmt"
 	"io"
 	"net"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -16,7 +18,6 @@ import (
 	"github.com/wseternal/ssetunnel/internal/server"
 	"github.com/wseternal/ssetunnel/migrations"
 	orcapostgres "github.com/visdomtech/orcacommon/postgres"
-	"bytes"
 )
 
 func TestConnectClient_LocalPortMode(t *testing.T) {
@@ -311,4 +312,36 @@ func TestServeRW_ServerClosesReturns(t *testing.T) {
 	// Cleanup
 	stdinW.Close()
 	stdoutR.Close()
+}
+
+// TestServeRW_HandshakeFailureWritesToWriter verifies that when the
+// handshake fails, ServeRW writes a user-friendly error message to w
+// (stdout in ProxyCommand mode) so the SSH client can display it to
+// the user instead of only showing "Connection closed by UNKNOWN port 65535".
+func TestServeRW_HandshakeFailureWritesToWriter(t *testing.T) {
+	ctx := context.Background()
+
+	// Use a closed listener so dial fails immediately.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	addr := ln.Addr().String()
+	ln.Close() // close immediately so dial fails
+
+	var stdout bytes.Buffer
+	client := connect.NewClient(addr, "bad-token", "", "")
+
+	err = client.ServeRW(ctx, strings.NewReader(""), &stdout)
+	if err == nil {
+		t.Fatal("expected error from ServeRW, got nil")
+	}
+
+	output := stdout.String()
+	if !strings.Contains(output, "ssetunnel:") {
+		t.Errorf("expected friendly error in stdout, got: %q", output)
+	}
+	if !strings.Contains(output, "dial entry") {
+		t.Errorf("expected dial error detail in stdout, got: %q", output)
+	}
 }
