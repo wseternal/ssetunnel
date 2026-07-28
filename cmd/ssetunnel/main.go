@@ -115,6 +115,18 @@ func runServer(ctx context.Context, args []string) error {
 		store = auth.NewStore(pool)
 		srv.SetAuthStore(store)
 
+		// Seed an admin user on first startup so the console is accessible.
+		if adminPW, err := store.EnsureAdminUser(ctx); err != nil {
+			entryLn.Close()
+			if consoleLn != nil {
+				consoleLn.Close()
+			}
+			return fmt.Errorf("ensure admin user: %w", err)
+		} else if adminPW != "" {
+			log.Printf("server: no admin user found — created 'admin' with password: %s", adminPW)
+			log.Printf("server: ⚠  change this password immediately via the console")
+		}
+
 		if *consoleListen != "" {
 			consoleLn, err = net.Listen("tcp", *consoleListen)
 			if err != nil {

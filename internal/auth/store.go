@@ -2,6 +2,8 @@ package auth
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"strings"
@@ -275,6 +277,38 @@ func (s *Store) DeleteUser(ctx context.Context, id int64) error {
 		return ErrUserNotFound
 	}
 	return nil
+}
+
+// EnsureAdminUser checks whether any admin users exist. If none do, it creates
+// one with username "admin" and a cryptographically random password, returning
+// the plaintext password so the operator can log it. Returns ("" , nil) when an
+// admin already exists.
+func (s *Store) EnsureAdminUser(ctx context.Context) (string, error) {
+	var count int
+	if err := s.pool.QueryRow(ctx, `SELECT COUNT(*) FROM users WHERE role = 'admin'`).Scan(&count); err != nil {
+		return "", fmt.Errorf("count admin users: %w", err)
+	}
+	if count > 0 {
+		return "", nil
+	}
+
+	// Generate a random 16-byte password, base64url-encoded (22 chars).
+	raw := make([]byte, 16)
+	if _, err := rand.Read(raw); err != nil {
+		return "", fmt.Errorf("generate random password: %w", err)
+	}
+	plaintext := base64.RawURLEncoding.EncodeToString(raw)
+
+	hash, err := HashPassword(plaintext)
+	if err != nil {
+		return "", fmt.Errorf("hash admin password: %w", err)
+	}
+
+	if _, err := s.CreateUser(ctx, "admin", hash, "admin"); err != nil {
+		return "", fmt.Errorf("seed admin user: %w", err)
+	}
+
+	return plaintext, nil
 }
 
 // --- User Sessions ---
