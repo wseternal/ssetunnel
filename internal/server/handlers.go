@@ -25,6 +25,11 @@ import (
 // and 413 means session death.
 const maxUpBody = 1<<20 + 64<<10
 
+// connectUpPipeCap is the connect-session up-pipe capacity.  It must
+// be at least maxUpBody so a single large POST never blocks on the pipe
+// before the yamux consumer has a chance to drain it.
+const connectUpPipeCap = 1 << 20
+
 // maxProbeBody caps one /probe body (cycle-2 plan decision 6: read and
 // discard, bounded surface).
 const maxProbeBody = 2 << 20
@@ -395,9 +400,12 @@ func (h *Handler) handleConnect(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Create the connect bridge: up pipe for POST bodies → yamux stream.
+	// The pipe capacity matches the server's batch ceiling (1 MiB) so a
+	// single large POST never blocks on the pipe before the yamux consumer
+	// has a chance to drain it.
 	cs := &connectSession{
 		id:     id,
-		up:     transport.NewPipe(downPipeCap),
+		up:     transport.NewPipe(connectUpPipeCap),
 		cancel: func() {}, // no-op; cleanup is handled by the deferred teardown below
 	}
 	h.connectSessions.Store(id, cs)
@@ -429,6 +437,11 @@ func (h *Handler) handleConnect(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Set up SSE response headers.
+	// NOTE: We deliberately do NOT advertise concurrency on the connect
+	// path — handleConnectUp writes directly to a pipe without a reorder
+	// window, so concurrent POSTs would arrive out of order and corrupt
+	// the byte stream. The connect client still benefits from larger
+	// batch sizes (256 KiB default) and the yamux window increase.
 	w.Header().Set("X-SSET-Session", id)
 	transport.WriteHeaders(w)
 	f.Flush()
@@ -499,6 +512,15 @@ func (h *Handler) handleConnectUp(w http.ResponseWriter, r *http.Request) {
 		} else {
 			http.Error(w, "read body", http.StatusBadRequest)
 		}
+		return
+	}
+
+	// connect-up has no reorder window, so concurrent POSTs (and with
+	// them gzip-per-batch) are not supported.  Reject any X-SSET-Flags
+	// outright; when reordering is added, replace this with a per-session
+	// check (cf. handleUp's sess.hasWindow() guard).
+	if flags := r.Header.Get("X-SSET-Flags"); flags != "" {
+		http.Error(w, "X-SSET-Flags not supported on connect-up", http.StatusBadRequest)
 		return
 	}
 

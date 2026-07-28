@@ -277,14 +277,17 @@ func DialAgent(ctx context.Context, cfg Config) (*Conn, error) {
 
 // DialConnect opens an HTTP transport connection for connect clients,
 // using the /connect (SSE-down) and /connect-up (POST-up) endpoints.
-// It forces single-sender mode (no caps negotiation) and passes the
-// agent ID and target as query parameters so the server can route to
-// the correct agent.
+// It requests concurrency=4 but the server currently does not advertise
+// caps on /connect (connect-up has no reorder window), so negotiation
+// fails closed to serial POSTs. The request is future-proof for when
+// connect-up gains reordering. The agent ID and target are passed as
+// query parameters so the server can route to the correct agent.
 func DialConnect(ctx context.Context, cfg Config) (*Conn, error) {
 	cfg.EventsPath = "/connect"
 	cfg.UpPath = "/connect-up"
-	cfg.DisableCaps = true
-	cfg.Concurrency = 1
+	if cfg.Concurrency <= 0 {
+		cfg.Concurrency = 4 // request concurrent POSTs; server clamps via negotiation
+	}
 	// Target is passed as a query parameter; the server determines whether
 	// to write it as a target header on the yamux stream based on the
 	// agent's session capabilities.

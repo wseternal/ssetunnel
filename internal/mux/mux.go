@@ -10,10 +10,10 @@ import (
 // config returns the yamux config for both ends (plan decision 6).
 func config() *yamux.Config {
 	cfg := yamux.DefaultConfig()
-	// 1 MiB stream window: the 256 KiB default caps throughput at
-	// 256 KiB / 100 ms effective RTT = 2.5 MB/s, below the 5 MB/s
-	// budget; 1 MiB keeps the budget reachable at hostile proxy RTTs.
-	cfg.MaxStreamWindowSize = 1 << 20
+	// 4 MiB stream window: at 100 ms effective RTT this yields
+	// 4 MiB / 100 ms = 40 MB/s theoretical, enough for VNC
+	// framebuffer uploads and large file transfers.
+	cfg.MaxStreamWindowSize = 4 << 20
 	// 30 s keepalive: detects half-open peers; the SSE heartbeats
 	// (15 s) already keep middleboxes from going idle, so this only
 	// needs to catch dead agents, not preserve the connection.

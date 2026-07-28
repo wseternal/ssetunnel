@@ -32,9 +32,9 @@ type Client struct {
 	target    string // dynamic target address (empty = no dynamic target)
 	basePath  string // HTTP path prefix for tunnel endpoints (empty = no prefix)
 
-	// BatchSize is the upstream batch ceiling; 0 → 1024.
+	// BatchSize is the upstream batch ceiling; 0 → 256 KiB.
 	BatchSize int
-	// MaxWait is the batcher flush ceiling; 0 → 10ms.
+	// MaxWait is the batcher flush ceiling; 0 → 25ms.
 	MaxWait time.Duration
 }
 
@@ -194,11 +194,11 @@ func (c *Client) dial(ctx context.Context) (net.Conn, error) {
 func (c *Client) Dial(ctx context.Context) (net.Conn, error) {
 	batchSize := c.BatchSize
 	if batchSize <= 0 {
-		batchSize = 1024
+		batchSize = 256 << 10 // 256 KiB
 	}
 	maxWait := c.MaxWait
 	if maxWait <= 0 {
-		maxWait = 10 * time.Millisecond
+		maxWait = 25 * time.Millisecond
 	}
 
 	conn, err := transport.DialConnect(ctx, transport.Config{

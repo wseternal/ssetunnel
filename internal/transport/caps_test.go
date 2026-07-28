@@ -64,13 +64,13 @@ func TestNegotiateCaps(t *testing.T) {
 			"absent server caps fail closed to cycle-1 profile",
 			transport.Caps{Concurrency: 4, Batch: 65536, Gzip: true},
 			transport.Caps{},
-			transport.Caps{Concurrency: 1, Batch: transport.DefaultMaxBatchSize},
+			transport.Caps{Concurrency: 1, Batch: 65536},
 		},
 		{
-			"absent batch axis fails closed to 16 KiB",
+			"absent batch axis fails closed to min(requested, default)",
 			transport.Caps{Concurrency: 4, Batch: 65536, Gzip: true},
 			transport.Caps{Concurrency: 4},
-			transport.Caps{Concurrency: 4, Batch: transport.DefaultMaxBatchSize},
+			transport.Caps{Concurrency: 4, Batch: 65536},
 		},
 		{
 			"serial agent stays serial",

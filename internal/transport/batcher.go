@@ -6,10 +6,12 @@ import (
 	"time"
 )
 
-// Default batching ceilings (plan decision 2): big enough to amortize
-// one POST per batch under bulk load, small enough to stay interactive.
+// Default batching ceilings: 256 KiB amortizes one POST per batch under
+// bulk load (VNC, file transfer) while staying interactive for small
+// writes. The server advertises 1 MiB; caps negotiation clamps to
+// min(want, advertised) when both sides speak cycle-2.
 const (
-	DefaultMaxBatchSize = 16 << 10 // 16 KiB
+	DefaultMaxBatchSize = 256 << 10 // 256 KiB
 	DefaultMaxWait      = 25 * time.Millisecond
 	// DefaultMaxQueuedBytes bounds buffered+queued bytes so a writer
 	// faster than the serial-POST drain gets backpressure, not

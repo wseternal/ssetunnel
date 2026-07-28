@@ -58,13 +58,13 @@ func TestReorderDuplicateDropped(t *testing.T) {
 func TestReorderWindowFull(t *testing.T) {
 	t.Parallel()
 	w, _ := newTestWindow()
-	// Buffer seqs 1..8 (window size 8) without seq 0: the window is full.
-	for i := uint64(1); i <= 8; i++ {
+	// Buffer seqs 1..16 (window size 16) without seq 0: the window is full.
+	for i := uint64(1); i <= ReorderWindowSize; i++ {
 		if _, err := w.Push(i, []byte{byte(i)}); err != nil {
 			t.Fatalf("Push(%d): %v", i, err)
 		}
 	}
-	if _, err := w.Push(9, []byte{9}); !errors.Is(err, ErrWindowFull) {
+	if _, err := w.Push(ReorderWindowSize+1, []byte{byte(ReorderWindowSize + 1)}); !errors.Is(err, ErrWindowFull) {
 		t.Fatalf("Push past window: got %v, want ErrWindowFull", err)
 	}
 	// The missing base still drains everything buffered so far.
@@ -72,8 +72,9 @@ func TestReorderWindowFull(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Push(0) heal: %v", err)
 	}
-	if len(ready) != 9 {
-		t.Fatalf("heal ready = %d batches, want 9", len(ready))
+	want := int(ReorderWindowSize) + 1
+	if len(ready) != want {
+		t.Fatalf("heal ready = %d batches, want %d", len(ready), want)
 	}
 	for i, b := range ready {
 		if !bytes.Equal(b, []byte{byte(i)}) {
