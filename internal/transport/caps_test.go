@@ -67,7 +67,7 @@ func TestNegotiateCaps(t *testing.T) {
 			transport.Caps{Concurrency: 1, Batch: 65536},
 		},
 		{
-			"absent batch axis fails closed to DefaultMaxBatchSize",
+			"absent batch axis fails closed to min(requested, default)",
 			transport.Caps{Concurrency: 4, Batch: 65536, Gzip: true},
 			transport.Caps{Concurrency: 4},
 			transport.Caps{Concurrency: 4, Batch: 65536},

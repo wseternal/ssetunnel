@@ -287,6 +287,19 @@ func runConnect(ctx context.Context, args []string) error {
 	}
 
 	client := connect.NewClient(url, sessToken, *agentID, *target, *basePath)
+	// Clamp --batch-size the same way the agent path does: 0 means "use
+	// default" (no clamp), anything else is bounded to 1 KiB..1 MiB so a
+	// typo can't trigger a 413 on the server.
+	if *batchSize != 0 {
+		if *batchSize < minBatchSize {
+			log.Printf("connect: --batch-size %d below minimum, clamped to %d", *batchSize, minBatchSize)
+			*batchSize = minBatchSize
+		}
+		if *batchSize > maxBatchSize {
+			log.Printf("connect: --batch-size %d above maximum, clamped to %d", *batchSize, maxBatchSize)
+			*batchSize = maxBatchSize
+		}
+	}
 	client.BatchSize = *batchSize
 
 	if *local == "-" {
