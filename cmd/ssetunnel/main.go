@@ -125,6 +125,16 @@ func runServer(ctx context.Context, args []string) error {
 		if targetDBURL == "" {
 			targetDBURL = "postgres:tc:"
 		}
+
+		// Embedded/testcontainer postgres cannot run as root because
+		// PostgreSQL's initdb refuses to initialise a data directory
+		// owned by the superuser. Fail early with a clear message.
+		if os.Getuid() == 0 && isEmbeddedPostgres(targetDBURL) {
+			return fmt.Errorf("embedded postgres cannot run as root (initdb restriction); "+
+				"either run as a non-root user (recommended: ssetunnel server start --service-user ssetunnel) "+
+				"or set --db-url to an external PostgreSQL instance")
+		}
+
 		dbcfg := orcapostgres.DBConfig{
 			DatabaseURLTemplate: targetDBURL,
 		}
@@ -402,6 +412,14 @@ func validateBasePath(basePath string) error {
 		return fmt.Errorf("--base must start with / (got %q)", basePath)
 	}
 	return nil
+}
+
+// isEmbeddedPostgres reports whether dbURL refers to an embedded or
+// testcontainer-managed PostgreSQL instance (as opposed to an external
+// connection string like postgres://...).
+func isEmbeddedPostgres(dbURL string) bool {
+	return strings.HasPrefix(dbURL, "postgres:tc:") ||
+		strings.HasPrefix(dbURL, "postgres:embedded:")
 }
 
 func runProbe(ctx context.Context, args []string) error {

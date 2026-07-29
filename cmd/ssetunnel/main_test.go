@@ -115,6 +115,28 @@ func TestDeriveTunnelURL(t *testing.T) {
 	}
 }
 
+func TestIsEmbeddedPostgres(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		dbURL string
+		want  bool
+	}{
+		{"postgres:tc:", true},
+		{"postgres:embedded:", true},
+		{"postgres://user:pass@host:5432/db", false},
+		{"postgresql://host/db", false},
+		{"", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.dbURL, func(t *testing.T) {
+			t.Parallel()
+			if got := isEmbeddedPostgres(tt.dbURL); got != tt.want {
+				t.Errorf("isEmbeddedPostgres(%q) = %v, want %v", tt.dbURL, got, tt.want)
+			}
+		})
+	}
+}
+
 // testHomeDir sets up a temporary HOME for session file tests.
 func testHomeDir(t *testing.T) func() {
 	t.Helper()
