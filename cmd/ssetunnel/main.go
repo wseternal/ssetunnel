@@ -342,6 +342,8 @@ const (
 // If serverFlag is empty, loads the first saved session.
 // Returns error if no server URL can be resolved.
 func resolveServerURL(serverFlag, prefix string) (url, token string, err error) {
+	// Trim trailing slash for consistent URL handling.
+	serverFlag = strings.TrimRight(serverFlag, "/")
 	token, resolvedServer, sessErr := auth.LoadSession(serverFlag)
 	if sessErr != nil {
 		log.Printf("%s: warning: failed to load session: %v", prefix, sessErr)
@@ -415,10 +417,13 @@ func runProbe(ctx context.Context, args []string) error {
 
 func runLogin(_ context.Context, args []string) error {
 	fs := flag.NewFlagSet("login", flag.ContinueOnError)
-	serverURL := fs.String("server", "http://127.0.0.1:8080", "tunnel server URL")
+	serverURL := fs.String("server", "http://127.0.0.1:8081", "tunnel server URL (console port)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+
+	// Trim trailing slash to avoid double-slash in API paths.
+	*serverURL = strings.TrimRight(*serverURL, "/")
 
 	// Console API is at <server>/console/api/v1/...
 	consoleBase := *serverURL + "/console/api/v1"

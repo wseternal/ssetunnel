@@ -3,8 +3,10 @@ package auth
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
+	"sort"
 )
 
 // SessionEntry holds the credentials for a single server.
@@ -58,6 +60,7 @@ func loadSessionFile() (sessionFile, error) {
 	var sf sessionFile
 	if err := json.Unmarshal(data, &sf); err != nil {
 		// Legacy format (plain token) or corrupted — start fresh.
+		log.Printf("auth: WARNING: session file is in legacy or corrupted format; starting fresh (old data discarded)")
 		return sessionFile{Sessions: make(map[string]SessionEntry)}, nil
 	}
 	if sf.Sessions == nil {
@@ -66,7 +69,7 @@ func loadSessionFile() (sessionFile, error) {
 	return sf, nil
 }
 
-// saveSessionFile writes the session file atomically.
+// saveSessionFile writes the session file.
 func saveSessionFile(sf sessionFile) error {
 	path, err := SessionFilePath()
 	if err != nil {
@@ -84,6 +87,9 @@ func saveSessionFile(sf sessionFile) error {
 func SaveSession(serverURL, token, username, role string) error {
 	sf, err := loadSessionFile()
 	if err != nil {
+		if !os.IsNotExist(err) {
+			return fmt.Errorf("load session file: %w", err)
+		}
 		sf = sessionFile{Sessions: make(map[string]SessionEntry)}
 	}
 	sf.Sessions[serverURL] = SessionEntry{
@@ -108,9 +114,15 @@ func LoadSession(serverURL string) (token, resolvedServer string, err error) {
 		}
 		return "", "", nil
 	}
-	// No server specified — return first entry.
-	for srv, entry := range sf.Sessions {
-		return entry.Token, srv, nil
+	// No server specified — return first entry (sorted for determinism).
+	keys := make([]string, 0, len(sf.Sessions))
+	for srv := range sf.Sessions {
+		keys = append(keys, srv)
+	}
+	sort.Strings(keys)
+	if len(keys) > 0 {
+		entry := sf.Sessions[keys[0]]
+		return entry.Token, keys[0], nil
 	}
 	return "", "", nil
 }
@@ -125,5 +137,6 @@ func SessionServers() ([]string, error) {
 	for srv := range sf.Sessions {
 		servers = append(servers, srv)
 	}
+	sort.Strings(servers)
 	return servers, nil
 }
