@@ -139,10 +139,12 @@ func dispatchServiceAction(subcommand string, args []string) (handled bool, err 
 			fmt.Println("Service is already running.")
 			return true, nil
 		}
-		// Install (or update) the service definition so that the
-		// current flags are persisted for future restart/recovery.
+		// Uninstall any existing service definition first so that
+		// Install() writes a fresh unit file with the current flags.
+		// Errors are expected when no service is installed yet.
+		_ = svc.Uninstall()
 		if ierr := svc.Install(); ierr != nil {
-			log.Printf("service install: %v (may need root/sudo)", ierr)
+			return true, fmt.Errorf("install service: %w (may need root/sudo)", ierr)
 		}
 		if serr := svc.Start(); serr != nil {
 			return true, fmt.Errorf("start: %w", serr)

@@ -10,6 +10,7 @@
 
 # Build output
 build/
+/ssetunnel
 
 # Test binary, built with `go test -c`
 *.test
