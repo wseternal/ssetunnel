@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/user"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -90,16 +91,37 @@ func dispatchServiceAction(subcommand string, args []string) (handled bool, err 
 	}
 	action := args[0]
 
+	// Extract --service-user before passing args to buildServiceArgs.
+	// This flag is consumed by the service installer, not the runtime.
+	serviceUser, filteredArgs := extractFlag(args, "--service-user")
+
+	// Default service user: use the current OS user when not root.
+	// Running the daemon as root causes embedded postgres to fail
+	// (initdb refuses to run as root), so we encourage non-root service
+	// users. When running as root, --service-user must be specified.
+	if serviceUser == "" {
+		if os.Getuid() == 0 {
+			return true, fmt.Errorf("running as root is not supported (embedded postgres initdb restriction); "+
+				"specify --service-user <name> to run the daemon as a non-root user")
+		}
+		if u, err := user.Current(); err == nil && u.Username != "root" {
+			serviceUser = u.Username
+		}
+	}
+
 	svcConfig := &service.Config{
 		Name:        "ssetunnel-" + subcommand,
 		DisplayName: "ssetunnel " + subcommand,
 		Description: "ssetunnel " + subcommand + " daemon",
-		Arguments:   buildServiceArgs(subcommand, args),
+		Arguments:   buildServiceArgs(subcommand, filteredArgs),
+	}
+	if serviceUser != "" {
+		svcConfig.UserName = serviceUser
 	}
 
 	prg := &serviceProgram{
 		name:  svcConfig.Name,
-		runFn: buildRunFn(subcommand, args[1:]), // strip the action verb
+		runFn: buildRunFn(subcommand, filteredArgs[1:]), // strip the action verb
 	}
 
 	svc, err := service.New(prg, svcConfig)
@@ -244,4 +266,30 @@ func readPIDFile(name string) (int, error) {
 		return 0, err
 	}
 	return strconv.Atoi(strings.TrimSpace(string(data)))
+}
+
+// extractFlag removes a --key value pair from args and returns the value
+// and the remaining args. It supports both --key value and --key=value
+// forms. If the flag is not present, it returns ("", originalArgs).
+func extractFlag(args []string, key string) (value string, remaining []string) {
+	remaining = make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+
+		// --key=value form
+		if strings.HasPrefix(arg, key+"=") {
+			value = strings.TrimPrefix(arg, key+"=")
+			continue
+		}
+
+		// --key value form
+		if arg == key && i+1 < len(args) {
+			value = args[i+1]
+			i++ // skip the next arg (value)
+			continue
+		}
+
+		remaining = append(remaining, arg)
+	}
+	return value, remaining
 }

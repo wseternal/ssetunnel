@@ -34,6 +34,40 @@ func TestDispatchServiceAction_NonActionVerb(t *testing.T) {
 	}
 }
 
+func TestExtractFlag(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		args      []string
+		key       string
+		wantValue string
+		wantRest  []string
+	}{
+		{"not present", []string{"run", "--listen", ":8080"}, "--service-user", "", []string{"run", "--listen", ":8080"}},
+		{"space form", []string{"start", "--service-user", "alice", "--listen", ":8080"}, "--service-user", "alice", []string{"start", "--listen", ":8080"}},
+		{"equals form", []string{"start", "--service-user=bob", "--listen", ":8080"}, "--service-user", "bob", []string{"start", "--listen", ":8080"}},
+		{"only flag", []string{"run", "--service-user", "carol"}, "--service-user", "carol", []string{"run"}},
+		{"flag at end no value", []string{"run", "--service-user"}, "--service-user", "", []string{"run", "--service-user"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			gotValue, gotRest := extractFlag(tt.args, tt.key)
+			if gotValue != tt.wantValue {
+				t.Errorf("value = %q, want %q", gotValue, tt.wantValue)
+			}
+			if len(gotRest) != len(tt.wantRest) {
+				t.Fatalf("remaining = %v, want %v", gotRest, tt.wantRest)
+			}
+			for i := range gotRest {
+				if gotRest[i] != tt.wantRest[i] {
+					t.Fatalf("remaining[%d] = %q, want %q", i, gotRest[i], tt.wantRest[i])
+				}
+			}
+		})
+	}
+}
+
 func TestBuildServiceArgs(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
