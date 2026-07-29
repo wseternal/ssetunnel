@@ -3,9 +3,12 @@ package main
 import (
 	"context"
 	"net"
+	"os"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/wseternal/ssetunnel/internal/auth"
 )
 
 func TestRunServer_AddressAlreadyBound(t *testing.T) {
@@ -86,5 +89,125 @@ func TestClampAgentFlags(t *testing.T) {
 					tt.batchSize, tt.concurrency, gotBatch, gotConc, tt.wantBatchSize, tt.wantConcurrency)
 			}
 		})
+	}
+}
+
+func TestDeriveTunnelURL(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		input  string
+		expect string
+	}{
+		{"default ports", "http://127.0.0.1:8081", "http://127.0.0.1:8080"},
+		{"https default ports", "https://tunnel.example.com:8081", "https://tunnel.example.com:8080"},
+		{"non-default port unchanged", "http://host:9081", "http://host:9081"},
+		{"no port unchanged", "http://host", "http://host"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := deriveTunnelURL(tt.input)
+			if got != tt.expect {
+				t.Errorf("deriveTunnelURL(%q) = %q, want %q", tt.input, got, tt.expect)
+			}
+		})
+	}
+}
+
+// testHomeDir sets up a temporary HOME for session file tests.
+func testHomeDir(t *testing.T) func() {
+	t.Helper()
+	origHome := os.Getenv("HOME")
+	os.Setenv("HOME", t.TempDir())
+	return func() { os.Setenv("HOME", origHome) }
+}
+
+func TestResolveServerURL_NoFlag_NoSession(t *testing.T) {
+	cleanup := testHomeDir(t)
+	defer cleanup()
+
+	_, _, err := resolveServerURL("", "test")
+	if err == nil {
+		t.Fatal("expected error when no flag and no session, got nil")
+	}
+	if !strings.Contains(err.Error(), "--server is required") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestResolveServerURL_NoFlag_WithSession(t *testing.T) {
+	cleanup := testHomeDir(t)
+	defer cleanup()
+
+	if err := auth.SaveSession("http://saved:8080", "tok1", "user1", "admin"); err != nil {
+		t.Fatalf("SaveSession: %v", err)
+	}
+
+	url, token, err := resolveServerURL("", "test")
+	if err != nil {
+		t.Fatalf("resolveServerURL: %v", err)
+	}
+	if url != "http://saved:8080" {
+		t.Errorf("url = %q, want %q", url, "http://saved:8080")
+	}
+	if token != "tok1" {
+		t.Errorf("token = %q, want %q", token, "tok1")
+	}
+}
+
+func TestResolveServerURL_Flag_WithSession(t *testing.T) {
+	cleanup := testHomeDir(t)
+	defer cleanup()
+
+	if err := auth.SaveSession("http://flag:8080", "tok2", "user2", "admin"); err != nil {
+		t.Fatalf("SaveSession: %v", err)
+	}
+
+	url, token, err := resolveServerURL("http://flag:8080", "test")
+	if err != nil {
+		t.Fatalf("resolveServerURL: %v", err)
+	}
+	if url != "http://flag:8080" {
+		t.Errorf("url = %q, want %q", url, "http://flag:8080")
+	}
+	if token != "tok2" {
+		t.Errorf("token = %q, want %q", token, "tok2")
+	}
+}
+
+func TestResolveServerURL_Flag_NoSession(t *testing.T) {
+	cleanup := testHomeDir(t)
+	defer cleanup()
+
+	url, token, err := resolveServerURL("http://explicit:8080", "test")
+	if err != nil {
+		t.Fatalf("resolveServerURL: %v", err)
+	}
+	if url != "http://explicit:8080" {
+		t.Errorf("url = %q, want %q", url, "http://explicit:8080")
+	}
+	if token != "" {
+		t.Errorf("token = %q, want empty", token)
+	}
+}
+
+func TestResolveServerURL_TrailingSlash(t *testing.T) {
+	cleanup := testHomeDir(t)
+	defer cleanup()
+
+	if err := auth.SaveSession("http://host:8080", "tok", "user", "admin"); err != nil {
+		t.Fatalf("SaveSession: %v", err)
+	}
+
+	url, token, err := resolveServerURL("http://host:8080/", "test")
+	if err != nil {
+		t.Fatalf("resolveServerURL: %v", err)
+	}
+	if url != "http://host:8080" {
+		t.Errorf("url = %q, want %q (trailing slash not trimmed)", url, "http://host:8080")
+	}
+	if token != "tok" {
+		t.Errorf("token = %q, want %q", token, "tok")
 	}
 }

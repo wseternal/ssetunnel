@@ -103,7 +103,7 @@ ssetunnel agent [--server <URL>] [--target <TCP_ADDR>] [--id <AGENT_ID>] [flags]
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--server` | `http://127.0.0.1:8080` | Tunnel server base URL |
+| `--server` | *(empty)* | Tunnel server URL (default: from saved session) |
 | `--target` | *(empty)* | Target TCP address (empty = dynamic target mode, reads from stream header) |
 | `--id` | *(empty)* | Agent identifier for server-side routing |
 | `--batch-size` | `16384` | Upstream POST batch ceiling in bytes (`1024` to `1048576`) |
@@ -124,7 +124,7 @@ ssetunnel connect --server <URL> --local <LISTEN_ADDR> [--agent <ID>] [--target 
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--server` | `http://127.0.0.1:8080` | Tunnel server URL |
+| `--server` | *(empty)* | Tunnel server URL (default: from saved session) |
 | `--agent` | *(empty)* | Agent identifier to route to (for multi-agent setups) |
 | `--target` | *(empty)* | Target address on the agent (for dynamic target mode) |
 | `--local` | *(Required)* | Local TCP listen address (e.g. `127.0.0.1:3306`) or `-` for Stdio mode |
@@ -145,12 +145,13 @@ Host private-server
 Interactive username/password authentication with optional TOTP. Saves session token for agent and connect commands.
 
 ```bash
-ssetunnel login [--console <URL>]
+ssetunnel login [--server <URL>] [--tunnel-server <URL>]
 ```
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--console` | `http://127.0.0.1:8081` | Console API URL |
+| `--server` | `http://127.0.0.1:8081` | Tunnel server URL (console port) |
+| `--tunnel-server` | *(derived)* | Tunnel server URL to save in session (default: `--server` with port 8081→8080) |
 
 Saves session token to `~/.ssetunnel/session`.
 
