@@ -109,13 +109,25 @@ func dispatchServiceAction(subcommand string, args []string) (handled bool, err 
 		}
 	}
 
+	// Determine service mode:
+	// - Non-root user → user-level service (systemd --user / LaunchAgents).
+	//   UserName is intentionally omitted: user services already run as
+	//   the owning user, and setting it is ignored on systemd or rejected
+	//   by macOS launchd.
+	// - Root + --service-user X → system-level service with User=X.
+	// - Root without --service-user → error (handled above).
+	userService := os.Getuid() != 0
+
 	svcConfig := &service.Config{
 		Name:        "ssetunnel-" + subcommand,
 		DisplayName: "ssetunnel " + subcommand,
 		Description: "ssetunnel " + subcommand + " daemon",
 		Arguments:   buildServiceArgs(subcommand, filteredArgs),
+		Option:      service.KeyValue{},
 	}
-	if serviceUser != "" {
+	if userService {
+		svcConfig.Option["UserService"] = true
+	} else if serviceUser != "" {
 		svcConfig.UserName = serviceUser
 	}
 
@@ -150,6 +162,10 @@ func dispatchServiceAction(subcommand string, args []string) (handled bool, err 
 			return true, fmt.Errorf("start: %w", serr)
 		}
 		fmt.Println("Service started.")
+		if userService && runtime.GOOS == "linux" {
+			fmt.Println("NOTE: on Linux, user services stop when you log out.")
+			fmt.Println("      Run 'loginctl enable-linger' to keep the service running after logout.")
+		}
 		return true, nil
 
 	case "stop":
