@@ -35,7 +35,9 @@ const usage = `usage: ssetunnel <command> [flags]
 
 commands:
   server    run the public tunnel server
+            service actions: run, start, stop, restart, status, reload
   agent     run the agent inside the restricted network
+            service actions: run, start, stop, restart, status, reload
   connect   run the user connect client wrapper
   login     authenticate and store a session for agent/connect
   probe     measure a server's POST path (body cap, throttling)
@@ -53,8 +55,20 @@ func main() {
 	var err error
 	switch os.Args[1] {
 	case "server":
+		if handled, err := dispatchServiceAction("server", os.Args[2:]); handled {
+			if err != nil {
+				log.Fatal(err)
+			}
+			return
+		}
 		err = runServer(ctx, os.Args[2:])
 	case "agent":
+		if handled, err := dispatchServiceAction("agent", os.Args[2:]); handled {
+			if err != nil {
+				log.Fatal(err)
+			}
+			return
+		}
 		err = runAgent(ctx, os.Args[2:])
 	case "connect":
 		err = runConnect(ctx, os.Args[2:])
@@ -96,6 +110,10 @@ func runServer(ctx context.Context, args []string) error {
 	if os.Getenv("SSETUNNEL_TOTP_SECRET") != "" {
 		log.Println("server: WARNING: SSETUNNEL_TOTP_SECRET is deprecated; per-user TOTP is now used. Set up TOTP via the console.")
 	}
+
+	// SIGHUP: trigger configuration reload (placeholder).
+	installSIGHUPHandler("server", "SIGHUP received, reloading configuration...")
+	// TODO: re-read config files, refresh auth pepper, etc.
 
 	srv := server.NewServerWithBase(*heartbeat, *basePath)
 
@@ -183,6 +201,8 @@ func runServer(ctx context.Context, args []string) error {
 	httpSrv := srv.NewHTTPServer(*listen)
 	go func() {
 		<-ctx.Done()
+		// Force-close all active agent sessions before draining HTTP.
+		srv.Reg.CloseAll()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		httpSrv.Shutdown(shutdownCtx)
@@ -230,6 +250,10 @@ func runAgent(ctx context.Context, args []string) error {
 			req.Header.Set("Authorization", "Bearer "+token)
 		}
 	}
+
+	// SIGHUP: trigger configuration reload (placeholder; agent has no
+	// runtime-reloadable config today — logs only).
+	installSIGHUPHandler("agent", "SIGHUP received (no reloadable config)")
 
 	log.Printf("agent: ssetunnel %s", BuildVersion())
 	if *target != "" {

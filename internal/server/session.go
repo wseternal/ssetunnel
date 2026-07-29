@@ -309,6 +309,21 @@ func (r *Registry) Range(fn func(*Session) bool) {
 	}
 }
 
+// CloseAll closes every live session in the registry.  The lock is held
+// only long enough to snapshot the session slice; individual Close calls
+// happen outside the lock to avoid blocking concurrent operations.
+func (r *Registry) CloseAll() {
+	r.mu.Lock()
+	sessions := make([]*Session, 0, len(r.sessions))
+	for _, s := range r.sessions {
+		sessions = append(sessions, s)
+	}
+	r.mu.Unlock()
+	for _, s := range sessions {
+		s.Close()
+	}
+}
+
 // IDs returns the IDs of all registered sessions.
 func (r *Registry) IDs() []string {
 	r.mu.Lock()
