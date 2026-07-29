@@ -218,7 +218,7 @@ func runServer(ctx context.Context, args []string) error {
 
 func runAgent(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("agent", flag.ContinueOnError)
-	serverURL := fs.String("server", "http://127.0.0.1:8080", "tunnel server URL")
+	serverURL := fs.String("server", "", "tunnel server URL (default: from saved session)")
 	basePath := fs.String("base", "", "HTTP path prefix for tunnel endpoints (must match server --base)")
 	target := fs.String("target", "", "TCP address to forward streams to (empty = dynamic target mode)")
 	agentID := fs.String("id", "", "agent identifier for routing (e.g. mydevbox)")
@@ -234,12 +234,10 @@ func runAgent(ctx context.Context, args []string) error {
 	}
 	batch, conc := clampAgentFlags(*batchSize, *concurrency)
 
-	// Load session token from ~/.ssetunnel/session
-	sessToken, sessErr := auth.LoadSession()
-	if sessErr != nil {
-		log.Printf("agent: warning: failed to load session: %v", sessErr)
-	} else if sessToken != "" {
-		log.Printf("agent: using session from ~/.ssetunnel/session")
+	// Resolve server URL and session token.
+	url, sessToken, err := resolveServerURL(*serverURL, "agent")
+	if err != nil {
+		return err
 	}
 
 	// Build request modifier for session-based auth
@@ -258,14 +256,14 @@ func runAgent(ctx context.Context, args []string) error {
 	log.Printf("agent: ssetunnel %s", BuildVersion())
 	if *target != "" {
 		log.Printf("agent: target %s -> server %s (id=%s, batch-size %d, concurrency %d, compress %v)",
-			*target, *serverURL, *agentID, batch, conc, *compress)
+			*target, url, *agentID, batch, conc, *compress)
 	} else {
 		log.Printf("agent: dynamic target mode -> server %s (id=%s, batch-size %d, concurrency %d, compress %v)",
-			*serverURL, *agentID, batch, conc, *compress)
+			url, *agentID, batch, conc, *compress)
 	}
 
 	ag := &agent.Agent{
-		ServerURL:       *serverURL,
+		ServerURL:       url,
 		BasePath:        *basePath,
 		Target:          *target,
 		AgentID:         *agentID,
@@ -280,7 +278,7 @@ func runAgent(ctx context.Context, args []string) error {
 
 func runConnect(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("connect", flag.ContinueOnError)
-	server := fs.String("server", "http://127.0.0.1:8080", "tunnel server URL")
+	server := fs.String("server", "", "tunnel server URL (default: from saved session)")
 	basePath := fs.String("base", "", "HTTP path prefix for tunnel endpoints (must match server --base)")
 	agentID := fs.String("agent", "", "agent identifier to connect to (e.g. mydevbox)")
 	target := fs.String("target", "", "target address on the agent machine (e.g. 127.0.0.1:22)")
@@ -297,17 +295,10 @@ func runConnect(ctx context.Context, args []string) error {
 		return errors.New("--local is required (e.g. --local 127.0.0.1:3306 or --local -)")
 	}
 
-	url := *server
-	if url == "" {
-		return errors.New("--server is required (e.g. --server http://tunnel.example.com:8080)")
-	}
-
-	// Load session token from ~/.ssetunnel/session
-	sessToken, sessErr := auth.LoadSession()
-	if sessErr != nil {
-		log.Printf("connect: warning: failed to load session: %v", sessErr)
-	} else if sessToken != "" {
-		log.Printf("connect: using session from ~/.ssetunnel/session")
+	// Resolve server URL and session token.
+	url, sessToken, err := resolveServerURL(*server, "connect")
+	if err != nil {
+		return err
 	}
 
 	client := connect.NewClient(url, sessToken, *agentID, *target, *basePath)
@@ -345,6 +336,30 @@ const (
 	minConc      = 1
 	maxConc      = 4
 )
+
+// resolveServerURL resolves the server URL and session token.
+// If serverFlag is set, uses it and loads the matching token.
+// If serverFlag is empty, loads the first saved session.
+// Returns error if no server URL can be resolved.
+func resolveServerURL(serverFlag, prefix string) (url, token string, err error) {
+	token, resolvedServer, sessErr := auth.LoadSession(serverFlag)
+	if sessErr != nil {
+		log.Printf("%s: warning: failed to load session: %v", prefix, sessErr)
+	}
+
+	url = serverFlag
+	if url == "" {
+		if resolvedServer != "" {
+			url = resolvedServer
+			log.Printf("%s: using saved session for %s", prefix, url)
+		} else {
+			return "", "", fmt.Errorf("--server is required (no saved session found; run `ssetunnel login` first)")
+		}
+	} else if token != "" {
+		log.Printf("%s: using saved session for %s", prefix, url)
+	}
+	return url, token, nil
+}
 
 func clampAgentFlags(batchSize, concurrency int) (int, int) {
 	if batchSize < minBatchSize {
@@ -400,10 +415,13 @@ func runProbe(ctx context.Context, args []string) error {
 
 func runLogin(_ context.Context, args []string) error {
 	fs := flag.NewFlagSet("login", flag.ContinueOnError)
-	consoleURL := fs.String("console", "http://127.0.0.1:8081/console", "console base URL (include path prefix if behind reverse proxy)")
+	serverURL := fs.String("server", "http://127.0.0.1:8080", "tunnel server URL")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+
+	// Console API is at <server>/console/api/v1/...
+	consoleBase := *serverURL + "/console/api/v1"
 
 	reader := bufio.NewReader(os.Stdin)
 
@@ -424,7 +442,7 @@ func runLogin(_ context.Context, args []string) error {
 	// Check if TOTP is required for this user.
 	var totpCode string
 	checkBody, _ := json.Marshal(map[string]string{"username": username})
-	checkResp, err := http.Post(*consoleURL+"/api/v1/user-login-check", "application/json", strings.NewReader(string(checkBody)))
+	checkResp, err := http.Post(consoleBase+"/user-login-check", "application/json", strings.NewReader(string(checkBody)))
 	if err == nil {
 		defer checkResp.Body.Close()
 		if checkResp.StatusCode == http.StatusOK {
@@ -456,7 +474,7 @@ func runLogin(_ context.Context, args []string) error {
 		"totp_code": totpCode,
 	})
 
-	resp, err := http.Post(*consoleURL+"/api/v1/user-login", "application/json", strings.NewReader(string(reqBody)))
+	resp, err := http.Post(consoleBase+"/user-login", "application/json", strings.NewReader(string(reqBody)))
 	if err != nil {
 		return fmt.Errorf("login request failed: %w", err)
 	}
@@ -476,11 +494,11 @@ func runLogin(_ context.Context, args []string) error {
 		return fmt.Errorf("failed to parse response: %w", err)
 	}
 
-	if err := auth.SaveSession(result.Token); err != nil {
+	if err := auth.SaveSession(*serverURL, result.Token, result.Username, result.Role); err != nil {
 		return fmt.Errorf("failed to save session: %w", err)
 	}
 
-	fmt.Printf("Login successful! Session saved for %s (role: %s)\n", result.Username, result.Role)
-	fmt.Println("You can now run 'ssetunnel agent' or 'ssetunnel connect' without --token.")
+	fmt.Printf("Login successful! Session saved for %s (role: %s) at %s\n", result.Username, result.Role, *serverURL)
+	fmt.Println("You can now run 'ssetunnel agent' or 'ssetunnel connect' without --server.")
 	return nil
 }
