@@ -59,8 +59,10 @@ func loadSessionFile() (sessionFile, error) {
 	}
 	var sf sessionFile
 	if err := json.Unmarshal(data, &sf); err != nil {
-		// Legacy format (plain token) or corrupted — start fresh.
-		log.Printf("auth: WARNING: session file is in legacy or corrupted format; starting fresh (old data discarded)")
+		// Legacy format (plain token string) or corrupted JSON — start fresh.
+		// The old token cannot be migrated because it lacks server URL, username,
+		// and role metadata. Users must re-run `ssetunnel login`.
+		log.Printf("auth: WARNING: session file uses legacy or corrupted format; all old sessions discarded — re-run `ssetunnel login`")
 		return sessionFile{Sessions: make(map[string]SessionEntry)}, nil
 	}
 	if sf.Sessions == nil {
@@ -87,10 +89,7 @@ func saveSessionFile(sf sessionFile) error {
 func SaveSession(serverURL, token, username, role string) error {
 	sf, err := loadSessionFile()
 	if err != nil {
-		if !os.IsNotExist(err) {
-			return fmt.Errorf("load session file: %w", err)
-		}
-		sf = sessionFile{Sessions: make(map[string]SessionEntry)}
+		return fmt.Errorf("load session file: %w", err)
 	}
 	sf.Sessions[serverURL] = SessionEntry{
 		Token:    token,

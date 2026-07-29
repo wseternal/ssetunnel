@@ -13,23 +13,23 @@ Runs the public tunnel server. Opens HTTP listener (agent tunnel + connect endpo
 
 ### `agent`
 ```bash
-ssetunnel agent [--target 127.0.0.1:22] [--server http://127.0.0.1:8080] \
-  [--id mydevbox] [--batch-size 16384] [--concurrency 1] [--compress]
+ssetunnel agent [--target 127.0.0.1:22] [--server <URL>] \
+  [--id mydevbox] [--batch-size 262144] [--concurrency 1] [--compress]
 ```
-Runs the restricted-network agent. `--target` is optional (empty = dynamic target mode). `--id` identifies the agent for server-side routing. Uses session from `~/.ssetunnel/session` if available.
+Runs the restricted-network agent. `--target` is optional (empty = dynamic target mode). `--server` is optional (default: from saved session). `--id` identifies the agent for server-side routing. Uses session from `~/.ssetunnel/session` if available.
 
 ### `connect`
 ```bash
-ssetunnel connect --local 127.0.0.1:3306 [--server http://127.0.0.1:8080] [--agent dev] [--target 127.0.0.1:22]
+ssetunnel connect --local 127.0.0.1:3306 [--server <URL>] [--agent dev] [--target 127.0.0.1:22]
 ssetunnel connect --local -  # Stdio mode for SSH ProxyCommand
 ```
-User-side connection wrapper. Uses HTTP transport (SSE-down + POST-up) to connect to the server. `--local -` enables stdio mode (stdin/stdout pipes for SSH ProxyCommand). `--agent` routes to a specific agent. `--target` enables dynamic target mode.
+User-side connection wrapper. Uses HTTP transport (SSE-down + POST-up) to connect to the server. `--server` is optional (default: from saved session). `--local -` enables stdio mode (stdin/stdout pipes for SSH ProxyCommand). `--agent` routes to a specific agent. `--target` enables dynamic target mode.
 
 ### `login`
 ```bash
-ssetunnel login [--console http://127.0.0.1:8081]
+ssetunnel login [--server http://127.0.0.1:8081] [--tunnel-server <URL>]
 ```
-Interactive username/password login with optional TOTP. Saves session token to `~/.ssetunnel/session`.
+Interactive username/password login with optional TOTP. `--server` is the console port URL for login API. `--tunnel-server` is the tunnel URL to save in session (default: derived from `--server` by replacing port 8081→8080). Saves session token to `~/.ssetunnel/session`.
 
 ### `probe`
 ```bash

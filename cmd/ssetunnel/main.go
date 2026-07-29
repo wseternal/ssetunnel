@@ -345,22 +345,32 @@ func resolveServerURL(serverFlag, prefix string) (url, token string, err error) 
 	// Trim trailing slash for consistent URL handling.
 	serverFlag = strings.TrimRight(serverFlag, "/")
 	token, resolvedServer, sessErr := auth.LoadSession(serverFlag)
-	if sessErr != nil {
-		log.Printf("%s: warning: failed to load session: %v", prefix, sessErr)
-	}
 
 	url = serverFlag
 	if url == "" {
+		if sessErr != nil {
+			return "", "", fmt.Errorf("--server is required (failed to load saved session: %w); run `ssetunnel login` first", sessErr)
+		}
 		if resolvedServer != "" {
 			url = resolvedServer
 			log.Printf("%s: using saved session for %s", prefix, url)
 		} else {
 			return "", "", fmt.Errorf("--server is required (no saved session found; run `ssetunnel login` first)")
 		}
-	} else if token != "" {
-		log.Printf("%s: using saved session for %s", prefix, url)
+	} else {
+		if sessErr != nil {
+			log.Printf("%s: warning: failed to load session for %s: %v (proceeding without saved token)", prefix, url, sessErr)
+		} else if token != "" {
+			log.Printf("%s: using saved session for %s", prefix, url)
+		}
 	}
 	return url, token, nil
+}
+
+// deriveTunnelURL maps a console URL (default port 8081) to the tunnel
+// URL (default port 8080) by replacing the trailing port.
+func deriveTunnelURL(consoleURL string) string {
+	return strings.Replace(consoleURL, ":8081", ":8080", 1)
 }
 
 func clampAgentFlags(batchSize, concurrency int) (int, int) {
@@ -418,6 +428,7 @@ func runProbe(ctx context.Context, args []string) error {
 func runLogin(_ context.Context, args []string) error {
 	fs := flag.NewFlagSet("login", flag.ContinueOnError)
 	serverURL := fs.String("server", "http://127.0.0.1:8081", "tunnel server URL (console port)")
+	tunnelServer := fs.String("tunnel-server", "", "tunnel server URL to save in session (default: --server with port 8081→8080)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -499,11 +510,18 @@ func runLogin(_ context.Context, args []string) error {
 		return fmt.Errorf("failed to parse response: %w", err)
 	}
 
-	if err := auth.SaveSession(*serverURL, result.Token, result.Username, result.Role); err != nil {
+	// Determine tunnel URL for session storage.
+	tunnelURL := *tunnelServer
+	if tunnelURL == "" {
+		tunnelURL = deriveTunnelURL(*serverURL)
+	}
+	tunnelURL = strings.TrimRight(tunnelURL, "/")
+
+	if err := auth.SaveSession(tunnelURL, result.Token, result.Username, result.Role); err != nil {
 		return fmt.Errorf("failed to save session: %w", err)
 	}
 
-	fmt.Printf("Login successful! Session saved for %s (role: %s) at %s\n", result.Username, result.Role, *serverURL)
+	fmt.Printf("Login successful! Session saved for %s (role: %s) at %s\n", result.Username, result.Role, tunnelURL)
 	fmt.Println("You can now run 'ssetunnel agent' or 'ssetunnel connect' without --server.")
 	return nil
 }
