@@ -85,6 +85,11 @@ interface AgentConfig {
   updated_at: string;
 }
 
+interface ConnectedAgent {
+  agent_id: string;
+  session_id: string;
+}
+
 interface MetricSnapshot {
   throughput_up_p50_bps: number;
   throughput_up_p95_bps: number;
@@ -203,6 +208,7 @@ export default function App() {
   const [selectedStatsAgent, setSelectedStatsAgent] = useState<string>('');
 
   // Cloud Shell
+  const [connectedAgents, setConnectedAgents] = useState<ConnectedAgent[]>([]);
   const [shellAgent, setShellAgent] = useState<string>('');
   const [shellConnected, setShellConnected] = useState(false);
   const [shellSessionId, setShellSessionId] = useState<string>('');
@@ -251,6 +257,15 @@ export default function App() {
     try {
       const res = await fetch('/console/api/v1/agents', { headers: authHeaders() });
       if (checkAuth(res) && res.ok) setAgents(await res.json());
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  const fetchConnectedAgents = async () => {
+    try {
+      const res = await fetch('/console/api/v1/connected-agents', { headers: authHeaders() });
+      if (checkAuth(res) && res.ok) setConnectedAgents(await res.json());
     } catch (e) {
       console.error(e);
     }
@@ -520,13 +535,15 @@ export default function App() {
     if (isLoggedIn && roleConfirmed) {
       fetchSessions();
       fetchAgents();
+      fetchConnectedAgents();
       fetchMetricsOverview();
       fetchAgentMetrics();
       if (isAdmin) fetchUsers();
       const sessionInterval = setInterval(fetchSessions, 3000);
       const agentInterval = setInterval(fetchAgents, 10000);
+      const connectedInterval = setInterval(fetchConnectedAgents, 3000);
       const metricsInterval = setInterval(() => { fetchMetricsOverview(); fetchAgentMetrics(); }, 10000);
-      return () => { clearInterval(sessionInterval); clearInterval(agentInterval); clearInterval(metricsInterval); };
+      return () => { clearInterval(sessionInterval); clearInterval(agentInterval); clearInterval(connectedInterval); clearInterval(metricsInterval); };
     }
   }, [isLoggedIn, isAdmin, roleConfirmed]);
 
@@ -1173,8 +1190,8 @@ export default function App() {
                               onChange={(e) => setShellAgent(e.target.value)}
                               disabled={shellConnected}
                             >
-                              {agentMetrics.map((am) => (
-                                <MenuItem key={am.agent_id} value={am.agent_id}>{am.agent_id}</MenuItem>
+                              {connectedAgents.map((ca) => (
+                                <MenuItem key={ca.agent_id} value={ca.agent_id}>{ca.agent_id}</MenuItem>
                               ))}
                             </Select>
                           </FormControl>
@@ -1195,7 +1212,7 @@ export default function App() {
                         </Box>
                       }
                     />
-                    {agentMetrics.length === 0 && (
+                    {connectedAgents.length === 0 && (
                       <Alert severity="info" sx={{ mb: 2 }}>No agents connected. Start an agent to use the cloud shell.</Alert>
                     )}
                     <Paper
@@ -1386,8 +1403,8 @@ export default function App() {
                               onChange={(e) => setShellAgent(e.target.value)}
                               disabled={shellConnected}
                             >
-                              {agents.map((a) => (
-                                <MenuItem key={a.id} value={a.agent_id ?? ''}>{a.agent_id ?? '(default)'}</MenuItem>
+                              {connectedAgents.map((ca) => (
+                                <MenuItem key={ca.agent_id} value={ca.agent_id}>{ca.agent_id}</MenuItem>
                               ))}
                             </Select>
                           </FormControl>
@@ -1408,8 +1425,8 @@ export default function App() {
                         </Box>
                       }
                     />
-                    {agents.length === 0 && (
-                      <Alert severity="info" sx={{ mb: 2 }}>No agents configured. Contact an admin to add an agent.</Alert>
+                    {connectedAgents.length === 0 && (
+                      <Alert severity="info" sx={{ mb: 2 }}>No agents connected. Start an agent to use the cloud shell.</Alert>
                     )}
                     <Paper
                       sx={{
