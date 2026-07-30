@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.1](https://github.com/wseternal/ssetunnel/compare/v1.0.0...v1.0.1) (2026-07-30)
+
+
+### Bug Fixes
+
+* **console:** register shell connect routes before PathPrefix catch-all ([e2071cf](https://github.com/wseternal/ssetunnel/commit/e2071cfd0578177129cadf7467d18bc6fa631410))
+
 ## 1.0.0 (2026-07-30)
 
 
