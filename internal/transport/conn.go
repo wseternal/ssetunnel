@@ -119,6 +119,12 @@ type Conn struct {
 
 	closeOnce sync.Once
 	wg        sync.WaitGroup // readLoop
+
+	// OnTune is called when the server pushes an event: tune control frame.
+	// The agent applies the parameter changes (batch size, gzip) to the
+	// batcher. Concurrency changes are deferred to reconnect (v1 limitation).
+	// nil means auto-tuning is disabled (--no-auto-tune).
+	OnTune func(params []byte) // JSON-encoded TransportParams
 }
 
 // upTask is one seq-numbered batch handed to a pool worker.
@@ -297,9 +303,21 @@ func DialConnect(ctx context.Context, cfg Config) (*Conn, error) {
 // SessionID returns the agent-generated session ID.
 func (c *Conn) SessionID() string { return c.id }
 
+// ApplyTune applies transport parameter changes from the server's
+// event: tune control frame. Currently adjusts batch size only;
+// concurrency changes are deferred to reconnect (v1 limitation).
+func (c *Conn) ApplyTune(batchSize int, compress bool) {
+	if c.batcher != nil && batchSize > 0 {
+		c.batcher.SetMaxSize(batchSize)
+	}
+	// Note: gzip flag change takes effect on next batch flush.
+	// Concurrency change requires reconnect (v1 limitation).
+}
+
 // readLoop decodes the SSE stream into the down pipe. Heartbeats are
 // filtered by the codec and never surface as data. Stream death kills
-// the conn (fail-fast, decision 3).
+// the conn (fail-fast, decision 3). Tune control frames are dispatched
+// to the OnTune callback instead of the down pipe.
 func (c *Conn) readLoop(body io.ReadCloser) {
 	defer c.wg.Done()
 	defer body.Close()
@@ -315,7 +333,14 @@ func (c *Conn) readLoop(body io.ReadCloser) {
 				return
 			}
 			for _, ev := range events {
-				if _, werr := c.down.Write(ev); werr != nil {
+				if ev.Type == SSEEventTypeTune {
+					// Auto-tuner control frame: dispatch to callback.
+					if c.OnTune != nil {
+						c.OnTune(ev.Data)
+					}
+					continue
+				}
+				if _, werr := c.down.Write(ev.Data); werr != nil {
 					return // conn closed
 				}
 			}

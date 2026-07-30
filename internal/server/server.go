@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/wseternal/ssetunnel/internal/auth"
+	"github.com/wseternal/ssetunnel/internal/metrics"
 	"github.com/wseternal/ssetunnel/internal/mux"
 )
 
@@ -24,9 +25,10 @@ type Server struct {
 	// Reg is the live session registry (exported for tests and the console).
 	Reg *Registry
 
-	handler  *Handler
-	store    *auth.Store
-	basePath string // HTTP path prefix for all endpoints (empty = no prefix)
+	handler   *Handler
+	store     *auth.Store
+	metrics   *metrics.MetricsCollector
+	basePath  string // HTTP path prefix for all endpoints (empty = no prefix)
 }
 
 // NewServer builds a server given an SSE heartbeat interval.
@@ -59,9 +61,39 @@ func NewServerWithRegistryAndBase(reg *Registry, heartbeat time.Duration, basePa
 func (s *Server) SetAuthStore(store *auth.Store) {
 	s.store = store
 	prev := s.handler
-	s.handler = NewHandlerWithAuth(s.Reg, s.handler.heartbeat, store, s.basePath)
+	s.handler = NewHandlerWithMetrics(s.Reg, s.handler.heartbeat, store, s.metrics, s.basePath)
 	s.handler.OnSession = s.attach
 	s.handler.OnUpPush = prev.OnUpPush
+}
+
+// SetMetricsCollector attaches a metrics collector for transport monitoring
+// and auto-tuning. Must be called before serving; recreates the handler
+// to pick up the collector.
+func (s *Server) SetMetricsCollector(mc *metrics.MetricsCollector) {
+	s.metrics = mc
+	prev := s.handler
+	s.handler = NewHandlerWithMetrics(s.Reg, s.handler.heartbeat, s.store, mc, s.basePath)
+	s.handler.OnSession = s.attach
+	s.handler.OnUpPush = prev.OnUpPush
+}
+
+// MetricsCollector returns the attached metrics collector (may be nil).
+func (s *Server) MetricsCollector() *metrics.MetricsCollector {
+	return s.metrics
+}
+
+// FindSession returns the session for a given agent ID, or nil if not found.
+// Used by the auto-tuner to push tune frames to agents.
+func (s *Server) FindSession(agentID string) *Session {
+	var found *Session
+	s.Reg.Range(func(sess *Session) bool {
+		if sess.AgentID() == agentID {
+			found = sess
+			return false
+		}
+		return true
+	})
+	return found
 }
 
 // AttachSession manually attaches a session (useful for custom flows and testing).

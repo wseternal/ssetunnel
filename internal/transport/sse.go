@@ -8,6 +8,9 @@ import (
 	"net/http"
 )
 
+// SSEEventTypeTune is the SSE event type for auto-tuner control frames.
+const SSEEventTypeTune = "tune"
+
 // maxSSELineSize bounds one encoded SSE line so a corrupt or hostile
 // peer cannot make the decoder buffer unboundedly.
 const maxSSELineSize = 1 << 20 // 1 MiB
@@ -35,6 +38,21 @@ func WriteFrame(w io.Writer, f http.Flusher, payload []byte) error {
 	return nil
 }
 
+// WriteTuneFrame writes an SSE event: tune control frame with JSON payload.
+// The agent's SSE decoder parses this to apply parameter changes.
+func WriteTuneFrame(w io.Writer, f http.Flusher, jsonPayload []byte) error {
+	var buf bytes.Buffer
+	buf.WriteString("event: tune\n")
+	buf.WriteString("data: ")
+	buf.Write(jsonPayload)
+	buf.WriteString("\n\n")
+	if _, err := w.Write(buf.Bytes()); err != nil {
+		return fmt.Errorf("write sse tune frame: %w", err)
+	}
+	f.Flush()
+	return nil
+}
+
 // WriteHeartbeat writes an SSE comment keepalive and flushes. Comments
 // are ignored by decoders, so heartbeats never surface as data.
 func WriteHeartbeat(w io.Writer, f http.Flusher) error {
@@ -45,25 +63,33 @@ func WriteHeartbeat(w io.Writer, f http.Flusher) error {
 	return nil
 }
 
+// SSEEvent is one parsed SSE event with its type and decoded data.
+// Type is empty for data-only events (no event: field).
+type SSEEvent struct {
+	Type string // e.g. "tune", or empty for plain data
+	Data []byte // decoded payload
+}
+
 // sseDecoder incrementally decodes an SSE stream: Feed accepts arbitrary
-// byte chunks and returns the payloads of complete events.
+// byte chunks and returns complete typed events.
 type sseDecoder struct {
-	buf     []byte // partial line bytes not yet terminated by \n
-	data    []byte // decoded payload of the event currently in progress
-	hasData bool   // whether the current event carried any data line
-	err     error  // sticky protocol error
+	buf       []byte // partial line bytes not yet terminated by \n
+	data      []byte // decoded payload of the event currently in progress
+	eventType string // current event type from event: field
+	hasData   bool   // whether the current event carried any data line
+	err       error  // sticky protocol error
 }
 
 func newSSEDecoder() *sseDecoder { return &sseDecoder{} }
 
-// Feed appends p to the stream and returns every event payload completed
-// by it. Comment lines (heartbeats) and unknown fields are dropped.
-func (d *sseDecoder) Feed(p []byte) ([][]byte, error) {
+// Feed appends p to the stream and returns every complete event.
+// Comment lines (heartbeats) are dropped. Unknown fields are ignored.
+func (d *sseDecoder) Feed(p []byte) ([]SSEEvent, error) {
 	if d.err != nil {
 		return nil, d.err
 	}
 	d.buf = append(d.buf, p...)
-	var events [][]byte
+	var events []SSEEvent
 	for {
 		i := bytes.IndexByte(d.buf, '\n')
 		if i < 0 {
@@ -84,8 +110,8 @@ func (d *sseDecoder) Feed(p []byte) ([][]byte, error) {
 		case len(line) == 0:
 			// Blank line: end of event. Emit only if it carried data.
 			if d.hasData {
-				events = append(events, d.data)
-				d.data, d.hasData = nil, false
+				events = append(events, SSEEvent{Type: d.eventType, Data: d.data})
+				d.data, d.hasData, d.eventType = nil, false, ""
 			}
 		case line[0] == ':':
 			// Comment (heartbeat): ignore.
@@ -95,8 +121,12 @@ func (d *sseDecoder) Feed(p []byte) ([][]byte, error) {
 			}
 		case bytes.Equal(line, []byte("data:")):
 			d.hasData = true // empty payload frame
+		case bytes.HasPrefix(line, []byte("event: ")):
+			d.eventType = string(line[len("event: "):])
+		case bytes.Equal(line, []byte("event:")):
+			d.eventType = "" // empty event type
 		default:
-			// Unknown SSE field (event:, id:, retry:): ignore.
+			// Unknown SSE field (id:, retry:): ignore.
 		}
 	}
 }

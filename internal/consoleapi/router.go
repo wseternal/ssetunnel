@@ -11,6 +11,7 @@ import (
 
 	"github.com/gorilla/mux"
 	"github.com/wseternal/ssetunnel/internal/auth"
+	"github.com/wseternal/ssetunnel/internal/metrics"
 	"github.com/wseternal/ssetunnel/internal/server"
 )
 
@@ -23,6 +24,7 @@ var validRoles = map[string]bool{"admin": true, "user": true}
 type API struct {
 	store *auth.Store
 	reg   *server.Registry
+	mc    *metrics.MetricsCollector // nil when metrics disabled
 
 	// Login rate limiting: password failures per IP.
 	pwRateMu    sync.Mutex
@@ -38,7 +40,18 @@ type API struct {
 	stopCleanup chan struct{}
 }
 
-func NewRouter(store *auth.Store, reg *server.Registry) http.Handler {
+// Router wraps the HTTP router with a reference to the API for late configuration.
+type Router struct {
+	*mux.Router
+	api *API
+}
+
+// SetMetrics attaches a metrics collector to the API for statistics endpoints.
+func (r *Router) SetMetrics(mc *metrics.MetricsCollector) {
+	r.api.mc = mc
+}
+
+func NewRouter(store *auth.Store, reg *server.Registry) *Router {
 	api := &API{
 		store:         store,
 		reg:           reg,
@@ -87,7 +100,13 @@ func NewRouter(store *auth.Store, reg *server.Registry) http.Handler {
 	r.Handle("/api/v1/totp/verify-setup", userAuth(http.HandlerFunc(api.handleTOTPVerifySetup))).Methods("POST")
 	r.Handle("/api/v1/totp", userAuth(http.HandlerFunc(api.handleTOTPDelete))).Methods("DELETE")
 
-	return r
+	// Metrics routes (authenticated user, scoped by user_id for non-admins)
+	r.Handle("/api/v1/metrics/overview", userAuth(http.HandlerFunc(api.handleMetricsOverview))).Methods("GET")
+	r.Handle("/api/v1/metrics/agents", userAuth(http.HandlerFunc(api.handleMetricsAgents))).Methods("GET")
+	r.Handle("/api/v1/metrics/agents/{agentID}/samples", userAuth(http.HandlerFunc(api.handleMetricsSamples))).Methods("GET")
+	r.Handle("/api/v1/metrics/agents/{agentID}/decisions", userAuth(http.HandlerFunc(api.handleMetricsDecisions))).Methods("GET")
+
+	return &Router{Router: r, api: api}
 }
 
 // corsMiddleware adds restrictive CORS headers for the console API.
@@ -828,4 +847,192 @@ func (a *API) handleTOTPDelete(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]string{"status": "disabled"})
+}
+
+// --- Metrics endpoints ---
+
+// userScopedAgentIDs returns the set of agent IDs visible to the current user.
+// Admins see all agents; non-admins see only agents from their own sessions.
+func (a *API) userScopedAgentIDs(r *http.Request) (map[string]bool, bool) {
+	sessInfo := server.UserSessionFromContext(r)
+	if sessInfo == nil {
+		return nil, false
+	}
+	isAdmin := auth.HasPermission(sessInfo.Role, auth.PermAdmin)
+
+	agentIDs := make(map[string]bool)
+	if a.reg != nil {
+		a.reg.Range(func(s *server.Session) bool {
+			if isAdmin || s.UserID() == sessInfo.UserID {
+				if aid := s.AgentID(); aid != "" {
+					agentIDs[aid] = true
+				}
+			}
+			return true
+		})
+	}
+	return agentIDs, true
+}
+
+func (a *API) handleMetricsOverview(w http.ResponseWriter, r *http.Request) {
+	if a.mc == nil {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(metrics.Overview{})
+		return
+	}
+
+	agentIDs, ok := a.userScopedAgentIDs(r)
+	if !ok {
+		http.Error(w, "not authenticated", http.StatusUnauthorized)
+		return
+	}
+
+	// Get global overview but filter to user-scoped agents
+	overview := a.mc.Overview()
+	if len(agentIDs) == 0 {
+		overview = metrics.Overview{}
+	} else {
+		// Re-compute overview for scoped agents only
+		overview = metrics.Overview{}
+		overview.ActiveAgents = len(agentIDs)
+		for _, am := range a.mc.AllAgentMetrics() {
+			if agentIDs[am.AgentID] {
+				overview.ThroughputUpBps += am.Snapshot.ThroughputUpP50
+				overview.ThroughputDnBps += am.Snapshot.ThroughputDnP50
+			}
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(overview)
+}
+
+func (a *API) handleMetricsAgents(w http.ResponseWriter, r *http.Request) {
+	if a.mc == nil {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode([]metrics.AgentMetrics{})
+		return
+	}
+
+	agentIDs, ok := a.userScopedAgentIDs(r)
+	if !ok {
+		http.Error(w, "not authenticated", http.StatusUnauthorized)
+		return
+	}
+
+	// Filter agent metrics to user-scoped agents
+	allMetrics := a.mc.AllAgentMetrics()
+	filtered := make([]metrics.AgentMetrics, 0, len(agentIDs))
+	for _, am := range allMetrics {
+		if agentIDs[am.AgentID] {
+			filtered = append(filtered, am)
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(filtered)
+}
+
+func (a *API) handleMetricsSamples(w http.ResponseWriter, r *http.Request) {
+	if a.mc == nil {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode([]metrics.MetricSample{})
+		return
+	}
+
+	agentIDs, ok := a.userScopedAgentIDs(r)
+	if !ok {
+		http.Error(w, "not authenticated", http.StatusUnauthorized)
+		return
+	}
+
+	vars := mux.Vars(r)
+	agentID := vars["agentID"]
+	if !agentIDs[agentID] {
+		http.Error(w, "agent not found or access denied", http.StatusNotFound)
+		return
+	}
+
+	// Parse time range from query params (default: last 24 hours)
+	now := time.Now()
+	from := now.Add(-24 * time.Hour)
+	to := now
+
+	if fromStr := r.URL.Query().Get("from"); fromStr != "" {
+		if t, err := time.Parse(time.RFC3339, fromStr); err == nil {
+			from = t
+		}
+	}
+	if toStr := r.URL.Query().Get("to"); toStr != "" {
+		if t, err := time.Parse(time.RFC3339, toStr); err == nil {
+			to = t
+		}
+	}
+
+	store := a.mc.Store()
+	if store == nil {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode([]metrics.MetricSample{})
+		return
+	}
+
+	samples, err := store.QuerySamples(agentID, from, to)
+	if err != nil {
+		http.Error(w, "failed to query samples: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if samples == nil {
+		samples = []metrics.MetricSample{}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(samples)
+}
+
+func (a *API) handleMetricsDecisions(w http.ResponseWriter, r *http.Request) {
+	if a.mc == nil {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode([]metrics.TuningDecision{})
+		return
+	}
+
+	agentIDs, ok := a.userScopedAgentIDs(r)
+	if !ok {
+		http.Error(w, "not authenticated", http.StatusUnauthorized)
+		return
+	}
+
+	vars := mux.Vars(r)
+	agentID := vars["agentID"]
+	if !agentIDs[agentID] {
+		http.Error(w, "agent not found or access denied", http.StatusNotFound)
+		return
+	}
+
+	// Parse limit from query param (default: 50)
+	limit := 50
+	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
+		if l, err := strconv.Atoi(limitStr); err == nil && l > 0 {
+			limit = l
+		}
+	}
+
+	store := a.mc.Store()
+	if store == nil {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode([]metrics.TuningDecision{})
+		return
+	}
+
+	decisions, err := store.QueryDecisions(agentID, limit)
+	if err != nil {
+		http.Error(w, "failed to query decisions: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if decisions == nil {
+		decisions = []metrics.TuningDecision{}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(decisions)
 }

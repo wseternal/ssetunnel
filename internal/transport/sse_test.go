@@ -40,8 +40,8 @@ func TestSSERoundTrip(t *testing.T) {
 			if len(events) != 1 {
 				t.Fatalf("got %d events, want 1", len(events))
 			}
-			if !bytes.Equal(events[0], want) {
-				t.Fatalf("payload mismatch: got %d bytes, want %d", len(events[0]), len(want))
+			if !bytes.Equal(events[0].Data, want) {
+				t.Fatalf("payload mismatch: got %d bytes, want %d", len(events[0].Data), len(want))
 			}
 			if rest := dec.Rest(); len(rest) != 0 {
 				t.Fatalf("decoder left %d buffered bytes, want 0", len(rest))
@@ -100,7 +100,7 @@ func TestSSEHeartbeatFiltered(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Feed: %v", err)
 	}
-	if len(events) != 1 || string(events[0]) != "real data" {
+	if len(events) != 1 || string(events[0].Data) != "real data" {
 		t.Fatalf("got %d events %q, want exactly [\"real data\"]", len(events), events)
 	}
 }
@@ -117,7 +117,7 @@ func TestSSESplitLineReassembly(t *testing.T) {
 	raw := wire.Bytes()
 	for split := 0; split <= len(raw); split++ {
 		dec := newSSEDecoder()
-		var events [][]byte
+		var events []SSEEvent
 		for _, chunk := range [][]byte{raw[:split], raw[split:]} {
 			got, err := dec.Feed(chunk)
 			if err != nil {
@@ -125,7 +125,7 @@ func TestSSESplitLineReassembly(t *testing.T) {
 			}
 			events = append(events, got...)
 		}
-		if len(events) != 2 || string(events[0]) != "first" || string(events[1]) != "second" {
+		if len(events) != 2 || string(events[0].Data) != "first" || string(events[1].Data) != "second" {
 			t.Fatalf("split %d: got %q, want [first second]", split, events)
 		}
 	}
@@ -147,7 +147,7 @@ func TestSSEDecoderMultiFrameSingleFeed(t *testing.T) {
 		t.Fatalf("got %d events, want %d", len(events), n)
 	}
 	for i, ev := range events {
-		if len(ev) != 1 || ev[0] != byte(i) {
+		if len(ev.Data) != 1 || ev.Data[0] != byte(i) {
 			t.Fatalf("event %d = %v, want [%d]", i, ev, i)
 		}
 	}

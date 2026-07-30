@@ -10,13 +10,15 @@ import (
 	"github.com/wseternal/ssetunnel/frontend"
 	"github.com/wseternal/ssetunnel/internal/auth"
 	"github.com/wseternal/ssetunnel/internal/consoleapi"
+	"github.com/wseternal/ssetunnel/internal/metrics"
 	"github.com/wseternal/ssetunnel/internal/server"
 )
 
 // NewConsoleHandler builds an HTTP handler combining the JSON management API
 // under /console/api/v1/... and serving the React console SPA catch-all at
 // /console/ using litespaserver.
-func NewConsoleHandler(ctx context.Context, pool *pgxpool.Pool, store *auth.Store, reg *server.Registry) http.Handler {
+// mc may be nil when metrics are disabled.
+func NewConsoleHandler(ctx context.Context, pool *pgxpool.Pool, store *auth.Store, reg *server.Registry, mc *metrics.MetricsCollector) http.Handler {
 	r := mux.NewRouter()
 
 	// Redirect bare /console to /console/ so relative links work correctly.
@@ -25,8 +27,9 @@ func NewConsoleHandler(ctx context.Context, pool *pgxpool.Pool, store *auth.Stor
 	})
 
 	// API routes — strip /console so the inner router sees /api/v1/...
-	apiHandler := consoleapi.NewRouter(store, reg)
-	r.PathPrefix("/console/api/v1/").Handler(http.StripPrefix("/console", apiHandler))
+	apiRouter := consoleapi.NewRouter(store, reg)
+	apiRouter.SetMetrics(mc)
+	r.PathPrefix("/console/api/v1/").Handler(http.StripPrefix("/console", apiRouter))
 
 	// SPA catch-all
 	spaCfg := litespaserver.Config{
