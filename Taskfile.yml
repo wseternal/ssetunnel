@@ -75,19 +75,25 @@ tasks:
       - mkdir -p {{.BUILD_DIR}}
       - GOOS=linux   GOARCH=amd64 go build -ldflags "{{.LDFLAGS}}" -o {{.BUILD_DIR}}/{{.BIN}}-linux-amd64    ./cmd/ssetunnel
   go:release:
-    desc: Cross-compile Go CLI for all platforms
+    desc: Cross-compile all platforms via Docker (CGO=1, musl/mingw/osxcross)
+    vars:
+      DIST: dist
+      IMAGE: ssetunnel-cross
     cmds:
-      - mkdir -p {{.BUILD_DIR}}
-      - GOOS=darwin  GOARCH=arm64 go build -ldflags "{{.LDFLAGS}}" -o {{.BUILD_DIR}}/{{.BIN}}-darwin-arm64   ./cmd/ssetunnel
-      - GOOS=darwin  GOARCH=amd64 go build -ldflags "{{.LDFLAGS}}" -o {{.BUILD_DIR}}/{{.BIN}}-darwin-amd64   ./cmd/ssetunnel
-      - GOOS=linux   GOARCH=amd64 go build -ldflags "{{.LDFLAGS}}" -o {{.BUILD_DIR}}/{{.BIN}}-linux-amd64    ./cmd/ssetunnel
-      - GOOS=linux   GOARCH=arm64 go build -ldflags "{{.LDFLAGS}}" -o {{.BUILD_DIR}}/{{.BIN}}-linux-arm64    ./cmd/ssetunnel
-      - GOOS=windows GOARCH=amd64 go build -ldflags "{{.LDFLAGS}}" -o {{.BUILD_DIR}}/{{.BIN}}-windows-amd64.exe ./cmd/ssetunnel
+      - docker build -t {{.IMAGE}} -f .docker/Dockerfile.cross .docker/
+      - mkdir -p {{.DIST}}
+      - >-
+        docker run --rm
+        -e VERSION={{.VERSION | default "dev"}}
+        -e GIT_SHA={{.GIT_SHA}}
+        -v "$(pwd)":/src
+        {{.IMAGE}}
+        sh .docker/build.sh
 
   go:clean:
     desc: Clean Go build artifacts
     cmds:
-      - rm -rf {{.BUILD_DIR}} coverage.out coverage.html
+      - rm -rf {{.BUILD_DIR}} dist coverage.out coverage.html
 
   # ── Frontend ────────────────────────────────────────────────────────
 
