@@ -128,6 +128,11 @@ func (s *Server) attach(sess *Session) {
 // HTTPHandler returns the tunnel endpoint handler (/events, /up).
 func (s *Server) HTTPHandler() http.Handler { return s.handler }
 
+// TunnelHandler returns the underlying tunnel handler for external mounting.
+// Used by the console server to proxy shell connect requests through the
+// existing /connect and /connect-up endpoints.
+func (s *Server) TunnelHandler() *Handler { return s.handler }
+
 // NewHTTPServer builds the production HTTP server.
 func (s *Server) NewHTTPServer(addr string) *http.Server {
 	return &http.Server{

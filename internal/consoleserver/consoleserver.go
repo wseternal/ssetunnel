@@ -18,7 +18,8 @@ import (
 // under /console/api/v1/... and serving the React console SPA catch-all at
 // /console/ using litespaserver.
 // mc may be nil when metrics are disabled.
-func NewConsoleHandler(ctx context.Context, pool *pgxpool.Pool, store *auth.Store, reg *server.Registry, mc *metrics.MetricsCollector) http.Handler {
+// srv is the tunnel server; its handler is used for cloud shell proxying.
+func NewConsoleHandler(ctx context.Context, pool *pgxpool.Pool, store *auth.Store, reg *server.Registry, mc *metrics.MetricsCollector, srv *server.Server) http.Handler {
 	r := mux.NewRouter()
 
 	// Redirect bare /console to /console/ so relative links work correctly.
@@ -30,6 +31,15 @@ func NewConsoleHandler(ctx context.Context, pool *pgxpool.Pool, store *auth.Stor
 	apiRouter := consoleapi.NewRouter(store, reg)
 	apiRouter.SetMetrics(mc)
 	r.PathPrefix("/console/api/v1/").Handler(http.StripPrefix("/console", apiRouter))
+
+	// Cloud shell: proxy to the tunnel handler's /connect and /connect-up
+	// endpoints with forced target=__shell__. Auth via user session middleware.
+	if srv != nil {
+		th := srv.TunnelHandler()
+		userAuth := server.UserSessionMiddleware(store)
+		r.Handle("/console/api/v1/shell/connect", userAuth(th.ShellConnectHandler())).Methods("GET")
+		r.Handle("/console/api/v1/shell/connect-up", userAuth(th.ShellConnectUpHandler())).Methods("POST")
+	}
 
 	// SPA catch-all
 	spaCfg := litespaserver.Config{

@@ -228,11 +228,11 @@ func runServer(ctx context.Context, args []string) error {
 	}
 
 	if consoleLn != nil {
-		consoleHandler := consoleserver.NewConsoleHandler(ctx, pool, store, srv.Reg, srv.MetricsCollector())
+		consoleHandler := consoleserver.NewConsoleHandler(ctx, pool, store, srv.Reg, srv.MetricsCollector(), srv)
 		consoleSrv := &http.Server{
 			Handler:      consoleHandler,
 			ReadTimeout:  15 * time.Second,
-			WriteTimeout: 30 * time.Second,
+			WriteTimeout: 0, // must not kill SSE (cloud shell streams indefinitely)
 		}
 		go func() {
 			<-ctx.Done()
