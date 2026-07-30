@@ -86,6 +86,9 @@ func NewRouter(store *auth.Store, reg *server.Registry) *Router {
 	r.Handle("/api/v1/users", adminAuth(http.HandlerFunc(api.handleUsers))).Methods("GET", "POST")
 	r.Handle("/api/v1/users/{id}", adminAuth(http.HandlerFunc(api.handleUserUpdate))).Methods("PATCH", "DELETE")
 
+	// Connected agents: live agent IDs from session registry (any authenticated user)
+	r.Handle("/api/v1/connected-agents", userAuth(http.HandlerFunc(api.handleConnectedAgents))).Methods("GET")
+
 	// Agent config routes: read for any authenticated user, write for admin only
 	r.Handle("/api/v1/agents", userAuth(http.HandlerFunc(api.handleAgents))).Methods("GET")
 	r.Handle("/api/v1/agents", adminAuth(http.HandlerFunc(api.handleAgents))).Methods("POST")
@@ -551,6 +554,42 @@ func (a *API) handleUserUpdate(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]string{"status": "deleted"})
 	}
+}
+
+// ConnectedAgentInfo describes a single connected agent visible to the user.
+type ConnectedAgentInfo struct {
+	AgentID   string `json:"agent_id"`
+	SessionID string `json:"session_id"`
+}
+
+func (a *API) handleConnectedAgents(w http.ResponseWriter, r *http.Request) {
+	sessInfo := server.UserSessionFromContext(r)
+	if sessInfo == nil {
+		http.Error(w, "not authenticated", http.StatusUnauthorized)
+		return
+	}
+	isAdmin := auth.HasPermission(sessInfo.Role, auth.PermAdmin)
+
+	agents := []ConnectedAgentInfo{}
+	seen := make(map[string]bool)
+	if a.reg != nil {
+		a.reg.Range(func(s *server.Session) bool {
+			if !isAdmin && s.UserID() != sessInfo.UserID {
+				return true
+			}
+			if aid := s.AgentID(); aid != "" && !seen[aid] {
+				seen[aid] = true
+				agents = append(agents, ConnectedAgentInfo{
+					AgentID:   aid,
+					SessionID: s.ID(),
+				})
+			}
+			return true
+		})
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(agents)
 }
 
 func (a *API) handleAgents(w http.ResponseWriter, r *http.Request) {
