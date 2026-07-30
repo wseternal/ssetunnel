@@ -12,7 +12,7 @@ require (
 	github.com/kardianos/service v1.3.0
 	github.com/pquerna/otp v1.5.0
 	github.com/sourcegraph/conc v0.3.0
-	github.com/visdomtech/orcacommon v0.3.1
+	github.com/visdomtech/orcacommon v0.3.3
 	golang.org/x/crypto v0.54.0
 )
 

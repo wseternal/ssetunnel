@@ -227,8 +227,8 @@ github.com/tklauser/go-sysconf v0.4.0 h1:7H0uAN+7RkwWRaxhYXDLqa5V3LPrJeV8wmD9dRU
 github.com/tklauser/go-sysconf v0.4.0/go.mod h1:8mTNWyog7H+MpKijp4VmKJAd2bbYQ2zuUwkYRbUArPI=
 github.com/tklauser/numcpus v0.12.0 h1:NR85qdvHA9pFse3x3weVZ0r0ST8R6l5RHbZrlRaqob4=
 github.com/tklauser/numcpus v0.12.0/go.mod h1:ABHeXzJnr/qqwguhClkZKT1/8VABcYrsyUiUGobwWJg=
-github.com/visdomtech/orcacommon v0.3.1 h1:Ffi8od7TFNAALxw2pHZ/q7dm8u7Qer9QDzwOU6PZtk4=
-github.com/visdomtech/orcacommon v0.3.1/go.mod h1:XCY4AufCAAKfvZrqZyGQZwZkmI2t5vbd0cK3ozA46Ag=
+github.com/visdomtech/orcacommon v0.3.3 h1:cxTx5SJIBjZXVFXkcLC8JWPyEv/b2tIGc0zDTyqh9Gc=
+github.com/visdomtech/orcacommon v0.3.3/go.mod h1:XCY4AufCAAKfvZrqZyGQZwZkmI2t5vbd0cK3ozA46Ag=
 github.com/xi2/xz v0.0.0-20171230120015-48954b6210f8 h1:nIPpBwaJSVYIxUFsDv3M8ofmx9yWTog9BfvIu0q41lo=
 github.com/xi2/xz v0.0.0-20171230120015-48954b6210f8/go.mod h1:HUYIGzjTL3rfEspMxjDjgmT5uz5wzYJKVo23qUhYTos=
 github.com/yusufpapurcu/wmi v1.2.4 h1:zFUKzehAFReQwLys1b/iSMl+JQGSCSjtVqQn9bBrPo0=
