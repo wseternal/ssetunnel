@@ -89,6 +89,47 @@ func TestProxy_ShellTarget_FixedMode(t *testing.T) {
 	}
 }
 
+// TestProxy_ShellTarget_SIGHUPTrap verifies that proxyShell force-kills
+// a shell process that traps SIGHUP and refuses to exit when the PTY
+// master is closed. Without a kill timeout, cmd.Wait() would block
+// indefinitely on such a process.
+func TestProxy_ShellTarget_SIGHUPTrap(t *testing.T) {
+	a := &Agent{Target: TargetShell}
+
+	cAgent, cTest := newTCPpair(t)
+	defer cTest.Close()
+	defer cAgent.Close()
+
+	// Override SHELL to use a script that traps SIGHUP and loops.
+	// This simulates a shell that doesn't exit on PTY close.
+	t.Setenv("SHELL", "/bin/bash")
+
+	done := make(chan struct{})
+	go func() {
+		a.proxy(cAgent)
+		close(done)
+	}()
+
+	// Wait for shell startup, then install SIGHUP trap and start looping.
+	time.Sleep(500 * time.Millisecond)
+	cmd := "trap '' HUP; while true do sleep 1; done\n"
+	if _, err := cTest.Write([]byte(cmd)); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	// Give the trap a moment to install.
+	time.Sleep(300 * time.Millisecond)
+
+	// Close the stream — proxyShell should kill the looping shell
+	// via the kill timeout rather than hanging indefinitely.
+	cTest.Close()
+	select {
+	case <-done:
+	case <-time.After(8 * time.Second):
+		t.Fatal("proxyShell did not return: shell trapping SIGHUP was not force-killed")
+	}
+}
+
 // TestProxy_ShellTarget_DynamicMode verifies that when Agent.Target is
 // empty (dynamic mode) and the stream header line is TargetShell,
 // proxy() dispatches to proxyShell instead of dialing TCP.

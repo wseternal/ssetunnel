@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"sync"
+	"time"
 
 	"github.com/creack/pty"
 )
@@ -34,25 +35,30 @@ func proxyShell(stream net.Conn) {
 		stream.Close()
 		return
 	}
-	defer func() {
-		ptmx.Close()
-		cmd.Wait() // reap the shell process
-	}()
 
 	log.Printf("agent: shell session started (pid=%d, shell=%s)", cmd.Process.Pid, shell)
 
-	// Both copy goroutines must complete before proxyShell returns,
-	// otherwise the deferred ptmx.Close() kills the PTY (sending
-	// SIGHUP to the shell) before I/O has finished.
 	var wg sync.WaitGroup
 	wg.Add(2)
 
 	// stream → PTY (user input). When the stream closes, close the
-	// PTY write side so the shell sees EOF on stdin.
+	// PTY master to signal EOF to the shell. If the shell doesn't
+	// exit within 2 seconds (e.g., traps SIGHUP), force-kill it.
+	// Killing the process closes the slave FD, which causes the PTY
+	// master read in the output goroutine to return EIO, unblocking
+	// it and allowing wg.Wait() to return.
 	go func() {
 		defer wg.Done()
 		io.Copy(ptmx, stream)
-		ptmx.Close() // signal EOF to shell
+		ptmx.Close() // signal EOF to shell (sends SIGHUP)
+
+		// Give the shell 2 seconds to exit gracefully, then force-kill.
+		timer := time.NewTimer(2 * time.Second)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+			cmd.Process.Kill() // force-kill: closes slave FD → unblocks output goroutine
+		}
 	}()
 
 	// PTY → stream (shell output). When the shell exits or the PTY
@@ -64,4 +70,8 @@ func proxyShell(stream net.Conn) {
 	}()
 
 	wg.Wait()
+
+	// Reap the shell process. It should already be dead (exited
+	// naturally from EOF or force-killed by the input goroutine).
+	cmd.Wait()
 }
