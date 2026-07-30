@@ -10,12 +10,21 @@ permissions:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - os: macos-latest
+            task: go:release-darwin
+          - os: ubuntu-latest
+            task: go:release-linux
+          - os: windows-latest
+            task: go:release-windows
+    runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0  # full history for git SHA
+          fetch-depth: 0
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -27,28 +36,36 @@ jobs:
         uses: arduino/setup-task@v2
         with:
           version: 3.x
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build cross-platform binaries (Docker)
+      - name: Install arm64 cross-compiler
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Build release binaries
         env:
           VERSION: ${{ github.ref_name }}
-        run: task go:release
+        run: task ${{ matrix.task }}
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: release-binaries
+          name: binaries-${{ matrix.os }}
           path: dist/
 
   release:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - name: Download artifacts
+      - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
-          name: release-binaries
           path: dist/
+          merge-multiple: true
+
+      - name: Generate checksums
+        run: cd dist && sha256sum * > checksums.txt
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2

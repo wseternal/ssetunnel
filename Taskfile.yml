@@ -70,25 +70,51 @@ tasks:
       - go run -ldflags "{{.LDFLAGS}}" ./cmd/ssetunnel {{.CLI_ARGS}}
 
   go:release-linux:
-    desc: release for linux amd64
-    cmds:
-      - mkdir -p {{.BUILD_DIR}}
-      - GOOS=linux   GOARCH=amd64 go build -ldflags "{{.LDFLAGS}}" -o {{.BUILD_DIR}}/{{.BIN}}-linux-amd64    ./cmd/ssetunnel
-  go:release:
-    desc: Cross-compile all platforms via Docker (CGO=1, musl/mingw/osxcross)
+    desc: Build Linux amd64+arm64 release binaries (CGO=1)
     vars:
       DIST: dist
-      IMAGE: ssetunnel-cross
+      RELEASE_VERSION: '{{.VERSION | default "dev"}}'
+      RELEASE_LDFLAGS: -s -w -X main.Version={{.RELEASE_VERSION}} -X main.GitSHA={{.GIT_SHA}}
     cmds:
-      - docker build -t {{.IMAGE}} -f .docker/Dockerfile.cross .docker/
       - mkdir -p {{.DIST}}
-      - >-
-        docker run --rm
-        -e VERSION={{.VERSION | default "dev"}}
-        -e GIT_SHA={{.GIT_SHA}}
-        -v "$(pwd)":/src
-        {{.IMAGE}}
-        sh .docker/build.sh
+      - CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -ldflags "{{.RELEASE_LDFLAGS}}" -o {{.DIST}}/{{.BIN}}-linux-amd64 ./cmd/ssetunnel
+      - CGO_ENABLED=1 GOOS=linux GOARCH=arm64 CC=aarch64-linux-gnu-gcc go build -ldflags "{{.RELEASE_LDFLAGS}}" -o {{.DIST}}/{{.BIN}}-linux-arm64 ./cmd/ssetunnel
+
+  go:release-darwin:
+    desc: Build macOS amd64+arm64 release binaries (CGO=1)
+    vars:
+      DIST: dist
+      RELEASE_VERSION: '{{.VERSION | default "dev"}}'
+      RELEASE_LDFLAGS: -s -w -X main.Version={{.RELEASE_VERSION}} -X main.GitSHA={{.GIT_SHA}}
+    cmds:
+      - mkdir -p {{.DIST}}
+      - CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 go build -ldflags "{{.RELEASE_LDFLAGS}}" -o {{.DIST}}/{{.BIN}}-darwin-arm64 ./cmd/ssetunnel
+      - CGO_ENABLED=1 GOOS=darwin GOARCH=amd64 go build -ldflags "{{.RELEASE_LDFLAGS}}" -o {{.DIST}}/{{.BIN}}-darwin-amd64 ./cmd/ssetunnel
+
+  go:release-windows:
+    desc: Build Windows amd64 release binary (CGO=1)
+    vars:
+      DIST: dist
+      RELEASE_VERSION: '{{.VERSION | default "dev"}}'
+      RELEASE_LDFLAGS: -s -w -X main.Version={{.RELEASE_VERSION}} -X main.GitSHA={{.GIT_SHA}}
+    cmds:
+      - mkdir -p {{.DIST}}
+      - CGO_ENABLED=1 GOOS=windows GOARCH=amd64 go build -ldflags "{{.RELEASE_LDFLAGS}}" -o {{.DIST}}/{{.BIN}}-windows-amd64.exe ./cmd/ssetunnel
+
+  go:release:
+    desc: Cross-compile all platforms (CGO=1 native darwin, CGO=0 cross linux/windows)
+    vars:
+      DIST: dist
+      RELEASE_VERSION: '{{.VERSION | default "dev"}}'
+      RELEASE_LDFLAGS: -s -w -X main.Version={{.RELEASE_VERSION}} -X main.GitSHA={{.GIT_SHA}}
+    cmds:
+      - mkdir -p {{.DIST}}
+      - CGO_ENABLED=1 GOOS=darwin  GOARCH=arm64 go build -ldflags "{{.RELEASE_LDFLAGS}}" -o {{.DIST}}/{{.BIN}}-darwin-arm64   ./cmd/ssetunnel
+      - CGO_ENABLED=1 GOOS=darwin  GOARCH=amd64 go build -ldflags "{{.RELEASE_LDFLAGS}}" -o {{.DIST}}/{{.BIN}}-darwin-amd64   ./cmd/ssetunnel
+      - CGO_ENABLED=0 GOOS=linux   GOARCH=amd64 go build -ldflags "{{.RELEASE_LDFLAGS}}" -o {{.DIST}}/{{.BIN}}-linux-amd64    ./cmd/ssetunnel
+      - CGO_ENABLED=0 GOOS=linux   GOARCH=arm64 go build -ldflags "{{.RELEASE_LDFLAGS}}" -o {{.DIST}}/{{.BIN}}-linux-arm64    ./cmd/ssetunnel
+      - CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -ldflags "{{.RELEASE_LDFLAGS}}" -o {{.DIST}}/{{.BIN}}-windows-amd64.exe ./cmd/ssetunnel
+      - cd {{.DIST}} && shasum -a 256 * > checksums.txt
 
   go:clean:
     desc: Clean Go build artifacts
