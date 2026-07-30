@@ -16,7 +16,7 @@ import (
 // proxyShell spawns an interactive shell with a PTY and proxies
 // bidirectionally between the yamux stream and the shell's stdin/stdout.
 // When the stream closes or the shell exits, both sides are torn down.
-func (a *Agent) proxyShell(stream net.Conn) {
+func proxyShell(stream net.Conn) {
 	shell := os.Getenv("SHELL")
 	if shell == "" {
 		shell = "/bin/sh"

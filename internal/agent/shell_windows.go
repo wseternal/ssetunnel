@@ -9,7 +9,7 @@ import (
 
 // proxyShell is not supported on Windows. Closes the stream and logs
 // an error. Cloud shell requires a Unix PTY.
-func (a *Agent) proxyShell(stream net.Conn) {
+func proxyShell(stream net.Conn) {
 	log.Printf("agent: shell target not supported on Windows")
 	stream.Close()
 }

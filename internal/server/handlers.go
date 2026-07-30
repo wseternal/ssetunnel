@@ -445,8 +445,14 @@ func (h *Handler) handleConnect(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Write target header if the agent wants it (dynamic target mode).
-	if target != "" && sess != nil && sess.WantTarget() {
-		if _, err := fmt.Fprintf(stream, "%s\n", target); err != nil {
+	// Check for a forced target from context (shell handler injects
+	// __shell__ via context key to bypass agent config validation).
+	targetHeader := target
+	if ft, ok := r.Context().Value(forcedTargetKey).(string); ok && ft != "" {
+		targetHeader = ft
+	}
+	if targetHeader != "" && sess != nil && sess.WantTarget() {
+		if _, err := fmt.Fprintf(stream, "%s\n", targetHeader); err != nil {
 			stream.Close()
 			http.Error(w, fmt.Sprintf("write target header: %v", err), http.StatusInternalServerError)
 			return

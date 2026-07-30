@@ -1,10 +1,18 @@
 package server
 
 import (
+	"context"
 	"net/http"
 
 	"github.com/wseternal/ssetunnel/internal/auth"
 )
+
+// forcedTargetKey is a context key that ShellConnectHandler uses to pass
+// the forced target (__shell__) to handleConnect without going through
+// query parameters (which would fail agent config validation).
+type forcedTargetKeyType struct{}
+
+var forcedTargetKey = forcedTargetKeyType{}
 
 // TargetShell is the magic target name that tells the agent to spawn
 // an interactive shell with a PTY instead of dialing a TCP address.
@@ -40,12 +48,15 @@ func (h *Handler) ShellConnectHandler() http.Handler {
 			}
 		}
 
-		// Force target to __shell__. Ignore any client-provided target.
+		// Force target to __shell__ via context key. Clear target from
+		// query to skip agent config validation (__shell__ is synthetic
+		// and would fail TargetAllowed checks for non-wildcard configs).
 		q := r.URL.Query()
-		q.Set("target", TargetShell)
+		q.Set("target", "")
 		r.URL.RawQuery = q.Encode()
 
-		h.handleConnect(w, r)
+		ctx := context.WithValue(r.Context(), forcedTargetKey, TargetShell)
+		h.handleConnect(w, r.WithContext(ctx))
 	})
 }
 

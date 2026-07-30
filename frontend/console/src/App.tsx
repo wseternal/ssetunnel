@@ -41,7 +41,7 @@ import RouterIcon from '@mui/icons-material/Router';
 import SecurityIcon from '@mui/icons-material/Security';
 import ContentCopyIcon from '@mui/icons-material/ContentCopy';
 import TerminalIcon from '@mui/icons-material/Terminal';
-import { Terminal } from '@xterm/xterm';
+import { Terminal, type IDisposable } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
 import { QRCodeSVG } from 'qrcode.react';
@@ -210,6 +210,7 @@ export default function App() {
   const xtermRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
   const shellAbortRef = useRef<AbortController | null>(null);
+  const inputDisposableRef = useRef<IDisposable | null>(null);
 
   const authHeaders = (): HeadersInit => sessionToken ? { Authorization: `Bearer ${sessionToken}` } : {};
 
@@ -326,6 +327,10 @@ export default function App() {
       shellAbortRef.current.abort();
       shellAbortRef.current = null;
     }
+    if (inputDisposableRef.current) {
+      inputDisposableRef.current.dispose();
+      inputDisposableRef.current = null;
+    }
     if (xtermRef.current) {
       xtermRef.current.writeln('\r\n\x1b[33m[Disconnected]\x1b[0m');
     }
@@ -371,8 +376,8 @@ export default function App() {
       .map(b => b.toString(16).padStart(2, '0')).join('');
     setShellSessionId(sid);
 
-    // Build SSE URL with token in query param (EventSource cannot set headers).
-    const sseURL = `/console/api/v1/shell/connect?id=${encodeURIComponent(sid)}&agent=${encodeURIComponent(agentID)}&token=${encodeURIComponent(sessionToken)}`;
+    // Build SSE URL — auth via Authorization header (not query param).
+    const sseURL = `/console/api/v1/shell/connect?id=${encodeURIComponent(sid)}&agent=${encodeURIComponent(agentID)}`;
 
     // Set up input handler: send keystrokes via POST.
     const sendInput = async (data: string) => {
@@ -393,11 +398,20 @@ export default function App() {
       }
     };
 
+    // Set up input handler: send keystrokes via POST. Dispose previous
+    // handler if any (e.g., from a prior connection that wasn't cleaned up).
+    if (inputDisposableRef.current) {
+      inputDisposableRef.current.dispose();
+    }
     const inputDisposable = term.onData(sendInput);
+    inputDisposableRef.current = inputDisposable;
 
     // Start SSE stream using fetch (ReadableStream) for full header control.
     try {
-      const resp = await fetch(sseURL, { signal: abort.signal });
+      const resp = await fetch(sseURL, {
+        headers: { Authorization: `Bearer ${sessionToken}` },
+        signal: abort.signal,
+      });
       if (!resp.ok) {
         const errText = await resp.text();
         term.writeln(`\x1b[31m[Error: ${resp.status} ${errText}]\x1b[0m`);
@@ -445,7 +459,10 @@ export default function App() {
         term.writeln(`\r\n\x1b[31m[Connection error: ${e}]\x1b[0m`);
       }
     } finally {
-      inputDisposable.dispose();
+      if (inputDisposableRef.current) {
+        inputDisposableRef.current.dispose();
+        inputDisposableRef.current = null;
+      }
       setShellConnected(false);
       setShellSessionId('');
       shellAbortRef.current = null;

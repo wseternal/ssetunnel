@@ -204,7 +204,7 @@ func (a *Agent) proxy(stream net.Conn) {
 
 	// Shell target: spawn a local shell with PTY instead of dialing TCP.
 	if target == TargetShell {
-		a.proxyShell(stream)
+		proxyShell(stream)
 		return
 	}
 
