@@ -1,6 +1,7 @@
 package metrics
 
 import (
+	"log"
 	"sort"
 	"sync"
 	"time"
@@ -25,7 +26,6 @@ type rollingWindow struct {
 	activeConn int         // active connection count (gauge)
 
 	// Track window boundaries for pruning
-	windowStart time.Time
 }
 
 // MetricsCollector collects per-agent transport metrics, maintains a
@@ -94,7 +94,11 @@ func (c *MetricsCollector) flushLoop() {
 			return
 		case <-ticker.C:
 			c.flush()
-			_ = c.store.PruneOlderThan(c.retention)
+			if c.store != nil {
+				if err := c.store.PruneOlderThan(c.retention); err != nil {
+					log.Printf("metrics: prune: %v", err)
+				}
+			}
 		}
 	}
 }
@@ -119,12 +123,25 @@ func (c *MetricsCollector) flush() {
 	c.mu.Unlock()
 
 	if len(samples) > 0 {
-		_ = c.store.WriteSamples(samples)
+		if err := c.store.WriteSamples(samples); err != nil {
+			log.Printf("metrics: flush write: %v", err)
+		}
 	}
 
-	// Persist window state for tuner recovery (optional, best-effort)
-	// Not implemented in v1: the in-memory state is sufficient for the
-	// tuner's evaluation interval.
+	// Reset all rolling windows after aggregation so each flush
+	// interval produces an independent sample. Active connection
+	// gauges are preserved across resets.
+	c.mu.Lock()
+	for _, w := range c.windows {
+		w.mu.Lock()
+		w.posts = w.posts[:0]
+		w.sseBytes = 0
+		w.connectUp = 0
+		w.connectDn = 0
+		w.errors = 0
+		w.mu.Unlock()
+	}
+	c.mu.Unlock()
 }
 
 // aggregateWindow computes a MetricSample from a rolling window.
@@ -264,7 +281,7 @@ func (c *MetricsCollector) getOrCreateWindow(agentID string) *rollingWindow {
 	c.mu.Lock()
 	w, ok := c.windows[agentID]
 	if !ok {
-		w = &rollingWindow{windowStart: time.Now()}
+		w = &rollingWindow{}
 		c.windows[agentID] = w
 	}
 	c.mu.Unlock()
@@ -433,8 +450,12 @@ func (c *MetricsCollector) snapshotWindow(w *rollingWindow) MetricSnapshot {
 		errRate = float64(w.errors) / float64(totalReqs)
 	}
 
+	// NOTE: ThroughputUp/Dn are aggregate rates over the current flush
+	// interval, not statistical percentiles. The P50/P95 field names in
+	// MetricSnapshot are kept for API compatibility but hold the same
+	// aggregate value.
 	return MetricSnapshot{
-		ThroughputUpP50: throughputUp, // simplified: single value for now
+		ThroughputUpP50: throughputUp,
 		ThroughputUpP95: throughputUp,
 		ThroughputDnP50: float64(w.sseBytes+w.connectDn) / intervalSec,
 		ThroughputDnP95: float64(w.sseBytes+w.connectDn) / intervalSec,

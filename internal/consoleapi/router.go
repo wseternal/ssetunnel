@@ -887,19 +887,24 @@ func (a *API) handleMetricsOverview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get global overview but filter to user-scoped agents
-	overview := a.mc.Overview()
+	// Compute overview scoped to user-visible agents.
+	overview := metrics.Overview{}
 	if len(agentIDs) == 0 {
-		overview = metrics.Overview{}
+		// No visible agents; return empty overview.
 	} else {
-		// Re-compute overview for scoped agents only
-		overview = metrics.Overview{}
 		overview.ActiveAgents = len(agentIDs)
+		var errRateSum float64
+		var errRateCount int
 		for _, am := range a.mc.AllAgentMetrics() {
 			if agentIDs[am.AgentID] {
 				overview.ThroughputUpBps += am.Snapshot.ThroughputUpP50
 				overview.ThroughputDnBps += am.Snapshot.ThroughputDnP50
+				errRateSum += am.Snapshot.ErrorRate
+				errRateCount++
 			}
+		}
+		if errRateCount > 0 {
+			overview.ErrorRate = errRateSum / float64(errRateCount)
 		}
 	}
 

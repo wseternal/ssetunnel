@@ -166,7 +166,14 @@ func (h *Handler) handleEvents(w http.ResponseWriter, r *http.Request) {
 	// SSE loop: read downstream bytes from the session pipe and emit
 	// SSE data frames. Tune frames are checked between reads via a
 	// non-blocking select + deadline kick to break blocked reads.
+	// Heartbeats are tracked separately via lastHeartbeat so the
+	// tune-check poll (capped at 1s) does not starve heartbeat emission.
 	buf := make([]byte, 32<<10)
+	lastHeartbeat := time.Now()
+	tunePollInterval := h.heartbeat
+	if tunePollInterval > time.Second {
+		tunePollInterval = time.Second
+	}
 	for {
 		// Non-blocking check for pending tune frames.
 		select {
@@ -181,15 +188,10 @@ func (h *Handler) handleEvents(w http.ResponseWriter, r *http.Request) {
 		default:
 		}
 
-		// Set a short read deadline so we periodically wake to check
-		// for tune frames even when no downstream data arrives.
-		// The shorter of heartbeat and 1s ensures tune delivery
-		// within a reasonable window.
-		tuneDeadline := h.heartbeat
-		if tuneDeadline > time.Second {
-			tuneDeadline = time.Second
-		}
-		sess.down.SetReadDeadline(time.Now().Add(tuneDeadline))
+		// Use the shorter tune-poll interval as the read deadline so
+		// we wake periodically to check tuneCh even when no downstream
+		// data arrives.
+		sess.down.SetReadDeadline(time.Now().Add(tunePollInterval))
 		n, err := sess.down.Read(buf)
 		if n > 0 {
 			h.metrics.RecordAgentSSEBytes(agentID, n)
@@ -202,14 +204,13 @@ func (h *Handler) handleEvents(w http.ResponseWriter, r *http.Request) {
 		}
 		var nerr net.Error
 		if errors.As(err, &nerr) && nerr.Timeout() {
-			// Timeout: either heartbeat interval or tune-check interval.
-			// If heartbeat interval elapsed, send a heartbeat.
-			if tuneDeadline < h.heartbeat {
-				// Tune-check timeout; loop back to check tuneCh.
-				continue
-			}
-			if werr := transport.WriteHeartbeat(w, f); werr != nil {
-				return
+			// Timeout: tune-poll interval elapsed. Check whether a
+			// heartbeat is due (heartbeat interval since last one).
+			if time.Since(lastHeartbeat) >= h.heartbeat {
+				if werr := transport.WriteHeartbeat(w, f); werr != nil {
+					return
+				}
+				lastHeartbeat = time.Now()
 			}
 			continue
 		}

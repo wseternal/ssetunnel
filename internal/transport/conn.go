@@ -304,14 +304,18 @@ func DialConnect(ctx context.Context, cfg Config) (*Conn, error) {
 func (c *Conn) SessionID() string { return c.id }
 
 // ApplyTune applies transport parameter changes from the server's
-// event: tune control frame. Currently adjusts batch size only;
+// event: tune control frame. Adjusts batch size and compression;
 // concurrency changes are deferred to reconnect (v1 limitation).
 func (c *Conn) ApplyTune(batchSize int, compress bool) {
 	if c.batcher != nil && batchSize > 0 {
 		c.batcher.SetMaxSize(batchSize)
 	}
-	// Note: gzip flag change takes effect on next batch flush.
-	// Concurrency change requires reconnect (v1 limitation).
+	// Update the gzip flag under writeMu so post() sees the change
+	// on its next batch. This is safe because writeMu is only held
+	// briefly for deadline reads, not for the actual POST.
+	c.writeMu.Lock()
+	c.gzip = compress
+	c.writeMu.Unlock()
 }
 
 // readLoop decodes the SSE stream into the down pipe. Heartbeats are
@@ -422,6 +426,7 @@ func (c *Conn) post(seq uint64, batch []byte) error {
 	ctx := c.ctx
 	c.writeMu.Lock()
 	dl := c.writeDeadline
+	wantGzip := c.gzip
 	c.writeMu.Unlock()
 	if !dl.IsZero() {
 		var cancel context.CancelFunc
@@ -430,7 +435,7 @@ func (c *Conn) post(seq uint64, batch []byte) error {
 	}
 	body := batch
 	var flags string
-	if c.gzip {
+	if wantGzip {
 		if z := gzipBatch(batch); z != nil {
 			body, flags = z, "gzip"
 		}

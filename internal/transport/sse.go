@@ -38,13 +38,14 @@ func WriteFrame(w io.Writer, f http.Flusher, payload []byte) error {
 	return nil
 }
 
-// WriteTuneFrame writes an SSE event: tune control frame with JSON payload.
-// The agent's SSE decoder parses this to apply parameter changes.
+// WriteTuneFrame writes an SSE event: tune control frame with base64-encoded
+// JSON payload. The agent's SSE decoder base64-decodes all data: lines,
+// so tune frames must be encoded identically to WriteFrame payloads.
 func WriteTuneFrame(w io.Writer, f http.Flusher, jsonPayload []byte) error {
 	var buf bytes.Buffer
 	buf.WriteString("event: tune\n")
 	buf.WriteString("data: ")
-	buf.Write(jsonPayload)
+	buf.WriteString(base64.StdEncoding.EncodeToString(jsonPayload))
 	buf.WriteString("\n\n")
 	if _, err := w.Write(buf.Bytes()); err != nil {
 		return fmt.Errorf("write sse tune frame: %w", err)

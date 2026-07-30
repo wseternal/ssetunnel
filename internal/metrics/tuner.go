@@ -91,7 +91,11 @@ func (t *AutoTuner) evaluateAll() {
 		}
 
 		// Persist decision
-		_ = t.store.WriteDecision(*decision)
+		if t.store != nil {
+			if err := t.store.WriteDecision(*decision); err != nil {
+				log.Printf("tuner: persist decision: %v", err)
+			}
+		}
 
 		// Update state
 		t.mu.Lock()
