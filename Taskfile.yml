@@ -6,8 +6,14 @@ vars:
   FRONTEND_DIR: frontend/console
   GIT_SHA:
     sh: git rev-parse --short HEAD 2>/dev/null || echo unknown
+  VERSION:
+    sh: |
+      if [ -f version.txt ]; then cat version.txt
+      elif V=$(git describe --tags --abbrev=0 2>/dev/null); then echo "${V#v}"
+      else echo 0.1.0
+      fi
   LDFLAGS: >-
-    -X main.Version=0.1.0
+    -X main.Version={{.VERSION}}
     -X main.GitSHA={{.GIT_SHA}}
   DIST: dist
   RELEASE_VERSION: '{{.VERSION | default "dev"}}'
