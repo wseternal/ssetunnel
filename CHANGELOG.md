@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.2](https://github.com/wseternal/ssetunnel/compare/v1.0.1...v1.0.2) (2026-07-30)
+
+
+### Bug Fixes
+
+* use release_pat for release-please ([938ad4e](https://github.com/wseternal/ssetunnel/commit/938ad4ee7e37628c6666b4d082884357f90ea4c2))
+
 ## [1.0.1](https://github.com/wseternal/ssetunnel/compare/v1.0.0...v1.0.1) (2026-07-30)
 
 
