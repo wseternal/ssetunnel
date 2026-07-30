@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"sync"
 
 	"github.com/creack/pty"
 )
@@ -40,9 +41,16 @@ func (a *Agent) proxyShell(stream net.Conn) {
 
 	log.Printf("agent: shell session started (pid=%d, shell=%s)", cmd.Process.Pid, shell)
 
+	// Both copy goroutines must complete before proxyShell returns,
+	// otherwise the deferred ptmx.Close() kills the PTY (sending
+	// SIGHUP to the shell) before I/O has finished.
+	var wg sync.WaitGroup
+	wg.Add(2)
+
 	// stream → PTY (user input). When the stream closes, close the
 	// PTY write side so the shell sees EOF on stdin.
 	go func() {
+		defer wg.Done()
 		io.Copy(ptmx, stream)
 		ptmx.Close() // signal EOF to shell
 	}()
@@ -50,11 +58,10 @@ func (a *Agent) proxyShell(stream net.Conn) {
 	// PTY → stream (shell output). When the shell exits or the PTY
 	// closes, close the stream so the connect client sees EOF.
 	go func() {
+		defer wg.Done()
 		io.Copy(stream, ptmx)
 		stream.Close()
 	}()
 
-	// Wait for either side to finish. We don't need explicit waiting
-	// here because the goroutines above handle cleanup via defer.
-	// The cmd.Wait() in the deferred func reaps the process.
+	wg.Wait()
 }
