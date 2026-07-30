@@ -571,12 +571,14 @@ func (a *API) handleConnectedAgents(w http.ResponseWriter, r *http.Request) {
 	isAdmin := auth.HasPermission(sessInfo.Role, auth.PermAdmin)
 
 	agents := []ConnectedAgentInfo{}
+	seen := make(map[string]bool)
 	if a.reg != nil {
 		a.reg.Range(func(s *server.Session) bool {
 			if !isAdmin && s.UserID() != sessInfo.UserID {
 				return true
 			}
-			if aid := s.AgentID(); aid != "" {
+			if aid := s.AgentID(); aid != "" && !seen[aid] {
+				seen[aid] = true
 				agents = append(agents, ConnectedAgentInfo{
 					AgentID:   aid,
 					SessionID: s.ID(),
