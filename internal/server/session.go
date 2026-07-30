@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/hashicorp/yamux"
+	"github.com/wseternal/ssetunnel/internal/metrics"
 	"github.com/wseternal/ssetunnel/internal/transport"
 )
 
@@ -59,6 +60,11 @@ type Session struct {
 	yamuxMu   sync.Mutex
 	yamuxSess *yamux.Session // per-session yamux; set by attach after mux.Server
 
+	// tuneCh carries tuning parameter updates from the auto-tuner to the
+	// SSE loop. The handleEvents goroutine selects on this channel and
+	// injects event: tune frames into the downstream SSE stream.
+	tuneCh chan metrics.TransportParams
+
 	closeOnce sync.Once
 	closeCh   chan struct{} // closed by Close(); for monitor goroutines
 }
@@ -81,6 +87,7 @@ func NewSession(id string) *Session {
 		GapTimeout:   defaultGapTimeout,
 		createdAt:    time.Now().UTC(),
 		closeCh:      make(chan struct{}),
+		tuneCh:       make(chan metrics.TransportParams, 1),
 	}
 }
 
@@ -115,6 +122,21 @@ func (s *Session) WantTarget() bool { return s.wantTarget }
 
 // SetWantTarget sets whether the agent wants target headers on yamux streams.
 func (s *Session) SetWantTarget(v bool) { s.wantTarget = v }
+
+// SendTune enqueues a transport parameter update for the SSE loop to
+// deliver to the agent as an event: tune control frame. Non-blocking:
+// drops the update if a previous one is still pending (the tuner will
+// re-evaluate on its next interval).
+func (s *Session) SendTune(params metrics.TransportParams) {
+	select {
+	case s.tuneCh <- params:
+	default:
+		// Previous tune still pending; drop this one.
+	}
+}
+
+// TuneCh returns the channel the SSE loop selects on for tune frames.
+func (s *Session) TuneCh() <-chan metrics.TransportParams { return s.tuneCh }
 
 // UserID returns the user ID associated with this session's agent connection.
 func (s *Session) UserID() int64 { return s.userID.Load() }

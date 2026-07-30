@@ -3,6 +3,7 @@ package agent
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/cenkalti/backoff/v4"
+	"github.com/wseternal/ssetunnel/internal/metrics"
 	"github.com/wseternal/ssetunnel/internal/mux"
 	"github.com/wseternal/ssetunnel/internal/transport"
 )
@@ -40,6 +42,10 @@ type Agent struct {
 	BatchSize   int  // upstream batch ceiling; 0 → transport default
 	Concurrency int  // upstream POST sender depth; 0 → 1 (serial)
 	Compress    bool // negotiate gzip-per-batch
+
+	// NoAutoTune disables the server's auto-tuning: event: tune frames
+	// are ignored and the agent keeps its static CLI flags.
+	NoAutoTune bool
 }
 
 // Run connects and reconnects until ctx is canceled. Reconnect uses
@@ -129,6 +135,21 @@ func (a *Agent) runOnce(ctx context.Context) error {
 		return fmt.Errorf("connect: %w", err)
 	}
 	defer conn.Close()
+
+	// Wire auto-tuning: parse event: tune JSON and apply batch size changes.
+	// Concurrency changes are deferred to reconnect (v1 limitation).
+	if !a.NoAutoTune {
+		conn.OnTune = func(data []byte) {
+			var params metrics.TransportParams
+			if err := json.Unmarshal(data, &params); err != nil {
+				log.Printf("agent: bad tune frame: %v", err)
+				return
+			}
+			log.Printf("agent: auto-tune: batch_size=%d compress=%v concurrency=%d",
+				params.BatchSize, params.Compress, params.Concurrency)
+			conn.ApplyTune(params.BatchSize, params.Compress)
+		}
+	}
 	sess, err := mux.Client(conn)
 	if err != nil {
 		return fmt.Errorf("mux client: %w", err)

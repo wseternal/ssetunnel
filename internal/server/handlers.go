@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/hashicorp/yamux"
 	"github.com/wseternal/ssetunnel/internal/auth"
+	"github.com/wseternal/ssetunnel/internal/metrics"
 	"github.com/wseternal/ssetunnel/internal/transport"
 )
 
@@ -50,7 +52,8 @@ type Handler struct {
 	reg       *Registry
 	heartbeat time.Duration
 	store     *auth.Store
-	basePath  string // HTTP path prefix for all endpoints (empty = no prefix)
+	metrics   *metrics.MetricsCollector // nil when metrics are disabled
+	basePath  string                    // HTTP path prefix for all endpoints (empty = no prefix)
 	mux       *http.ServeMux
 
 	// connectSessions maps connect session IDs to connectSession structs,
@@ -77,8 +80,13 @@ func NewHandler(reg *Registry, heartbeat time.Duration) *Handler {
 // NewHandlerWithAuth builds the tunnel handler with an optional auth store
 // and an HTTP path prefix for all endpoints (empty = no prefix).
 func NewHandlerWithAuth(reg *Registry, heartbeat time.Duration, store *auth.Store, basePath string) *Handler {
+	return NewHandlerWithMetrics(reg, heartbeat, store, nil, basePath)
+}
+
+// NewHandlerWithMetrics builds the tunnel handler with optional auth and metrics.
+func NewHandlerWithMetrics(reg *Registry, heartbeat time.Duration, store *auth.Store, mc *metrics.MetricsCollector, basePath string) *Handler {
 	basePath = strings.TrimRight(basePath, "/")
-	h := &Handler{reg: reg, heartbeat: heartbeat, store: store, basePath: basePath, mux: http.NewServeMux()}
+	h := &Handler{reg: reg, heartbeat: heartbeat, store: store, metrics: mc, basePath: basePath, mux: http.NewServeMux()}
 	agentAuth := AgentAuthMiddleware(store)
 	connectAuth := ConnectAuthMiddleware(store)
 	h.mux.Handle(basePath+"/events", agentAuth(http.HandlerFunc(h.handleEvents)))
@@ -134,6 +142,11 @@ func (h *Handler) handleEvents(w http.ResponseWriter, r *http.Request) {
 		h.OnSession(sess)
 	}
 
+	// Record agent session start for metrics (nil-safe).
+	agentID := sess.AgentID()
+	h.metrics.RecordSessionStart(agentID)
+	defer h.metrics.RecordSessionEnd(agentID)
+
 	w.Header().Set("X-SSET-Caps", capsHeaderValue)
 	transport.WriteHeaders(w)
 	f.Flush()
@@ -150,13 +163,38 @@ func (h *Handler) handleEvents(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
+	// SSE loop: read downstream bytes from the session pipe and emit
+	// SSE data frames. Tune frames are checked between reads via a
+	// non-blocking select + deadline kick to break blocked reads.
+	// Heartbeats are tracked separately via lastHeartbeat so the
+	// tune-check poll (capped at 1s) does not starve heartbeat emission.
 	buf := make([]byte, 32<<10)
+	lastHeartbeat := time.Now()
+	tunePollInterval := h.heartbeat
+	if tunePollInterval > time.Second {
+		tunePollInterval = time.Second
+	}
 	for {
-		// The read deadline doubles as the heartbeat timer: on timeout
-		// send a comment keepalive instead of data.
-		sess.down.SetReadDeadline(time.Now().Add(h.heartbeat))
+		// Non-blocking check for pending tune frames.
+		select {
+		case tune := <-sess.TuneCh():
+			payload, err := json.Marshal(tune)
+			if err == nil {
+				if werr := transport.WriteTuneFrame(w, f, payload); werr != nil {
+					return
+				}
+			}
+			continue
+		default:
+		}
+
+		// Use the shorter tune-poll interval as the read deadline so
+		// we wake periodically to check tuneCh even when no downstream
+		// data arrives.
+		sess.down.SetReadDeadline(time.Now().Add(tunePollInterval))
 		n, err := sess.down.Read(buf)
 		if n > 0 {
+			h.metrics.RecordAgentSSEBytes(agentID, n)
 			if werr := transport.WriteFrame(w, f, buf[:n]); werr != nil {
 				return
 			}
@@ -166,8 +204,13 @@ func (h *Handler) handleEvents(w http.ResponseWriter, r *http.Request) {
 		}
 		var nerr net.Error
 		if errors.As(err, &nerr) && nerr.Timeout() {
-			if werr := transport.WriteHeartbeat(w, f); werr != nil {
-				return
+			// Timeout: tune-poll interval elapsed. Check whether a
+			// heartbeat is due (heartbeat interval since last one).
+			if time.Since(lastHeartbeat) >= h.heartbeat {
+				if werr := transport.WriteHeartbeat(w, f); werr != nil {
+					return
+				}
+				lastHeartbeat = time.Now()
 			}
 			continue
 		}
@@ -198,6 +241,7 @@ func (h *Handler) handleUp(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unknown session", http.StatusConflict)
 		return
 	}
+	postStart := time.Now() // for RTT estimation
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxUpBody))
 	if err != nil {
 		var tooLarge *http.MaxBytesError
@@ -242,7 +286,16 @@ func (h *Handler) handleUp(w http.ResponseWriter, r *http.Request) {
 			<-gate
 		}
 	}
-	w.WriteHeader(sess.push(seq, body))
+	statusCode := sess.push(seq, body)
+	w.WriteHeader(statusCode)
+
+	// Record metrics for successful pushes (200 = accepted or deduped).
+	if statusCode == 200 {
+		rtt := time.Since(postStart)
+		h.metrics.RecordAgentPost(sess.AgentID(), len(body), rtt)
+	} else {
+		h.metrics.RecordError(sess.AgentID(), "push_rejected")
+	}
 }
 
 // handleProbe reads and discards its body and returns 200 (cycle-2 plan
@@ -292,9 +345,10 @@ func parseCapsConcurrency(h string) int {
 // POST-up) to the agent's yamux stream. It is NOT registered in the
 // session registry (which is for agent tunnel sessions only).
 type connectSession struct {
-	id     string
-	up     *transport.Pipe // POST bodies → yamux stream
-	cancel context.CancelFunc
+	id      string
+	agentID string          // target agent ID for metrics attribution
+	up      *transport.Pipe // POST bodies → yamux stream
+	cancel  context.CancelFunc
 }
 
 // handleConnect serves GET /connect: the connect client's SSE downstream.
@@ -404,9 +458,10 @@ func (h *Handler) handleConnect(w http.ResponseWriter, r *http.Request) {
 	// single large POST never blocks on the pipe before the yamux consumer
 	// has a chance to drain it.
 	cs := &connectSession{
-		id:     id,
-		up:     transport.NewPipe(connectUpPipeCap),
-		cancel: func() {}, // no-op; cleanup is handled by the deferred teardown below
+		id:      id,
+		agentID: agentID,
+		up:      transport.NewPipe(connectUpPipeCap),
+		cancel:  func() {}, // no-op; cleanup is handled by the deferred teardown below
 	}
 	h.connectSessions.Store(id, cs)
 	defer func() {
@@ -455,6 +510,7 @@ func (h *Handler) handleConnect(w http.ResponseWriter, r *http.Request) {
 		stream.SetReadDeadline(time.Now().Add(h.heartbeat))
 		n, err := stream.Read(sseBuf)
 		if n > 0 {
+			h.metrics.RecordConnectBytes(agentID, 0, n)
 			if werr := transport.WriteFrame(w, f, sseBuf[:n]); werr != nil {
 				return
 			}
@@ -537,6 +593,7 @@ func (h *Handler) handleConnectUp(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "session closed", http.StatusConflict)
 		return
 	}
+	h.metrics.RecordConnectBytes(cs.agentID, len(body), 0)
 	w.WriteHeader(http.StatusOK)
 }
 

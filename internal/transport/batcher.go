@@ -208,3 +208,13 @@ func (b *Batcher) onTimer() {
 		b.enqueueLocked()
 	}
 }
+
+// SetMaxSize adjusts the batch size ceiling. Takes effect on the next
+// Write call that fragments the buffer. Safe to call from any goroutine.
+func (b *Batcher) SetMaxSize(n int) {
+	b.mu.Lock()
+	if n > 0 {
+		b.maxSize = n
+	}
+	b.mu.Unlock()
+}

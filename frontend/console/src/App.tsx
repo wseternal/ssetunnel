@@ -42,6 +42,9 @@ import SecurityIcon from '@mui/icons-material/Security';
 import ContentCopyIcon from '@mui/icons-material/ContentCopy';
 import { QRCodeSVG } from 'qrcode.react';
 import {
+  LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip as RTooltip, Legend, ResponsiveContainer,
+} from 'recharts';
+import {
   AdminTable,
   type AdminTableColumn,
   PageHeader,
@@ -76,6 +79,58 @@ interface AgentConfig {
   description: string;
   created_at: string;
   updated_at: string;
+}
+
+interface MetricSnapshot {
+  throughput_up_p50_bps: number;
+  throughput_up_p95_bps: number;
+  throughput_dn_p50_bps: number;
+  throughput_dn_p95_bps: number;
+  latency_p50_ms: number;
+  latency_p95_ms: number;
+  error_rate: number;
+  active_conns: number;
+  total_posts: number;
+  total_errors: number;
+}
+
+interface TransportParams {
+  concurrency: number;
+  batch_size: number;
+  compress: boolean;
+}
+
+interface TuningDecision {
+  timestamp: string;
+  agent_id: string;
+  old_params: TransportParams;
+  new_params: TransportParams;
+  reason: string;
+}
+
+interface AgentMetrics {
+  agent_id: string;
+  snapshot: MetricSnapshot;
+  params: TransportParams;
+  last_decision?: TuningDecision;
+}
+
+interface MetricsOverview {
+  active_agents: number;
+  throughput_up_bps: number;
+  throughput_dn_bps: number;
+  error_rate: number;
+}
+
+interface MetricSample {
+  timestamp: string;
+  agent_id: string;
+  throughput_up_bps: number;
+  throughput_dn_bps: number;
+  latency_p50_ms: number;
+  latency_p95_ms: number;
+  error_rate: number;
+  active_conns: number;
 }
 
 const SESSION_COLUMNS: AdminTableColumn<Session>[] = [
@@ -136,6 +191,13 @@ export default function App() {
   const [formDescription, setFormDescription] = useState('');
   const [formAllowedTargets, setFormAllowedTargets] = useState('');
 
+  // Metrics / Statistics
+  const [metricsOverview, setMetricsOverview] = useState<MetricsOverview | null>(null);
+  const [agentMetrics, setAgentMetrics] = useState<AgentMetrics[]>([]);
+  const [selectedAgentSamples, setSelectedAgentSamples] = useState<MetricSample[]>([]);
+  const [selectedAgentDecisions, setSelectedAgentDecisions] = useState<TuningDecision[]>([]);
+  const [selectedStatsAgent, setSelectedStatsAgent] = useState<string>('');
+
   const authHeaders = (): HeadersInit => sessionToken ? { Authorization: `Bearer ${sessionToken}` } : {};
 
   // Check for 401 responses on authenticated requests and trigger logout.
@@ -180,6 +242,53 @@ export default function App() {
     }
   };
 
+  const fetchMetricsOverview = async () => {
+    try {
+      const res = await fetch('/console/api/v1/metrics/overview', { headers: authHeaders() });
+      if (checkAuth(res) && res.ok) setMetricsOverview(await res.json());
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  const fetchAgentMetrics = async () => {
+    try {
+      const res = await fetch('/console/api/v1/metrics/agents', { headers: authHeaders() });
+      if (checkAuth(res) && res.ok) setAgentMetrics(await res.json());
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  const fetchAgentSamples = async (agentID: string) => {
+    try {
+      const res = await fetch(`/console/api/v1/metrics/agents/${encodeURIComponent(agentID)}/samples`, { headers: authHeaders() });
+      if (checkAuth(res) && res.ok) setSelectedAgentSamples(await res.json());
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  const fetchAgentDecisions = async (agentID: string) => {
+    try {
+      const res = await fetch(`/console/api/v1/metrics/agents/${encodeURIComponent(agentID)}/decisions`, { headers: authHeaders() });
+      if (checkAuth(res) && res.ok) setSelectedAgentDecisions(await res.json());
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  const selectStatsAgent = (agentID: string) => {
+    setSelectedStatsAgent(agentID);
+    if (agentID) {
+      fetchAgentSamples(agentID);
+      fetchAgentDecisions(agentID);
+    } else {
+      setSelectedAgentSamples([]);
+      setSelectedAgentDecisions([]);
+    }
+  };
+
   // Validate restored token on mount
   useEffect(() => {
     if (sessionToken) {
@@ -216,10 +325,13 @@ export default function App() {
     if (isLoggedIn && roleConfirmed) {
       fetchSessions();
       fetchAgents();
+      fetchMetricsOverview();
+      fetchAgentMetrics();
       if (isAdmin) fetchUsers();
       const sessionInterval = setInterval(fetchSessions, 3000);
       const agentInterval = setInterval(fetchAgents, 10000);
-      return () => { clearInterval(sessionInterval); clearInterval(agentInterval); };
+      const metricsInterval = setInterval(() => { fetchMetricsOverview(); fetchAgentMetrics(); }, 10000);
+      return () => { clearInterval(sessionInterval); clearInterval(agentInterval); clearInterval(metricsInterval); };
     }
   }, [isLoggedIn, isAdmin, roleConfirmed]);
 
@@ -643,6 +755,7 @@ export default function App() {
                     <Tab label="Sessions" />
                     <Tab label="Users" />
                     <Tab label="Agents" />
+                    <Tab label="Statistics" />
                   </Tabs>
                 </Paper>
 
@@ -727,6 +840,128 @@ export default function App() {
                     />
                   </Box>
                 )}
+
+                {tabIndex === 3 && (
+                  <Box>
+                    <PageHeader
+                      title="Statistics"
+                      actions={
+                        <Button startIcon={<RefreshIcon />} onClick={() => { fetchMetricsOverview(); fetchAgentMetrics(); }} size="small">
+                          Refresh
+                        </Button>
+                      }
+                    />
+                    <Box sx={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 2, mb: 3 }}>
+                      <Card><CardContent>
+                        <Typography variant="caption" color="text.secondary">Active Agents</Typography>
+                        <Typography variant="h4">{metricsOverview?.active_agents ?? 0}</Typography>
+                      </CardContent></Card>
+                      <Card><CardContent>
+                        <Typography variant="caption" color="text.secondary">Upload Throughput</Typography>
+                        <Typography variant="h4">{((metricsOverview?.throughput_up_bps ?? 0) / 1024).toFixed(1)} KB/s</Typography>
+                      </CardContent></Card>
+                      <Card><CardContent>
+                        <Typography variant="caption" color="text.secondary">Download Throughput</Typography>
+                        <Typography variant="h4">{((metricsOverview?.throughput_dn_bps ?? 0) / 1024).toFixed(1)} KB/s</Typography>
+                      </CardContent></Card>
+                      <Card><CardContent>
+                        <Typography variant="caption" color="text.secondary">Error Rate</Typography>
+                        <Typography variant="h4" color={((metricsOverview?.error_rate ?? 0) > 0.01) ? 'error.main' : 'text.primary'}>
+                          {((metricsOverview?.error_rate ?? 0) * 100).toFixed(2)}%
+                        </Typography>
+                      </CardContent></Card>
+                    </Box>
+
+                    <Typography variant="h6" sx={{ mb: 1 }}>Per-Agent Metrics</Typography>
+                    {agentMetrics.length === 0 ? (
+                      <Alert severity="info" sx={{ mb: 3 }}>No metrics data yet. Enable metrics with <code>--metrics-dir</code>.</Alert>
+                    ) : (
+                      <Box sx={{ mb: 3 }}>
+                        {agentMetrics.map((am) => (
+                          <Card key={am.agent_id} sx={{ mb: 1.5, cursor: 'pointer', border: selectedStatsAgent === am.agent_id ? 2 : 0, borderColor: 'primary.main' }}
+                            onClick={() => selectStatsAgent(selectedStatsAgent === am.agent_id ? '' : am.agent_id)}>
+                            <CardContent sx={{ py: 1.5, '&:last-child': { pb: 1.5 } }}>
+                              <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 1 }}>
+                                <Typography variant="subtitle1" sx={{ fontWeight: 600, fontFamily: 'monospace' }}>{am.agent_id}</Typography>
+                                <Box sx={{ display: 'flex', gap: 2, flexWrap: 'wrap' }}>
+                                  <Chip size="small" label={`Up: ${(am.snapshot.throughput_up_p50_bps / 1024).toFixed(1)} KB/s`} />
+                                  <Chip size="small" label={`Dn: ${(am.snapshot.throughput_dn_p50_bps / 1024).toFixed(1)} KB/s`} />
+                                  <Chip size="small" label={`P95: ${am.snapshot.latency_p95_ms.toFixed(0)}ms`} />
+                                  <Chip size="small" label={`Batch: ${(am.params.batch_size / 1024).toFixed(0)}KB`} />
+                                  <Chip size="small" label={`Conc: ${am.params.concurrency}`} />
+                                  <Chip size="small" label={am.params.compress ? 'gzip' : 'raw'} color={am.params.compress ? 'info' : 'default'} />
+                                  <Chip size="small" label={`Err: ${(am.snapshot.error_rate * 100).toFixed(1)}%`} color={am.snapshot.error_rate > 0.01 ? 'error' : 'default'} />
+                                </Box>
+                              </Box>
+                              {am.last_decision && (
+                                <Typography variant="caption" color="text.secondary" sx={{ mt: 0.5, display: 'block' }}>
+                                  Last tune: {am.last_decision.reason} ({new Date(am.last_decision.timestamp).toLocaleTimeString()})
+                                </Typography>
+                              )}
+                            </CardContent>
+                          </Card>
+                        ))}
+                      </Box>
+                    )}
+
+                    {selectedStatsAgent && (
+                      <Box>
+                        <Typography variant="h6" sx={{ mb: 1 }}>Agent: {selectedStatsAgent}</Typography>
+                        {selectedAgentSamples.length > 0 ? (
+                          <Card sx={{ mb: 2 }}>
+                            <CardContent>
+                              <Typography variant="subtitle2" sx={{ mb: 1 }}>Throughput (last 24h)</Typography>
+                              <ResponsiveContainer width="100%" height={200}>
+                                <LineChart data={selectedAgentSamples}>
+                                  <CartesianGrid strokeDasharray="3 3" />
+                                  <XAxis dataKey="timestamp" tickFormatter={(v: string) => new Date(v).toLocaleTimeString()} fontSize={10} />
+                                  <YAxis fontSize={10} tickFormatter={(v: number) => `${(v / 1024).toFixed(0)}K`} />
+                                  <RTooltip labelFormatter={(v: string) => new Date(v).toLocaleString()} />
+                                  <Legend />
+                                  <Line type="monotone" dataKey="throughput_up_bps" name="Upload" stroke="#1976d2" dot={false} strokeWidth={1.5} />
+                                  <Line type="monotone" dataKey="throughput_dn_bps" name="Download" stroke="#2e7d32" dot={false} strokeWidth={1.5} />
+                                </LineChart>
+                              </ResponsiveContainer>
+                              <Typography variant="subtitle2" sx={{ mb: 1, mt: 2 }}>Latency (ms)</Typography>
+                              <ResponsiveContainer width="100%" height={150}>
+                                <LineChart data={selectedAgentSamples}>
+                                  <CartesianGrid strokeDasharray="3 3" />
+                                  <XAxis dataKey="timestamp" tickFormatter={(v: string) => new Date(v).toLocaleTimeString()} fontSize={10} />
+                                  <YAxis fontSize={10} />
+                                  <RTooltip labelFormatter={(v: string) => new Date(v).toLocaleString()} />
+                                  <Legend />
+                                  <Line type="monotone" dataKey="latency_p50_ms" name="P50" stroke="#ed6c02" dot={false} strokeWidth={1.5} />
+                                  <Line type="monotone" dataKey="latency_p95_ms" name="P95" stroke="#d32f2f" dot={false} strokeWidth={1.5} />
+                                </LineChart>
+                              </ResponsiveContainer>
+                            </CardContent>
+                          </Card>
+                        ) : (
+                          <Alert severity="info" sx={{ mb: 2 }}>No time-series samples available for this agent yet.</Alert>
+                        )}
+
+                        {selectedAgentDecisions.length > 0 && (
+                          <Card>
+                            <CardContent>
+                              <Typography variant="subtitle2" sx={{ mb: 1 }}>Tuning Decisions</Typography>
+                              {selectedAgentDecisions.map((d, i) => (
+                                <Box key={i} sx={{ mb: 1, pb: 1, borderBottom: i < selectedAgentDecisions.length - 1 ? 1 : 0, borderColor: 'divider' }}>
+                                  <Typography variant="caption" color="text.secondary">
+                                    {new Date(d.timestamp).toLocaleString()}
+                                  </Typography>
+                                  <Typography variant="body2">{d.reason}</Typography>
+                                  <Typography variant="caption" sx={{ fontFamily: 'monospace' }}>
+                                    batch: {d.old_params.batch_size} → {d.new_params.batch_size} | conc: {d.old_params.concurrency} → {d.new_params.concurrency} | compress: {String(d.old_params.compress)} → {String(d.new_params.compress)}
+                                  </Typography>
+                                </Box>
+                              ))}
+                            </CardContent>
+                          </Card>
+                        )}
+                      </Box>
+                    )}
+                  </Box>
+                )}
               </>
             ) : (
               <>
@@ -734,6 +969,7 @@ export default function App() {
                   <Tabs value={tabIndex} onChange={(_, v) => setTabIndex(v)}>
                     <Tab label="Sessions" />
                     <Tab label="Agents" />
+                    <Tab label="Statistics" />
                   </Tabs>
                 </Paper>
 
@@ -782,6 +1018,101 @@ export default function App() {
                         />
                       }
                     />
+                  </Box>
+                )}
+
+                {tabIndex === 2 && (
+                  <Box>
+                    <PageHeader
+                      title="Statistics"
+                      actions={
+                        <Button startIcon={<RefreshIcon />} onClick={() => { fetchMetricsOverview(); fetchAgentMetrics(); }} size="small">
+                          Refresh
+                        </Button>
+                      }
+                    />
+                    <Box sx={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 2, mb: 3 }}>
+                      <Card><CardContent>
+                        <Typography variant="caption" color="text.secondary">Active Agents</Typography>
+                        <Typography variant="h4">{metricsOverview?.active_agents ?? 0}</Typography>
+                      </CardContent></Card>
+                      <Card><CardContent>
+                        <Typography variant="caption" color="text.secondary">Upload Throughput</Typography>
+                        <Typography variant="h4">{((metricsOverview?.throughput_up_bps ?? 0) / 1024).toFixed(1)} KB/s</Typography>
+                      </CardContent></Card>
+                      <Card><CardContent>
+                        <Typography variant="caption" color="text.secondary">Download Throughput</Typography>
+                        <Typography variant="h4">{((metricsOverview?.throughput_dn_bps ?? 0) / 1024).toFixed(1)} KB/s</Typography>
+                      </CardContent></Card>
+                      <Card><CardContent>
+                        <Typography variant="caption" color="text.secondary">Error Rate</Typography>
+                        <Typography variant="h4" color={((metricsOverview?.error_rate ?? 0) > 0.01) ? 'error.main' : 'text.primary'}>
+                          {((metricsOverview?.error_rate ?? 0) * 100).toFixed(2)}%
+                        </Typography>
+                      </CardContent></Card>
+                    </Box>
+
+                    <Typography variant="h6" sx={{ mb: 1 }}>Per-Agent Metrics</Typography>
+                    {agentMetrics.length === 0 ? (
+                      <Alert severity="info" sx={{ mb: 3 }}>No metrics data yet.</Alert>
+                    ) : (
+                      <Box sx={{ mb: 3 }}>
+                        {agentMetrics.map((am) => (
+                          <Card key={am.agent_id} sx={{ mb: 1.5, cursor: 'pointer', border: selectedStatsAgent === am.agent_id ? 2 : 0, borderColor: 'primary.main' }}
+                            onClick={() => selectStatsAgent(selectedStatsAgent === am.agent_id ? '' : am.agent_id)}>
+                            <CardContent sx={{ py: 1.5, '&:last-child': { pb: 1.5 } }}>
+                              <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 1 }}>
+                                <Typography variant="subtitle1" sx={{ fontWeight: 600, fontFamily: 'monospace' }}>{am.agent_id}</Typography>
+                                <Box sx={{ display: 'flex', gap: 2, flexWrap: 'wrap' }}>
+                                  <Chip size="small" label={`Up: ${(am.snapshot.throughput_up_p50_bps / 1024).toFixed(1)} KB/s`} />
+                                  <Chip size="small" label={`Dn: ${(am.snapshot.throughput_dn_p50_bps / 1024).toFixed(1)} KB/s`} />
+                                  <Chip size="small" label={`P95: ${am.snapshot.latency_p95_ms.toFixed(0)}ms`} />
+                                  <Chip size="small" label={`Err: ${(am.snapshot.error_rate * 100).toFixed(1)}%`} color={am.snapshot.error_rate > 0.01 ? 'error' : 'default'} />
+                                </Box>
+                              </Box>
+                            </CardContent>
+                          </Card>
+                        ))}
+                      </Box>
+                    )}
+
+                    {selectedStatsAgent && (
+                      <Box>
+                        <Typography variant="h6" sx={{ mb: 1 }}>Agent: {selectedStatsAgent}</Typography>
+                        {selectedAgentSamples.length > 0 ? (
+                          <Card sx={{ mb: 2 }}>
+                            <CardContent>
+                              <Typography variant="subtitle2" sx={{ mb: 1 }}>Throughput (last 24h)</Typography>
+                              <ResponsiveContainer width="100%" height={200}>
+                                <LineChart data={selectedAgentSamples}>
+                                  <CartesianGrid strokeDasharray="3 3" />
+                                  <XAxis dataKey="timestamp" tickFormatter={(v: string) => new Date(v).toLocaleTimeString()} fontSize={10} />
+                                  <YAxis fontSize={10} tickFormatter={(v: number) => `${(v / 1024).toFixed(0)}K`} />
+                                  <RTooltip labelFormatter={(v: string) => new Date(v).toLocaleString()} />
+                                  <Legend />
+                                  <Line type="monotone" dataKey="throughput_up_bps" name="Upload" stroke="#1976d2" dot={false} strokeWidth={1.5} />
+                                  <Line type="monotone" dataKey="throughput_dn_bps" name="Download" stroke="#2e7d32" dot={false} strokeWidth={1.5} />
+                                </LineChart>
+                              </ResponsiveContainer>
+                              <Typography variant="subtitle2" sx={{ mb: 1, mt: 2 }}>Latency (ms)</Typography>
+                              <ResponsiveContainer width="100%" height={150}>
+                                <LineChart data={selectedAgentSamples}>
+                                  <CartesianGrid strokeDasharray="3 3" />
+                                  <XAxis dataKey="timestamp" tickFormatter={(v: string) => new Date(v).toLocaleTimeString()} fontSize={10} />
+                                  <YAxis fontSize={10} />
+                                  <RTooltip labelFormatter={(v: string) => new Date(v).toLocaleString()} />
+                                  <Legend />
+                                  <Line type="monotone" dataKey="latency_p50_ms" name="P50" stroke="#ed6c02" dot={false} strokeWidth={1.5} />
+                                  <Line type="monotone" dataKey="latency_p95_ms" name="P95" stroke="#d32f2f" dot={false} strokeWidth={1.5} />
+                                </LineChart>
+                              </ResponsiveContainer>
+                            </CardContent>
+                          </Card>
+                        ) : (
+                          <Alert severity="info" sx={{ mb: 2 }}>No time-series samples available for this agent yet.</Alert>
+                        )}
+                      </Box>
+                    )}
                   </Box>
                 )}
               </>

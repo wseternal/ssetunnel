@@ -26,6 +26,7 @@ import (
 	"github.com/wseternal/ssetunnel/internal/auth"
 	"github.com/wseternal/ssetunnel/internal/connect"
 	"github.com/wseternal/ssetunnel/internal/consoleserver"
+	"github.com/wseternal/ssetunnel/internal/metrics"
 	"github.com/wseternal/ssetunnel/internal/probe"
 	"github.com/wseternal/ssetunnel/internal/server"
 	"github.com/wseternal/ssetunnel/migrations"
@@ -96,6 +97,10 @@ func runServer(ctx context.Context, args []string) error {
 	heartbeat := fs.Duration("heartbeat", 15*time.Second, "SSE heartbeat interval")
 	dbURL := fs.String("db-url", os.Getenv("DATABASE_URL"), "PostgreSQL DB connection URL (default uses testcontainer if empty)")
 	disableAuth := fs.Bool("disable-auth", false, "Disable authentication enforcement")
+	metricsDir := fs.String("metrics-dir", "", "Directory for BadgerDB metrics storage (empty = metrics disabled)")
+	metricsRetention := fs.Duration("metrics-retention", 7*24*time.Hour, "How long to retain metrics data (default: 7 days)")
+	metricsFlush := fs.Duration("metrics-flush", 10*time.Second, "Interval for flushing metrics to disk (default: 10s)")
+	tunerInterval := fs.Duration("tuner-interval", 30*time.Second, "Interval for auto-tuner evaluation (default: 30s)")
 	// Accept --totp-secret for backward compatibility (silently ignored).
 	_ = fs.String("totp-secret", "", "DEPRECATED: per-user TOTP is now used; this flag is ignored")
 
@@ -116,6 +121,39 @@ func runServer(ctx context.Context, args []string) error {
 	// TODO: re-read config files, refresh auth pepper, etc.
 
 	srv := server.NewServerWithBase(*heartbeat, *basePath)
+
+	// Metrics and auto-tuner setup (optional, enabled by --metrics-dir).
+	if *metricsDir != "" {
+		if err := os.MkdirAll(*metricsDir, 0o755); err != nil {
+			return fmt.Errorf("create metrics dir %s: %w", *metricsDir, err)
+		}
+		metricsStore, err := metrics.OpenStore(*metricsDir)
+		if err != nil {
+			return fmt.Errorf("open metrics store: %w", err)
+		}
+		mc := metrics.NewCollector(metricsStore, *metricsFlush, *metricsRetention)
+		srv.SetMetricsCollector(mc)
+
+		// Auto-tuner: evaluates agents and pushes parameter changes via SSE.
+		pushFn := func(agentID string, params metrics.TransportParams) error {
+			sess := srv.FindSession(agentID)
+			if sess == nil {
+				return fmt.Errorf("agent %s not found", agentID)
+			}
+			sess.SendTune(params)
+			return nil
+		}
+		tuner := metrics.NewAutoTuner(mc, metricsStore, pushFn, *tunerInterval)
+		go tuner.Run(ctx)
+
+		// Cleanup on shutdown.
+		go func() {
+			<-ctx.Done()
+			mc.Close()
+			_ = metricsStore.Close()
+		}()
+		log.Printf("server: metrics enabled, dir=%s retention=%s", *metricsDir, *metricsRetention)
+	}
 
 	var store *auth.Store
 	var consoleLn net.Listener
@@ -190,7 +228,7 @@ func runServer(ctx context.Context, args []string) error {
 	}
 
 	if consoleLn != nil {
-		consoleHandler := consoleserver.NewConsoleHandler(ctx, pool, store, srv.Reg)
+		consoleHandler := consoleserver.NewConsoleHandler(ctx, pool, store, srv.Reg, srv.MetricsCollector())
 		consoleSrv := &http.Server{
 			Handler:      consoleHandler,
 			ReadTimeout:  15 * time.Second,
@@ -235,6 +273,7 @@ func runAgent(ctx context.Context, args []string) error {
 	batchSize := fs.Int("batch-size", 262144, "upstream batch ceiling in bytes (1024..1048576)")
 	concurrency := fs.Int("concurrency", 1, "upstream POST sender depth (1..4)")
 	compress := fs.Bool("compress", false, "negotiate gzip-per-batch upstream encoding")
+	noAutoTune := fs.Bool("no-auto-tune", false, "disable server auto-tuning (keep static CLI flags)")
 
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -282,6 +321,7 @@ func runAgent(ctx context.Context, args []string) error {
 		BatchSize:       batch,
 		Concurrency:     conc,
 		Compress:        *compress,
+		NoAutoTune:      *noAutoTune,
 	}
 	return ag.Run(ctx)
 }
