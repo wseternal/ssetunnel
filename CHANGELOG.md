@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.3](https://github.com/wseternal/ssetunnel/compare/v1.0.2...v1.0.3) (2026-07-30)
+
+
+### Bug Fixes
+
+* **ci:** authenticate setup-task to resolve API rate limit ([c52fc69](https://github.com/wseternal/ssetunnel/commit/c52fc69aa12a2054c3633b8b2a1d0f71dd2d162e))
+
 ## [1.0.2](https://github.com/wseternal/ssetunnel/compare/v1.0.1...v1.0.2) (2026-07-30)
 
 
