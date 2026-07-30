@@ -202,6 +202,12 @@ func (a *Agent) proxy(stream net.Conn) {
 		stream = &readerConn{Reader: reader, Conn: stream}
 	}
 
+	// Shell target: spawn a local shell with PTY instead of dialing TCP.
+	if target == TargetShell {
+		proxyShell(stream)
+		return
+	}
+
 	conn, err := net.DialTimeout("tcp", target, 10*time.Second)
 	if err != nil {
 		log.Printf("agent: dial target %s: %v", target, err)

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   ThemeProvider,
   CssBaseline,
@@ -40,6 +40,10 @@ import GroupIcon from '@mui/icons-material/Group';
 import RouterIcon from '@mui/icons-material/Router';
 import SecurityIcon from '@mui/icons-material/Security';
 import ContentCopyIcon from '@mui/icons-material/ContentCopy';
+import TerminalIcon from '@mui/icons-material/Terminal';
+import { Terminal, type IDisposable } from '@xterm/xterm';
+import { FitAddon } from '@xterm/addon-fit';
+import '@xterm/xterm/css/xterm.css';
 import { QRCodeSVG } from 'qrcode.react';
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip as RTooltip, Legend, ResponsiveContainer,
@@ -198,6 +202,16 @@ export default function App() {
   const [selectedAgentDecisions, setSelectedAgentDecisions] = useState<TuningDecision[]>([]);
   const [selectedStatsAgent, setSelectedStatsAgent] = useState<string>('');
 
+  // Cloud Shell
+  const [shellAgent, setShellAgent] = useState<string>('');
+  const [shellConnected, setShellConnected] = useState(false);
+  const [shellSessionId, setShellSessionId] = useState<string>('');
+  const termRef = useRef<HTMLDivElement>(null);
+  const xtermRef = useRef<Terminal | null>(null);
+  const fitAddonRef = useRef<FitAddon | null>(null);
+  const shellAbortRef = useRef<AbortController | null>(null);
+  const inputDisposableRef = useRef<IDisposable | null>(null);
+
   const authHeaders = (): HeadersInit => sessionToken ? { Authorization: `Bearer ${sessionToken}` } : {};
 
   // Check for 401 responses on authenticated requests and trigger logout.
@@ -289,6 +303,172 @@ export default function App() {
     }
   };
 
+  // --- Cloud Shell ---
+
+  // Parse SSE frames from a text chunk and return the data payloads.
+  const parseSSEFrames = useCallback((text: string): string[] => {
+    const frames: string[] = [];
+    const lines = text.split('\n');
+    let currentData = '';
+    for (const line of lines) {
+      if (line.startsWith('data:')) {
+        currentData += line.slice(5);
+      } else if (line === '' && currentData !== '') {
+        frames.push(currentData);
+        currentData = '';
+      }
+    }
+    if (currentData !== '') frames.push(currentData);
+    return frames;
+  }, []);
+
+  const disconnectShell = useCallback(() => {
+    if (shellAbortRef.current) {
+      shellAbortRef.current.abort();
+      shellAbortRef.current = null;
+    }
+    if (inputDisposableRef.current) {
+      inputDisposableRef.current.dispose();
+      inputDisposableRef.current = null;
+    }
+    if (xtermRef.current) {
+      xtermRef.current.writeln('\r\n\x1b[33m[Disconnected]\x1b[0m');
+    }
+    setShellConnected(false);
+    setShellSessionId('');
+  }, []);
+
+  const connectShell = useCallback(async (agentID: string) => {
+    if (!agentID || !sessionToken) return;
+
+    // Disconnect any existing shell first.
+    if (shellAbortRef.current) {
+      shellAbortRef.current.abort();
+    }
+
+    // Initialize xterm if not already.
+    if (!xtermRef.current && termRef.current) {
+      const fitAddon = new FitAddon();
+      const term = new Terminal({
+        cursorBlink: true,
+        fontSize: 14,
+        fontFamily: '"JetBrains Mono", "Fira Code", "Cascadia Code", Menlo, Monaco, monospace',
+        theme: { background: '#1e1e2e', foreground: '#cdd6f4', cursor: '#f5c2e7' },
+        allowTransparency: false,
+        scrollback: 5000,
+      });
+      term.loadAddon(fitAddon);
+      term.open(termRef.current);
+      fitAddon.fit();
+      xtermRef.current = term;
+      fitAddonRef.current = fitAddon;
+    }
+
+    const term = xtermRef.current!;
+    term.clear();
+    term.writeln('\x1b[36m[Connecting to ' + agentID + '...]\x1b[0m');
+
+    const abort = new AbortController();
+    shellAbortRef.current = abort;
+
+    // Generate a random connect session ID.
+    const sid = Array.from(crypto.getRandomValues(new Uint8Array(16)))
+      .map(b => b.toString(16).padStart(2, '0')).join('');
+    setShellSessionId(sid);
+
+    // Build SSE URL — auth via Authorization header (not query param).
+    const sseURL = `/console/api/v1/shell/connect?id=${encodeURIComponent(sid)}&agent=${encodeURIComponent(agentID)}`;
+
+    // Set up input handler: send keystrokes via POST.
+    const sendInput = async (data: string) => {
+      if (!shellConnected && !abort.signal.aborted) {
+        // Still connecting, buffer input? No, just send.
+      }
+      try {
+        await fetch('/console/api/v1/shell/connect-up', {
+          method: 'POST',
+          headers: { ...authHeaders(), 'X-SSET-Session': sid },
+          body: data,
+          signal: abort.signal,
+        });
+      } catch (e) {
+        if (!abort.signal.aborted) {
+          term.writeln('\x1b[31m[Send error]\x1b[0m');
+        }
+      }
+    };
+
+    // Set up input handler: send keystrokes via POST. Dispose previous
+    // handler if any (e.g., from a prior connection that wasn't cleaned up).
+    if (inputDisposableRef.current) {
+      inputDisposableRef.current.dispose();
+    }
+    const inputDisposable = term.onData(sendInput);
+    inputDisposableRef.current = inputDisposable;
+
+    // Start SSE stream using fetch (ReadableStream) for full header control.
+    try {
+      const resp = await fetch(sseURL, {
+        headers: { Authorization: `Bearer ${sessionToken}` },
+        signal: abort.signal,
+      });
+      if (!resp.ok) {
+        const errText = await resp.text();
+        term.writeln(`\x1b[31m[Error: ${resp.status} ${errText}]\x1b[0m`);
+        setShellConnected(false);
+        inputDisposable.dispose();
+        return;
+      }
+
+      setShellConnected(true);
+      term.writeln('\x1b[32m[Connected]\x1b[0m\r\n');
+
+      const reader = resp.body!.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+
+        // Process complete SSE frames.
+        const frames = parseSSEFrames(buffer);
+        // Keep incomplete trailing data in buffer.
+        const lastDoubleNewline = buffer.lastIndexOf('\n\n');
+        buffer = lastDoubleNewline >= 0 ? buffer.slice(lastDoubleNewline + 2) : buffer;
+
+        for (const frame of frames) {
+          if (frame === '') continue; // heartbeat
+          // Decode base64 data (SSE frames contain base64-encoded binary data).
+          try {
+            const binary = atob(frame);
+            term.write(binary);
+          } catch {
+            // If not valid base64, write as plain text (fallback).
+            term.write(frame);
+          }
+        }
+      }
+
+      if (!abort.signal.aborted) {
+        term.writeln('\r\n\x1b[33m[Connection closed by server]\x1b[0m');
+      }
+    } catch (e) {
+      if (!abort.signal.aborted) {
+        term.writeln(`\r\n\x1b[31m[Connection error: ${e}]\x1b[0m`);
+      }
+    } finally {
+      if (inputDisposableRef.current) {
+        inputDisposableRef.current.dispose();
+        inputDisposableRef.current = null;
+      }
+      setShellConnected(false);
+      setShellSessionId('');
+      shellAbortRef.current = null;
+    }
+  }, [sessionToken, shellConnected, parseSSEFrames]);
+
   // Validate restored token on mount
   useEffect(() => {
     if (sessionToken) {
@@ -320,6 +500,21 @@ export default function App() {
 
   // Reset tabIndex when role changes to avoid pointing at a non-existent tab.
   useEffect(() => { setTabIndex(0); }, [isAdmin]);
+
+  // Cleanup xterm and shell connection on unmount.
+  useEffect(() => {
+    return () => {
+      if (shellAbortRef.current) shellAbortRef.current.abort();
+      if (xtermRef.current) { xtermRef.current.dispose(); xtermRef.current = null; }
+    };
+  }, []);
+
+  // Refit terminal on window resize.
+  useEffect(() => {
+    const onResize = () => { if (fitAddonRef.current) fitAddonRef.current.fit(); };
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
 
   useEffect(() => {
     if (isLoggedIn && roleConfirmed) {
@@ -756,6 +951,7 @@ export default function App() {
                     <Tab label="Users" />
                     <Tab label="Agents" />
                     <Tab label="Statistics" />
+                    <Tab label="Shell" icon={<TerminalIcon />} iconPosition="start" />
                   </Tabs>
                 </Paper>
 
@@ -962,6 +1158,65 @@ export default function App() {
                     )}
                   </Box>
                 )}
+
+                {tabIndex === 4 && (
+                  <Box>
+                    <PageHeader
+                      title="Cloud Shell"
+                      actions={
+                        <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
+                          <FormControl size="small" sx={{ minWidth: 180 }}>
+                            <InputLabel>Agent</InputLabel>
+                            <Select
+                              value={shellAgent}
+                              label="Agent"
+                              onChange={(e) => setShellAgent(e.target.value)}
+                              disabled={shellConnected}
+                            >
+                              {agentMetrics.map((am) => (
+                                <MenuItem key={am.agent_id} value={am.agent_id}>{am.agent_id}</MenuItem>
+                              ))}
+                            </Select>
+                          </FormControl>
+                          {shellConnected ? (
+                            <Button variant="outlined" color="warning" onClick={disconnectShell}>
+                              Disconnect
+                            </Button>
+                          ) : (
+                            <Button
+                              variant="contained"
+                              startIcon={<TerminalIcon />}
+                              onClick={() => connectShell(shellAgent)}
+                              disabled={!shellAgent}
+                            >
+                              Connect
+                            </Button>
+                          )}
+                        </Box>
+                      }
+                    />
+                    {agentMetrics.length === 0 && (
+                      <Alert severity="info" sx={{ mb: 2 }}>No agents connected. Start an agent to use the cloud shell.</Alert>
+                    )}
+                    <Paper
+                      sx={{
+                        bgcolor: '#1e1e2e',
+                        p: 0.5,
+                        borderRadius: 2,
+                        minHeight: 400,
+                        '& .xterm': { p: 1 },
+                        '& .xterm-viewport': { borderRadius: 1 },
+                      }}
+                    >
+                      <div ref={termRef} style={{ height: 450 }} />
+                    </Paper>
+                    {shellConnected && (
+                      <Typography variant="caption" color="text.secondary" sx={{ mt: 1, display: 'block' }}>
+                        Session: {shellSessionId} | Agent: {shellAgent}
+                      </Typography>
+                    )}
+                  </Box>
+                )}
               </>
             ) : (
               <>
@@ -970,6 +1225,7 @@ export default function App() {
                     <Tab label="Sessions" />
                     <Tab label="Agents" />
                     <Tab label="Statistics" />
+                    <Tab label="Shell" icon={<TerminalIcon />} iconPosition="start" />
                   </Tabs>
                 </Paper>
 
@@ -1112,6 +1368,65 @@ export default function App() {
                           <Alert severity="info" sx={{ mb: 2 }}>No time-series samples available for this agent yet.</Alert>
                         )}
                       </Box>
+                    )}
+                  </Box>
+                )}
+
+                {tabIndex === 3 && (
+                  <Box>
+                    <PageHeader
+                      title="Cloud Shell"
+                      actions={
+                        <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
+                          <FormControl size="small" sx={{ minWidth: 180 }}>
+                            <InputLabel>Agent</InputLabel>
+                            <Select
+                              value={shellAgent}
+                              label="Agent"
+                              onChange={(e) => setShellAgent(e.target.value)}
+                              disabled={shellConnected}
+                            >
+                              {agents.map((a) => (
+                                <MenuItem key={a.id} value={a.agent_id ?? ''}>{a.agent_id ?? '(default)'}</MenuItem>
+                              ))}
+                            </Select>
+                          </FormControl>
+                          {shellConnected ? (
+                            <Button variant="outlined" color="warning" onClick={disconnectShell}>
+                              Disconnect
+                            </Button>
+                          ) : (
+                            <Button
+                              variant="contained"
+                              startIcon={<TerminalIcon />}
+                              onClick={() => connectShell(shellAgent)}
+                              disabled={!shellAgent}
+                            >
+                              Connect
+                            </Button>
+                          )}
+                        </Box>
+                      }
+                    />
+                    {agents.length === 0 && (
+                      <Alert severity="info" sx={{ mb: 2 }}>No agents configured. Contact an admin to add an agent.</Alert>
+                    )}
+                    <Paper
+                      sx={{
+                        bgcolor: '#1e1e2e',
+                        p: 0.5,
+                        borderRadius: 2,
+                        minHeight: 400,
+                        '& .xterm': { p: 1 },
+                        '& .xterm-viewport': { borderRadius: 1 },
+                      }}
+                    >
+                      <div ref={termRef} style={{ height: 450 }} />
+                    </Paper>
+                    {shellConnected && (
+                      <Typography variant="caption" color="text.secondary" sx={{ mt: 1, display: 'block' }}>
+                        Session: {shellSessionId} | Agent: {shellAgent}
+                      </Typography>
                     )}
                   </Box>
                 )}
