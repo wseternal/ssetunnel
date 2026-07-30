@@ -27,19 +27,22 @@ func NewConsoleHandler(ctx context.Context, pool *pgxpool.Pool, store *auth.Stor
 		http.Redirect(w, r, "/console/", http.StatusMovedPermanently)
 	})
 
-	// API routes — strip /console so the inner router sees /api/v1/...
-	apiRouter := consoleapi.NewRouter(store, reg)
-	apiRouter.SetMetrics(mc)
-	r.PathPrefix("/console/api/v1/").Handler(http.StripPrefix("/console", apiRouter))
-
 	// Cloud shell: proxy to the tunnel handler's /connect and /connect-up
 	// endpoints with forced target=__shell__. Auth via user session middleware.
+	// IMPORTANT: These routes MUST be registered before the /console/api/v1/
+	// PathPrefix catch-all below, otherwise gorilla/mux matches the prefix
+	// first and the shell connect requests never reach these handlers.
 	if srv != nil {
 		th := srv.TunnelHandler()
 		userAuth := server.UserSessionMiddleware(store)
 		r.Handle("/console/api/v1/shell/connect", userAuth(th.ShellConnectHandler())).Methods("GET")
 		r.Handle("/console/api/v1/shell/connect-up", userAuth(th.ShellConnectUpHandler())).Methods("POST")
 	}
+
+	// API routes — strip /console so the inner router sees /api/v1/...
+	apiRouter := consoleapi.NewRouter(store, reg)
+	apiRouter.SetMetrics(mc)
+	r.PathPrefix("/console/api/v1/").Handler(http.StripPrefix("/console", apiRouter))
 
 	// SPA catch-all
 	spaCfg := litespaserver.Config{
