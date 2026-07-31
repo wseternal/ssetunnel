@@ -503,7 +503,11 @@ func (h *Handler) handleConnect(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 			default:
-				// No pending resize — read from the up pipe.
+				// No pending resize — read from the up pipe with a deadline
+				// so we periodically re-check the resize channel (prevents
+				// resize events from being stuck behind a blocking read
+				// during idle periods).
+				cs.up.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
 				n, err := cs.up.Read(*buf)
 				if n > 0 {
 					if _, werr := stream.Write((*buf)[:n]); werr != nil {
@@ -512,6 +516,11 @@ func (h *Handler) handleConnect(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 				if err != nil {
+					// Timeout: re-check resize channel on next iteration.
+					var ne net.Error
+					if errors.As(err, &ne) && ne.Timeout() {
+						continue
+					}
 					stream.Close() // signal EOF to agent
 					return
 				}
@@ -666,8 +675,12 @@ func (h *Handler) handleConnectResize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cs := v.(*connectSession)
-	// Non-blocking send: if the channel is full, the previous resize is
-	// still pending and will be overwritten by the latest dimensions.
+	// Drain any stale resize before sending the latest dimensions, so the
+	// newest resize always wins (channel buffer is 1).
+	select {
+	case <-cs.resize:
+	default:
+	}
 	select {
 	case cs.resize <- windowSize{Cols: req.Cols, Rows: req.Rows}:
 	default:

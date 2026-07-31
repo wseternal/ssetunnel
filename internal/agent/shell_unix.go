@@ -135,13 +135,13 @@ func readAndApplyResize(stream net.Conn, ptmx *os.File) bool {
 		Cols uint16 `json:"cols"`
 		Rows uint16 `json:"rows"`
 	}
-	if err := json.Unmarshal(buf, &ws); err == nil {
-		if err := pty.Setsize(ptmx, &pty.Winsize{
-			Rows: ws.Rows,
-			Cols: ws.Cols,
-		}); err != nil {
-			log.Printf("agent: pty resize: %v", err)
-		}
+	if err := json.Unmarshal(buf, &ws); err != nil {
+		log.Printf("agent: bad resize JSON: %v", err)
+	} else if err := pty.Setsize(ptmx, &pty.Winsize{
+		Rows: ws.Rows,
+		Cols: ws.Cols,
+	}); err != nil {
+		log.Printf("agent: pty resize: %v", err)
 	}
 	return true
 }
