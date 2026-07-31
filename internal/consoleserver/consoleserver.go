@@ -37,6 +37,7 @@ func NewConsoleHandler(ctx context.Context, pool *pgxpool.Pool, store *auth.Stor
 		userAuth := server.UserSessionMiddleware(store)
 		r.Handle("/console/api/v1/shell/connect", userAuth(th.ShellConnectHandler())).Methods("GET")
 		r.Handle("/console/api/v1/shell/connect-up", userAuth(th.ShellConnectUpHandler())).Methods("POST")
+		r.Handle("/console/api/v1/shell/resize", userAuth(th.ShellConnectResizeHandler())).Methods("POST")
 	}
 
 	// API routes — strip /console so the inner router sees /api/v1/...
