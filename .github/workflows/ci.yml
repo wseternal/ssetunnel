@@ -6,7 +6,6 @@ on:
 permissions:
   contents: "read"
   repository-projects: "read"
-  id-token: "write"
 jobs:
   build-and-test:
     runs-on: ubuntu-latest

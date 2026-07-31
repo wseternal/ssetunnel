@@ -42,7 +42,9 @@ jobs:
       - name: Build release binaries
         env:
           VERSION: ${{ github.ref_name }}
-        run: task ${{ matrix.task }}
+        run: |
+          export VERSION="${VERSION#v}"
+          task ${{ matrix.task }}
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
