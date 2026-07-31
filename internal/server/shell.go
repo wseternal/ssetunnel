@@ -67,6 +67,13 @@ func (h *Handler) ShellConnectUpHandler() http.Handler {
 	return http.HandlerFunc(h.handleConnectUp)
 }
 
+// ShellConnectResizeHandler returns an http.Handler that serves the cloud
+// shell resize POST endpoint. It delegates to handleConnectResize which
+// looks up the connect session by ID from the JSON request body.
+func (h *Handler) ShellConnectResizeHandler() http.Handler {
+	return http.HandlerFunc(h.handleConnectResize)
+}
+
 // isAdmin reports whether the user session has admin role.
 func isAdmin(sessInfo *auth.UserSessionInfo) bool {
 	return sessInfo != nil && auth.HasPermission(sessInfo.Role, auth.PermAdmin)

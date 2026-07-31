@@ -217,6 +217,7 @@ export default function App() {
   const fitAddonRef = useRef<FitAddon | null>(null);
   const shellAbortRef = useRef<AbortController | null>(null);
   const inputDisposableRef = useRef<IDisposable | null>(null);
+  const resizeDisposableRef = useRef<IDisposable | null>(null);
 
   const authHeaders = (): HeadersInit => sessionToken ? { Authorization: `Bearer ${sessionToken}` } : {};
 
@@ -346,6 +347,10 @@ export default function App() {
       inputDisposableRef.current.dispose();
       inputDisposableRef.current = null;
     }
+    if (resizeDisposableRef.current) {
+      resizeDisposableRef.current.dispose();
+      resizeDisposableRef.current = null;
+    }
     if (xtermRef.current) {
       xtermRef.current.writeln('\r\n\x1b[33m[Disconnected]\x1b[0m');
     }
@@ -438,6 +443,22 @@ export default function App() {
       setShellConnected(true);
       term.writeln('\x1b[32m[Connected]\x1b[0m\r\n');
 
+      // Set up resize handler: forward xterm.js dimensions to the PTY.
+      if (resizeDisposableRef.current) {
+        resizeDisposableRef.current.dispose();
+      }
+      const sendResize = (cols: number, rows: number) => {
+        fetch('/console/api/v1/shell/resize', {
+          method: 'POST',
+          headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: sid, cols, rows }),
+          signal: abort.signal,
+        }).catch(() => {});
+      };
+      resizeDisposableRef.current = term.onResize(({ cols, rows }) => sendResize(cols, rows));
+      // Send initial size so the PTY matches xterm.js from the start.
+      sendResize(term.cols, term.rows);
+
       const reader = resp.body!.getReader();
       const decoder = new TextDecoder();
       let buffer = '';
@@ -456,9 +477,16 @@ export default function App() {
         for (const frame of frames) {
           if (frame === '') continue; // heartbeat
           // Decode base64 data (SSE frames contain base64-encoded binary data).
+          // Convert to Uint8Array to preserve all byte values — passing a JS
+          // string to term.write() causes UTF-8 re-encoding which corrupts
+          // bytes > 127 (e.g. ANSI 256-color, UTF-8 shell output).
           try {
             const binary = atob(frame);
-            term.write(binary);
+            const bytes = new Uint8Array(binary.length);
+            for (let i = 0; i < binary.length; i++) {
+              bytes[i] = binary.charCodeAt(i);
+            }
+            term.write(bytes);
           } catch {
             // If not valid base64, write as plain text (fallback).
             term.write(frame);
@@ -477,6 +505,10 @@ export default function App() {
       if (inputDisposableRef.current) {
         inputDisposableRef.current.dispose();
         inputDisposableRef.current = null;
+      }
+      if (resizeDisposableRef.current) {
+        resizeDisposableRef.current.dispose();
+        resizeDisposableRef.current = null;
       }
       setShellConnected(false);
       setShellSessionId('');
