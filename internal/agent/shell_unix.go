@@ -67,46 +67,7 @@ func proxyShell(stream net.Conn) {
 	// EIO, unblocking it and allowing wg.Wait() to return.
 	go func() {
 		defer wg.Done()
-		// Read one byte at a time from the stream. NUL (\x00) signals
-		// a resize command; all other bytes go straight to the PTY.
-		// The yamux stream has internal buffering so single-byte reads
-		// are efficient enough for interactive terminal I/O.
-		one := make([]byte, 1)
-		for {
-			if _, err := io.ReadFull(stream, one); err != nil {
-				break
-			}
-			if one[0] == 0 {
-				// NUL: read resize JSON until newline.
-				var resizeBuf []byte
-				for {
-					if _, err := io.ReadFull(stream, one); err != nil {
-						goto done
-					}
-					if one[0] == '\n' {
-						break
-					}
-					resizeBuf = append(resizeBuf, one[0])
-				}
-				var ws struct {
-					Cols uint16 `json:"cols"`
-					Rows uint16 `json:"rows"`
-				}
-				if err := json.Unmarshal(resizeBuf, &ws); err == nil {
-					if err := pty.Setsize(ptmx, &pty.Winsize{
-						Rows: ws.Rows,
-						Cols: ws.Cols,
-					}); err != nil {
-						log.Printf("agent: pty resize: %v", err)
-					}
-				}
-				continue
-			}
-			if _, err := ptmx.Write(one); err != nil {
-				break
-			}
-		}
-	done:
+		forwardStreamToPTY(stream, ptmx)
 		ptmx.Close() // signal EOF to shell (sends SIGHUP)
 
 		// Give the shell 2 seconds to exit gracefully, then force-kill.
@@ -131,4 +92,56 @@ func proxyShell(stream net.Conn) {
 	// Reap the shell process. It should already be dead (exited
 	// naturally from EOF or force-killed by the input goroutine).
 	cmd.Wait()
+}
+
+// forwardStreamToPTY reads from the yamux stream one byte at a time and
+// writes to the PTY master. NUL bytes (\x00) signal out-of-band resize
+// commands: the next bytes up to '\n' are parsed as JSON {cols, rows}
+// and applied via pty.Setsize. The yamux stream has internal buffering
+// so single-byte reads are efficient enough for interactive terminal I/O.
+func forwardStreamToPTY(stream net.Conn, ptmx *os.File) {
+	one := make([]byte, 1)
+	for {
+		if _, err := io.ReadFull(stream, one); err != nil {
+			return
+		}
+		if one[0] == 0 {
+			if !readAndApplyResize(stream, ptmx) {
+				return
+			}
+			continue
+		}
+		if _, err := ptmx.Write(one); err != nil {
+			return
+		}
+	}
+}
+
+// readAndApplyResize reads a JSON resize message (up to '\n') from the
+// stream and applies it to the PTY. Returns false if the stream is closed.
+func readAndApplyResize(stream net.Conn, ptmx *os.File) bool {
+	one := make([]byte, 1)
+	var buf []byte
+	for {
+		if _, err := io.ReadFull(stream, one); err != nil {
+			return false
+		}
+		if one[0] == '\n' {
+			break
+		}
+		buf = append(buf, one[0])
+	}
+	var ws struct {
+		Cols uint16 `json:"cols"`
+		Rows uint16 `json:"rows"`
+	}
+	if err := json.Unmarshal(buf, &ws); err == nil {
+		if err := pty.Setsize(ptmx, &pty.Winsize{
+			Rows: ws.Rows,
+			Cols: ws.Cols,
+		}); err != nil {
+			log.Printf("agent: pty resize: %v", err)
+		}
+	}
+	return true
 }
