@@ -12,6 +12,7 @@
 build/
 dist/
 /ssetunnel
+version.txt
 
 # Test binary, built with `go test -c`
 *.test

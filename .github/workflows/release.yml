@@ -40,10 +40,11 @@ jobs:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build release binaries
+        shell: bash
         env:
           VERSION: ${{ github.ref_name }}
         run: |
-          export VERSION="${VERSION#v}"
+          echo "${VERSION#v}" > version.txt
           task ${{ matrix.task }}
 
       - name: Upload artifacts
