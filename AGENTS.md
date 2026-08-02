@@ -13,7 +13,7 @@ User (SSH, DB client, ...)
 ┌─────────────────────────────────────────────────────────┐
 │  Server (public, reachable)                              │
 │  • HTTP :8080 — /events, /up, /connect, /connect-up     │
-│  • HTTP :8081 — admin console                           │
+│  • HTTP :8081 — admin console + cloud shell + metrics   │
 └──────────┬──────────────────────────────────────────────┘
            │  yamux over HTTP (SSE-down + POST-up)
            ▼
@@ -22,10 +22,11 @@ User (SSH, DB client, ...)
 │  • Dials out to server HTTP     │
 │  • Accepts yamux streams        │
 │  • Proxies to local TCP target  │
+│  • Or spawns local shell (PTY)  │
 └──────────┬──────────────────────┘
-           │  TCP (e.g. 127.0.0.1:22)
+           │  TCP (e.g. 127.0.0.1:22) or PTY shell
            ▼
-       Target Service (sshd, DB, ...)
+       Target Service (sshd, DB, ...) or local shell
 ```
 
 **Data flow for an SSH ProxyCommand session:**
@@ -44,15 +45,15 @@ User (SSH, DB client, ...)
 * **Path**: `cmd/ssetunnel/`
 
 ### 2. [Server](internal/server/AGENTS.md)
-* **Responsibility**: Public tunnel server — HTTP endpoints (`/events`, `/up`, `/probe`, `/connect`, `/connect-up`), session registry, yamux attachment, auth middleware, agent routing by `agent_id`, and bidirectional proxy between agent connections and yamux streams.
+* **Responsibility**: Public tunnel server — HTTP endpoints (`/events`, `/up`, `/probe`, `/connect`, `/connect-up`), session registry, yamux attachment, auth middleware, agent routing by `agent_id`, bidirectional proxy between agent connections and yamux streams, cloud shell proxy (`__shell__` target with PTY resize), metrics collection hooks, and auto-tune SSE frame injection.
 * **Path**: `internal/server/`
 
 ### 3. [Agent](internal/agent/AGENTS.md)
-* **Responsibility**: Restricted-network agent — dials out to server, accepts yamux streams, proxies to local TCP target (static or dynamic from stream header), auto-reconnects with exponential backoff. Identifies itself with `agent_id` for routing.
+* **Responsibility**: Restricted-network agent — dials out to server, accepts yamux streams, proxies to local TCP target (static or dynamic from stream header) or spawns a local shell with PTY (`__shell__` target), auto-reconnects with exponential backoff (500 ms → 30 s cap). Identifies itself with `agent_id` for routing. Supports server-driven auto-tuning of batch size and compression via SSE `event: tune` frames.
 * **Path**: `internal/agent/`
 
 ### 4. [Connect Client](internal/connect/AGENTS.md)
-* **Responsibility**: User-side connection wrapper — `ServeRW` for stdio (SSH ProxyCommand) and `ServeListener` for local TCP port forwarding. Dials the server via HTTP transport (`transport.DialConnect`) with agent routing and optional dynamic target, proxies bidirectionally.
+* **Responsibility**: User-side connection wrapper — `ServeRW` for stdio (SSH ProxyCommand) and `ServeListener` for local TCP port forwarding. Dials the server via HTTP transport (`transport.DialConnect`) with agent routing and optional dynamic target, proxies bidirectionally. `ServeListener` performs an eager token validation probe at startup and retries dials with exponential backoff.
 * **Path**: `internal/connect/`
 
 ### 5. [Transport](internal/transport/AGENTS.md)
@@ -64,15 +65,15 @@ User (SSH, DB client, ...)
 * **Path**: `internal/mux/`
 
 ### 7. [Auth](internal/auth/AGENTS.md)
-* **Responsibility**: PostgreSQL-backed token and PIN management — bearer tokens, single-use PINs with redemption, admin sessions, user sessions with revocation, TOTP verification, agent config management (allowed targets), user permissions, read-through token cache.
+* **Responsibility**: PostgreSQL-backed token and PIN management — bearer tokens, single-use PINs with redemption, user sessions with revocation, per-user TOTP enrollment with recovery codes (HMAC-SHA256 digests), agent config management (allowed targets), user permissions (`can_connect`, `can_create_agent`), password hashing (bcrypt), multi-server session file (`~/.ssetunnel/session`), read-through token validation.
 * **Path**: `internal/auth/`
 
 ### 8. [Console API](internal/consoleapi/AGENTS.md)
-* **Responsibility**: JSON management API (`/api/v1/...`) — TOTP login/logout, token CRUD, PIN enrollment with QR code, live session listing, agent config CRUD, user management.
+* **Responsibility**: JSON management API (`/api/v1/...`) — username/password login with per-user TOTP and recovery code fallback, rate-limited login (password + TOTP), TOTP self-enrollment with QR code and recovery codes, token CRUD, live session listing (user-scoped), agent config CRUD, user management with disable toggle, connected-agents listing, metrics overview/samples/decisions endpoints.
 * **Path**: `internal/consoleapi/`
 
 ### 9. [Console Server](internal/consoleserver/AGENTS.md)
-* **Responsibility**: Combines the console API router with the React SPA static file server via `litespaserver`.
+* **Responsibility**: Combines the console API router with the React SPA static file server via `litespaserver`. Proxies cloud shell endpoints (`/console/api/v1/shell/connect`, `/connect-up`, `/resize`) to the tunnel handler with forced `__shell__` target and user-scoped agent access.
 * **Path**: `internal/consoleserver/`
 
 ### 10. [Probe](internal/probe/AGENTS.md)
@@ -86,6 +87,10 @@ User (SSH, DB client, ...)
 ### 12. [Frontend](frontend/AGENTS.md)
 * **Responsibility**: React admin console SPA (Vite + TypeScript + MUI v9 + orca-ui), embedded via `go:embed` for the `litespaserver`. Mercury Console light theme design system.
 * **Path**: `frontend/`
+
+### 13. [Metrics](internal/metrics/AGENTS.md)
+* **Responsibility**: Per-agent transport metrics collection (rolling window), BadgerDB persistence, auto-tuner that evaluates throughput saturation, latency, and error rate to push batch-size / concurrency / compression changes to agents via SSE `event: tune` control frames.
+* **Path**: `internal/metrics/`
 
 ---
 
@@ -102,8 +107,17 @@ go test ./... -timeout 120s                       # full suite (needs Docker for
 ### Local Development
 ```bash
 ./local.sh server --disable-auth                  # server without auth (dev mode)
+./local.sh server --metrics-dir /tmp/metrics      # server with auto-tuning enabled
 ./local.sh agent --target 127.0.0.1:22            # agent proxying to local sshd
 ssh -o ProxyCommand="./local.sh connect --local -" user@127.0.0.1   # SSH through tunnel
+```
+
+### Service Management
+```bash
+ssetunnel server start --target 127.0.0.1:22      # install + start as OS service
+ssetunnel server stop                              # stop the service
+ssetunnel server status                            # check service status
+ssetunnel server reload                            # send SIGHUP for config reload
 ```
 
 ### Key Conventions
@@ -113,6 +127,12 @@ ssh -o ProxyCommand="./local.sh connect --local -" user@127.0.0.1   # SSH throug
 * **No goroutine leaks**: Every goroutine hangs off a context owned by its conn/session. `Close()` always tears down cleanly.
 
 ---
+
+## Environment Variables
+| Variable | Used by | Purpose |
+|----------|---------|----------|
+| `DATABASE_URL` | server | PostgreSQL connection URL |
+| `SSETUNNEL_RECOVERY_CODE_PEPPER` | server | HMAC key for recovery code digests (optional; SHA-256 fallback) |
 
 ## Known Pitfalls & Lessons Learned
 
@@ -143,3 +163,12 @@ Connect clients pass `agent` and `target` as HTTP query parameters on `GET /conn
 
 ### Agent Reconnect Backoff
 Sessions that survived past the 10 s health threshold reset the backoff to 0 — a drop after long uptime is a network event, not a flapping server, so retry immediately.
+
+### Cloud Shell (`__shell__` Target)
+The console frontend can open a browser-based shell. The server's `ShellConnectHandler` forces `target=__shell__` via a context key (bypassing agent config validation). The agent detects `__shell__` and spawns a local shell with PTY instead of dialing TCP. Resize events are sent as NUL-prefixed JSON on the yamux stream.
+
+### Auto-Tuning
+The `AutoTuner` evaluates agents every 30 s: throughput saturation adjusts batch size (4 KiB–1 MiB), p95 latency adjusts concurrency (1–4), and bandwidth level toggles gzip. Decisions are pushed via SSE `event: tune` control frames. Agents apply batch-size and compress changes live; concurrency changes are deferred to next reconnect. The tuner enforces a 2-minute cooldown between decisions per agent.
+
+### Base Path Prefix
+All tunnel endpoints support a `--base` flag (e.g. `--base /tunnel`) for reverse-proxy setups. The prefix is prepended to `/events`, `/up`, `/connect`, `/connect-up`, `/probe`. Both agent and connect client pass the same `--base` to match the server.

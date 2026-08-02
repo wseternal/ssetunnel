@@ -16,6 +16,17 @@ func Run(ctx context.Context, cfg Config) (Report, error)
 
 `Report.String()` renders a plain-text report ending with a `recommendation:` line.
 
+### `Config`
+| Field | Type | Purpose |
+|-------|------|---------|
+| `URL` | `string` | Tunnel server base URL (required) |
+| `BasePath` | `string` | HTTP path prefix for tunnel endpoints (e.g. `/tunnel`); empty = no prefix |
+| `Client` | `*http.Client` | nil → `http.DefaultClient` |
+| `Steps` | `int` | Escalation steps from 16 KiB; 0 → 7 |
+| `Parallel` | `int` | Phase-3 parallel stream count; 0 → 4 |
+| `MaxBody` | `int` | Escalation ceiling; 0 → 2 MiB |
+
 ## Rules
 * Probes go through `POST /probe`, never `/events` — an `/events` probe would hijack the live agent's yamux session.
 * 404 on the first request = clean "unsupported" report, not an error.
+* BasePath is prepended to the probe endpoint path (used with `--base` flag).

@@ -13,7 +13,7 @@ func Client(conn io.ReadWriteCloser) (*yamux.Session, error)  // agent side (ove
 
 | Parameter | Value | Rationale |
 |-----------|-------|-----------|
-| `MaxStreamWindowSize` | 1 MiB | Default 256 KiB caps throughput at 2.5 MB/s at 100 ms RTT. 1 MiB keeps the 5 MB/s budget reachable. |
+| `MaxStreamWindowSize` | 4 MiB | At 100 ms effective RTT this yields 40 MB/s theoretical — enough for VNC framebuffer uploads and large file transfers. |
 | `KeepAliveInterval` | 30 s | Detects half-open peers. SSE heartbeats (15 s) already keep middleboxes alive. |
 | `AcceptBacklog` | 256 | Absorbs agent session accept bursts. Far above the 32-stream concurrency target. |
 

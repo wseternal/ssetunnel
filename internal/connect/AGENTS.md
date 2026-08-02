@@ -9,7 +9,7 @@ SSH ProxyCommand (--local -)          Local Port Mode (--local 127.0.0.1:3306)
          │                                      │
    ServeStdio/ServeRW                    ServeListener
          │                                      │
-   Dial (HTTP transport)                  Dial (per connection)
+   Dial (HTTP transport)                  Dial (per connection, with retry)
          │                                      │
    io.Copy (stdin↔server)                io.Copy (localConn↔server)
 ```
@@ -17,7 +17,10 @@ SSH ProxyCommand (--local -)          Local Port Mode (--local 127.0.0.1:3306)
 ## Core Types
 
 ### `Client`
-Holds `serverURL`, `token`, `agentID` (for routing), and `target` (for dynamic target mode). Created via `NewClient(url, token, agentID, target)`.
+Holds `serverURL`, `token`, `agentID` (for routing), `target` (for dynamic target mode), and `basePath` (HTTP path prefix). Created via `NewClient(url, token, agentID, target, basePath)`.
+
+- **`BatchSize`**: Upstream batch ceiling; 0 → 256 KiB default.
+- **`MaxWait`**: Batcher flush ceiling; 0 → 25 ms.
 
 ### `ServeRW(ctx, r, w)`
 The critical function for SSH ProxyCommand support. Copies bidirectionally between `r`/`w` (typically stdin/stdout pipes) and the server connection.
@@ -32,7 +35,7 @@ The critical function for SSH ProxyCommand support. Copies bidirectionally betwe
 When the reader reaches EOF first (user finishes typing), the connection is closed (full close — HTTP transport has no half-close).
 
 ### `ServeListener(ctx, ln)`
-Accepts local TCP connections and proxies each to a fresh server connection. Each connection gets its own `Dial`. Closes the server connection when either direction hits EOF.
+Accepts local TCP connections and proxies each to a fresh server connection. At startup, performs an eager token validation probe (test dial) to catch invalid tokens immediately. Each connection gets its own `Dial` with exponential backoff retry (500 ms → 10 s cap, 30 s total ceiling).
 
 ### `Dial(ctx)`
 Public method that establishes an HTTP transport connection to the server via `transport.DialConnect`. Sends agent ID and target as query parameters. Returns a `net.Conn` that can be used for bidirectional proxy.
@@ -53,3 +56,5 @@ Full integration test: server + agent + connect client + echo target over real T
 * **Always use `io.CopyBuffer` with the `bufferPool`** (32 KiB pooled buffers) for proxy copies.
 * **HTTP transport**: Uses `transport.DialConnect` (SSE-down + POST-up) instead of TCP dial + handshake.
 * **Error visibility**: Write errors to both stderr and stdout so SSH ProxyCommand users see them.
+* **ServeListener retry**: Dial failures are retried with exponential backoff (not just failed immediately).
+* **Eager token validation**: `ServeListener` performs a test connection at startup to fail fast on bad tokens.

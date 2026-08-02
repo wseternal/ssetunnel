@@ -6,15 +6,16 @@ Embedded Atlas SQL migration files for PostgreSQL schema management.
 
 ```
 migrations/
-├── 20260724000001_initial_schema.sql    # Tables: tokens, pins, admin_sessions
-├── 20260724000002_add_users.sql         # Table: users
-├── 20260724000003_add_user_id_fk.sql    # FK: tokens.user_id -> users.id
-├── 20260724000004_add_user_sessions.sql # Table: user_sessions
-├── 20260724000005_cleanup_legacy.sql    # Drop legacy columns
+├── 20260724000001_initial_schema.sql      # Tables: tokens, pins, admin_sessions
+├── 20260724000002_add_users.sql           # Table: users
+├── 20260724000003_add_user_id_fk.sql      # FK: tokens.user_id -> users.id
+├── 20260724000004_add_user_sessions.sql   # Table: user_sessions
+├── 20260724000005_cleanup_legacy.sql      # Drop legacy columns
 ├── 20260724000006_add_user_permissions.sql # Columns: can_connect, can_create_agent
-├── 20260724000007_add_agents.sql        # Table: agents (with allowed_targets)
-├── atlas.sum                             # Atlas migration checksum
-├── migrations.go                         # go:embed FS export
+├── 20260724000007_add_agents.sql          # Table: agents (with allowed_targets)
+├── 20260724000008_add_recovery_codes.sql  # Table: recovery_codes (TOTP backup codes)
+├── atlas.sum                               # Atlas migration checksum
+├── migrations.go                           # go:embed FS export
 └── migrations_test.go
 ```
 
@@ -53,6 +54,14 @@ Agent routing configurations:
 - `agent_id` (nullable): Unique agent identifier. NULL row serves as default config.
 - `allowed_targets` (text[]): Target address patterns (e.g., `127.0.0.1:*`, `*`)
 - `description`: Human-readable description
+
+### `recovery_codes`
+TOTP one-time backup codes per user:
+- `user_id` (FK → users): Owner of the code
+- `code_digest` (text): HMAC-SHA256 digest of the recovery code
+- `used_at` (nullable timestamptz): NULL = unused; non-null = consumed
+- Partial unique index on `(code_digest) WHERE used_at IS NULL`: prevents double-use at DB level
+- Partial index on `(user_id) WHERE used_at IS NULL`: lists remaining unused codes per user
 
 ## Rules
 * New migrations: create `YYYYMMDDHHMMSS_description.sql` and update `atlas.sum`.
