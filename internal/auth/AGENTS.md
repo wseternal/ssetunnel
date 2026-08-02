@@ -96,14 +96,14 @@ Multi-server session storage at `~/.ssetunnel/session` (JSON format):
 ```
 SaveSession(serverURL, token, username, role) → writes JSON
 LoadSession(serverURL) → (token, resolvedServer, err)  # empty URL → first entry (sorted)
-SessionServers() → []string  # list stored server URLs
+SessionServers() → ([]string, error)  # list stored server URLs
 ```
 
 Legacy plain-text format is detected and discarded with a warning; users must re-run `ssetunnel login`.
 
 ## Token Generation
 
-`GenerateToken()` produces URL-safe random tokens. `GeneratePIN()` produces short numeric PINs. `ComputeDigest()` hashes tokens with SHA-256 for storage. `GenerateRecoveryCodes(count)` produces human-readable recovery codes. `GenerateTOTPSecret(issuer, username)` creates TOTP key + URL.
+`GenerateToken()` produces URL-safe random tokens. `ComputeDigest()` hashes tokens with SHA-256 for storage. `ComputeHMACDigest()` hashes with HMAC-SHA256 using the configured pepper. `GenerateRecoveryCodes(n)` produces `n` human-readable recovery codes. `GenerateTOTPSecret(issuer, username)` creates TOTP key + URL.
 
 ## Rules
 * Tokens are stored as SHA-256 digests — raw tokens are never persisted.

@@ -52,7 +52,7 @@ Backpressure: `Write` blocks when queued bytes ≥ `maxQueued` (4 MiB default).
 Bounded in-memory byte pipe with deadline support. `io.Pipe` cannot express deadlines non-destructively; this can. Backed by `sync.Mutex` + cap-1 signal channels for reader/writer wakeup.
 
 ### `ReorderWindow`
-Reassembles seq-numbered out-of-order batches (from concurrent POST workers). 8-slot window, piggybacked gap timeout (25 s). Pure data structure — no goroutines or timers.
+Reassembles seq-numbered out-of-order batches (from concurrent POST workers). 16-slot window, piggybacked gap timeout (25 s). Pure data structure — no goroutines or timers.
 
 ### SSE Codec
 - **Write**: `data: <base64>\n\n` + `Flush()`. Heartbeats: `: ka\n\n`.

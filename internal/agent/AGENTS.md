@@ -31,8 +31,10 @@ type Agent struct {
     Target          string        // TCP address to forward streams to (empty = dynamic target mode)
     AgentID         string        // agent identifier for routing
     Token           string        // Bearer token or single-use PIN
-    RequestModifier func(*http.Request) // session-based auth header injector
     MaxBackoff      time.Duration // reconnect cap; 0 → 30 s
+    MaxWait         time.Duration // batcher flush ceiling; 0 → default
+    Client          *http.Client  // nil → transport default
+    RequestModifier func(*http.Request) // session-based auth header injector
     BatchSize       int           // upstream batch ceiling
     Concurrency     int           // upstream POST sender depth
     Compress        bool          // negotiate gzip-per-batch
