@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.5](https://github.com/wseternal/ssetunnel/compare/v1.0.4...v1.0.5) (2026-08-02)
+
+
+### Bug Fixes
+
+* **ci:** use shell bash and version.txt for Windows release builds ([2e5b7fd](https://github.com/wseternal/ssetunnel/commit/2e5b7fdd89ee02da1c1cf2736fb338de3385c139))
+
 ## [1.0.4](https://github.com/wseternal/ssetunnel/compare/v1.0.3...v1.0.4) (2026-08-02)
 
 
