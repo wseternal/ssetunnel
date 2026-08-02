@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.0.4](https://github.com/wseternal/ssetunnel/compare/v1.0.3...v1.0.4) (2026-08-02)
+
+
+### Bug Fixes
+
+* **ci:** align workflows with kimi-code PR [#12](https://github.com/wseternal/ssetunnel/issues/12) fixes ([2d1c650](https://github.com/wseternal/ssetunnel/commit/2d1c650917208dbd0ac246f2ec4ad6093747a1cf))
+* cloud shell keyboard input (Delete, Ctrl+A/E/U) and PTY resize ([#23](https://github.com/wseternal/ssetunnel/issues/23)) ([fce5487](https://github.com/wseternal/ssetunnel/commit/fce54873a4aeb9e0c98800ac7f07657c8f4bc893))
+
 ## [1.0.3](https://github.com/wseternal/ssetunnel/compare/v1.0.2...v1.0.3) (2026-07-30)
 
 
