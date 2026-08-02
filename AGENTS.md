@@ -61,7 +61,7 @@ User (SSH, DB client, ...)
 * **Path**: `internal/transport/`
 
 ### 6. [Multiplexer](internal/mux/AGENTS.md)
-* **Responsibility**: Thin yamux wrapper with tuned config (1 MiB stream window, 30 s keepalive, 256 accept backlog).
+* **Responsibility**: Thin yamux wrapper with tuned config (4 MiB stream window, 30 s keepalive, 256 accept backlog).
 * **Path**: `internal/mux/`
 
 ### 7. [Auth](internal/auth/AGENTS.md)

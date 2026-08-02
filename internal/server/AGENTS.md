@@ -33,7 +33,7 @@ HTTP handler serving tunnel endpoints:
 - **`/up`**: Accepts upstream POST batches with `X-SSET-Session` and `X-SSET-Seq` headers. Validates session, negotiates gzip, pushes to session's reorder window or serial pipe. Records POST metrics (size, RTT) on success, error metrics on rejection.
 - **`/connect?id=<sessionID>&agent=<agentID>&target=<target>`**: Opens an SSE stream for connect clients. Short-polls for agent availability (3 s timeout, 25 ms poll). Finds the target agent's yamux session, opens a stream, bridges bidirectionally. Upstream goroutine multiplexes POST data and PTY resize events (NUL-prefixed JSON) into the yamux stream. Agent session death is detected promptly via `sess.Done()` monitor goroutine.
 - **`/connect-up`**: Accepts upstream POST batches from connect clients, writes to the connect session's up pipe. Rejects `X-SSET-Flags` (no reorder window on connect path). Records connect upstream metrics.
-- **`/connect-resize`**: Accepts PTY resize POST requests (`{id, cols, rows}`), sends to the connect session's resize channel.
+- **`handleConnectResize`** (not registered in handler mux): Accepts PTY resize POST requests (`{id, cols, rows}`), sends to the connect session's resize channel. Mounted externally by `consoleserver` at `/console/api/v1/shell/resize`.
 - **`/probe`**: Diagnostic endpoint — reads and discards body, returns 200.
 
 Server capabilities advertised: `concurrency=4;batch=1048576;gzip`.
