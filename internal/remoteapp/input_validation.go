@@ -82,16 +82,22 @@ func ValidateKeyEvent(key string, mods []string) error {
 	if !validKeys[k] {
 		return &InvalidKeyError{Key: key}
 	}
-	for _, m := range mods {
-		lm := strings.ToLower(m)
-		valid2 := map[string]bool{
-			"ctrl": true, "control": true,
-			"shift": true,
-			"alt": true, "option": true,
-			"cmd": true, "command": true, "super": true,
-		}
-		if !valid2[lm] {
-			return &InvalidModifierError{Modifier: m}
+	// Reuse sanitizeModifiers: it filters to valid, lowercased modifier names.
+	// If the sanitized output has fewer entries, an invalid modifier was present.
+	cleaned := sanitizeModifiers(mods)
+	if len(cleaned) != len(mods) {
+		for _, m := range mods {
+			lm := strings.ToLower(m)
+			found := false
+			for _, c := range cleaned {
+				if c == lm {
+					found = true
+					break
+				}
+			}
+			if !found {
+				return &InvalidModifierError{Modifier: m}
+			}
 		}
 	}
 	return nil
