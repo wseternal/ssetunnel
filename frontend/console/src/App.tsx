@@ -41,6 +41,7 @@ import RouterIcon from '@mui/icons-material/Router';
 import SecurityIcon from '@mui/icons-material/Security';
 import ContentCopyIcon from '@mui/icons-material/ContentCopy';
 import TerminalIcon from '@mui/icons-material/Terminal';
+import DesktopWindowsIcon from '@mui/icons-material/DesktopWindows';
 import { Terminal, type IDisposable } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
@@ -218,6 +219,16 @@ export default function App() {
   const shellAbortRef = useRef<AbortController | null>(null);
   const inputDisposableRef = useRef<IDisposable | null>(null);
   const resizeDisposableRef = useRef<IDisposable | null>(null);
+
+  // Remote Desktop
+  const [desktopAgent, setDesktopAgent] = useState<string>('');
+  const [desktopConnected, setDesktopConnected] = useState(false);
+  const [desktopSessionId, setDesktopSessionId] = useState<string>('');
+  const [screenWidth, setScreenWidth] = useState<number>(0);
+  const [screenHeight, setScreenHeight] = useState<number>(0);
+  const desktopAbortRef = useRef<AbortController | null>(null);
+  const desktopImgRef = useRef<HTMLImageElement | null>(null);
+  const desktopContainerRef = useRef<HTMLDivElement | null>(null);
 
   const authHeaders = (): HeadersInit => sessionToken ? { Authorization: `Bearer ${sessionToken}` } : {};
 
@@ -515,6 +526,182 @@ export default function App() {
       shellAbortRef.current = null;
     }
   }, [sessionToken, shellConnected, parseSSEFrames]);
+
+  // --- Remote Desktop ---
+
+  const sendDesktopInput = useCallback(async (sid: string, event: Record<string, unknown>, signal: AbortSignal) => {
+    try {
+      await fetch('/console/api/v1/remoteapp/connect-up', {
+        method: 'POST',
+        headers: { ...authHeaders(), 'X-SSET-Session': sid, 'Content-Type': 'application/json' },
+        body: JSON.stringify(event),
+        signal,
+      });
+    } catch {
+      // Ignore send errors during interaction
+    }
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const disconnectDesktop = useCallback(() => {
+    if (desktopAbortRef.current) {
+      desktopAbortRef.current.abort();
+      desktopAbortRef.current = null;
+    }
+    setDesktopConnected(false);
+    setDesktopSessionId('');
+    setScreenWidth(0);
+    setScreenHeight(0);
+  }, []);
+
+  const connectDesktop = useCallback(async (agentID: string) => {
+    if (!agentID || !sessionToken) return;
+
+    if (desktopAbortRef.current) {
+      desktopAbortRef.current.abort();
+    }
+
+    const abort = new AbortController();
+    desktopAbortRef.current = abort;
+
+    const sid = Array.from(crypto.getRandomValues(new Uint8Array(16)))
+      .map(b => b.toString(16).padStart(2, '0')).join('');
+    setDesktopSessionId(sid);
+
+    const sseURL = `/console/api/v1/remoteapp/connect?id=${encodeURIComponent(sid)}&agent=${encodeURIComponent(agentID)}`;
+
+    try {
+      const resp = await fetch(sseURL, {
+        headers: { Authorization: `Bearer ${sessionToken}` },
+        signal: abort.signal,
+      });
+      if (!resp.ok) {
+        setError(`Remote desktop error: ${resp.status} ${await resp.text()}`);
+        setDesktopConnected(false);
+        return;
+      }
+
+      setDesktopConnected(true);
+
+      const reader = resp.body!.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+
+        // Process complete SSE events
+        const events = buffer.split('\n\n');
+        buffer = events.pop() || '';
+
+        for (const evt of events) {
+          if (!evt.trim()) continue;
+
+          let eventType = '';
+          let eventData = '';
+          for (const line of evt.split('\n')) {
+            if (line.startsWith('event: ')) eventType = line.slice(7);
+            else if (line.startsWith('data: ')) eventData = line.slice(6);
+          }
+          if (!eventData) continue;
+
+          if (eventType === 'screeninfo') {
+            try {
+              const info = JSON.parse(atob(eventData));
+              setScreenWidth(info.width);
+              setScreenHeight(info.height);
+            } catch { /* ignore */ }
+          } else {
+            // Screenshot frame: update image src
+            if (desktopImgRef.current) {
+              desktopImgRef.current.src = `data:image/jpeg;base64,${eventData}`;
+            }
+          }
+        }
+      }
+    } catch (e) {
+      if (!abort.signal.aborted) {
+        setError(`Remote desktop connection error: ${e}`);
+      }
+    } finally {
+      setDesktopConnected(false);
+      setDesktopSessionId('');
+      desktopAbortRef.current = null;
+    }
+  }, [sessionToken]);
+
+  // Desktop mouse handler: translate browser coords to agent screen coords
+  const handleDesktopMouse = useCallback((e: React.MouseEvent<HTMLDivElement>, sid: string, signal: AbortSignal) => {
+    const container = desktopContainerRef.current;
+    const img = desktopImgRef.current;
+    if (!container || !img || !screenWidth || !screenHeight) return;
+
+    const rect = img.getBoundingClientRect();
+    const scaleX = screenWidth / rect.width;
+    const scaleY = screenHeight / rect.height;
+    const x = Math.round((e.clientX - rect.left) * scaleX);
+    const y = Math.round((e.clientY - rect.top) * scaleY);
+
+    if (e.type === 'click') {
+      sendDesktopInput(sid, { type: 'mouse_click', x, y, button: 'left' }, signal);
+    } else if (e.type === 'contextmenu') {
+      e.preventDefault();
+      sendDesktopInput(sid, { type: 'mouse_click', x, y, button: 'right' }, signal);
+    } else if (e.type === 'wheel') {
+      const dir = (e as unknown as WheelEvent).deltaY < 0 ? 'up' : 'down';
+      sendDesktopInput(sid, { type: 'mouse_scroll', direction: dir, amount: 3 }, signal);
+    }
+  }, [screenWidth, screenHeight, sendDesktopInput]);
+
+  // Desktop keyboard handler
+  const handleDesktopKey = useCallback((e: KeyboardEvent, sid: string, signal: AbortSignal) => {
+    e.preventDefault();
+    const modifiers: string[] = [];
+    if (e.ctrlKey) modifiers.push('ctrl');
+    if (e.altKey) modifiers.push('alt');
+    if (e.shiftKey) modifiers.push('shift');
+    if (e.metaKey) modifiers.push('cmd');
+
+    let key = e.key.toLowerCase();
+    // Map JS key names to robotgo key names
+    const keyMap: Record<string, string> = {
+      'enter': 'enter', 'tab': 'tab', 'escape': 'escape', 'backspace': 'backspace',
+      'delete': 'delete', 'arrowup': 'up', 'arrowdown': 'down', 'arrowleft': 'left',
+      'arrowright': 'right', 'home': 'home', 'end': 'end', 'pageup': 'pageup',
+      'pagedown': 'pagedown', ' ': 'space',
+    };
+
+    if (e.type === 'keydown') {
+      if (keyMap[key]) {
+        sendDesktopInput(sid, { type: 'key_tap', key: keyMap[key], modifiers }, signal);
+      } else if (key.length === 1 && modifiers.length === 0) {
+        sendDesktopInput(sid, { type: 'type_text', text: e.key }, signal);
+      } else if (key.startsWith('f') && !isNaN(parseInt(key.slice(1)))) {
+        sendDesktopInput(sid, { type: 'key_tap', key, modifiers }, signal);
+      } else if (key.length === 1 && modifiers.length > 0) {
+        sendDesktopInput(sid, { type: 'key_tap', key, modifiers }, signal);
+      }
+    }
+  }, [sendDesktopInput]);
+
+  // Attach/detach keyboard listeners for desktop
+  useEffect(() => {
+    if (!desktopConnected || !desktopSessionId) return;
+    const abort = desktopAbortRef.current;
+    if (!abort) return;
+    const sid = desktopSessionId;
+    const handler = (e: KeyboardEvent) => handleDesktopKey(e, sid, abort.signal);
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [desktopConnected, desktopSessionId, handleDesktopKey]);
+
+  // Cleanup desktop connection on unmount
+  useEffect(() => {
+    return () => {
+      if (desktopAbortRef.current) desktopAbortRef.current.abort();
+    };
+  }, []);
 
   // Validate restored token on mount
   useEffect(() => {
@@ -1001,6 +1188,7 @@ export default function App() {
                     <Tab label="Agents" />
                     <Tab label="Statistics" />
                     <Tab label="Shell" icon={<TerminalIcon />} iconPosition="start" />
+                    <Tab label="Desktop" icon={<DesktopWindowsIcon />} iconPosition="start" />
                   </Tabs>
                 </Paper>
 
@@ -1266,6 +1454,89 @@ export default function App() {
                     )}
                   </Box>
                 )}
+                {tabIndex === 5 && (
+                  <Box>
+                    <PageHeader
+                      title="Remote Desktop"
+                      actions={
+                        <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
+                          <FormControl size="small" sx={{ minWidth: 180 }}>
+                            <InputLabel>Agent</InputLabel>
+                            <Select
+                              value={desktopAgent}
+                              label="Agent"
+                              onChange={(e) => setDesktopAgent(e.target.value)}
+                              disabled={desktopConnected}
+                            >
+                              {connectedAgents.map((ca) => (
+                                <MenuItem key={ca.agent_id} value={ca.agent_id}>{ca.agent_id}</MenuItem>
+                              ))}
+                            </Select>
+                          </FormControl>
+                          {desktopConnected ? (
+                            <Button variant="outlined" color="warning" onClick={disconnectDesktop}>
+                              Disconnect
+                            </Button>
+                          ) : (
+                            <Button
+                              variant="contained"
+                              startIcon={<DesktopWindowsIcon />}
+                              onClick={() => connectDesktop(desktopAgent)}
+                              disabled={!desktopAgent}
+                            >
+                              Connect
+                            </Button>
+                          )}
+                        </Box>
+                      }
+                    />
+                    {connectedAgents.length === 0 && (
+                      <Alert severity="info" sx={{ mb: 2 }}>No agents connected. Start an agent to use remote desktop.</Alert>
+                    )}
+                    <Paper
+                      ref={desktopContainerRef}
+                      sx={{
+                        bgcolor: '#1e1e2e',
+                        p: 0.5,
+                        borderRadius: 2,
+                        minHeight: 400,
+                        display: 'flex',
+                        justifyContent: 'center',
+                        alignItems: 'center',
+                        cursor: desktopConnected ? 'crosshair' : 'default',
+                        overflow: 'hidden',
+                        position: 'relative',
+                      }}
+                      onClick={(e) => desktopConnected && desktopAbortRef.current && handleDesktopMouse(e, desktopSessionId, desktopAbortRef.current.signal)}
+                      onContextMenu={(e) => desktopConnected && desktopAbortRef.current && handleDesktopMouse(e, desktopSessionId, desktopAbortRef.current.signal)}
+                      onWheel={(e) => desktopConnected && desktopAbortRef.current && handleDesktopMouse(e as unknown as React.MouseEvent<HTMLDivElement>, desktopSessionId, desktopAbortRef.current.signal)}
+                    >
+                      {!desktopConnected && !desktopAgent && (
+                        <Typography variant="body1" color="text.secondary">
+                          Select an agent and click Connect to start remote desktop
+                        </Typography>
+                      )}
+                      <img
+                        ref={desktopImgRef}
+                        alt="Remote Desktop"
+                        style={{
+                          maxWidth: '100%',
+                          maxHeight: '80vh',
+                          display: desktopConnected ? 'block' : 'none',
+                          userSelect: 'none',
+                          pointerEvents: 'none',
+                        }}
+                        draggable={false}
+                      />
+                    </Paper>
+                    {desktopConnected && (
+                      <Typography variant="caption" color="text.secondary" sx={{ mt: 1, display: 'block' }}>
+                        Session: {desktopSessionId} | Agent: {desktopAgent}
+                        {screenWidth > 0 && ` | Screen: ${screenWidth}x${screenHeight}`}
+                      </Typography>
+                    )}
+                  </Box>
+                )}
               </>
             ) : (
               <>
@@ -1275,6 +1546,7 @@ export default function App() {
                     <Tab label="Agents" />
                     <Tab label="Statistics" />
                     <Tab label="Shell" icon={<TerminalIcon />} iconPosition="start" />
+                    <Tab label="Desktop" icon={<DesktopWindowsIcon />} iconPosition="start" />
                   </Tabs>
                 </Paper>
 
@@ -1475,6 +1747,89 @@ export default function App() {
                     {shellConnected && (
                       <Typography variant="caption" color="text.secondary" sx={{ mt: 1, display: 'block' }}>
                         Session: {shellSessionId} | Agent: {shellAgent}
+                      </Typography>
+                    )}
+                  </Box>
+                )}
+                {tabIndex === 4 && (
+                  <Box>
+                    <PageHeader
+                      title="Remote Desktop"
+                      actions={
+                        <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
+                          <FormControl size="small" sx={{ minWidth: 180 }}>
+                            <InputLabel>Agent</InputLabel>
+                            <Select
+                              value={desktopAgent}
+                              label="Agent"
+                              onChange={(e) => setDesktopAgent(e.target.value)}
+                              disabled={desktopConnected}
+                            >
+                              {connectedAgents.map((ca) => (
+                                <MenuItem key={ca.agent_id} value={ca.agent_id}>{ca.agent_id}</MenuItem>
+                              ))}
+                            </Select>
+                          </FormControl>
+                          {desktopConnected ? (
+                            <Button variant="outlined" color="warning" onClick={disconnectDesktop}>
+                              Disconnect
+                            </Button>
+                          ) : (
+                            <Button
+                              variant="contained"
+                              startIcon={<DesktopWindowsIcon />}
+                              onClick={() => connectDesktop(desktopAgent)}
+                              disabled={!desktopAgent}
+                            >
+                              Connect
+                            </Button>
+                          )}
+                        </Box>
+                      }
+                    />
+                    {connectedAgents.length === 0 && (
+                      <Alert severity="info" sx={{ mb: 2 }}>No agents connected. Start an agent to use remote desktop.</Alert>
+                    )}
+                    <Paper
+                      ref={desktopContainerRef}
+                      sx={{
+                        bgcolor: '#1e1e2e',
+                        p: 0.5,
+                        borderRadius: 2,
+                        minHeight: 400,
+                        display: 'flex',
+                        justifyContent: 'center',
+                        alignItems: 'center',
+                        cursor: desktopConnected ? 'crosshair' : 'default',
+                        overflow: 'hidden',
+                        position: 'relative',
+                      }}
+                      onClick={(e) => desktopConnected && desktopAbortRef.current && handleDesktopMouse(e, desktopSessionId, desktopAbortRef.current.signal)}
+                      onContextMenu={(e) => desktopConnected && desktopAbortRef.current && handleDesktopMouse(e, desktopSessionId, desktopAbortRef.current.signal)}
+                      onWheel={(e) => desktopConnected && desktopAbortRef.current && handleDesktopMouse(e as unknown as React.MouseEvent<HTMLDivElement>, desktopSessionId, desktopAbortRef.current.signal)}
+                    >
+                      {!desktopConnected && !desktopAgent && (
+                        <Typography variant="body1" color="text.secondary">
+                          Select an agent and click Connect to start remote desktop
+                        </Typography>
+                      )}
+                      <img
+                        ref={desktopImgRef}
+                        alt="Remote Desktop"
+                        style={{
+                          maxWidth: '100%',
+                          maxHeight: '80vh',
+                          display: desktopConnected ? 'block' : 'none',
+                          userSelect: 'none',
+                          pointerEvents: 'none',
+                        }}
+                        draggable={false}
+                      />
+                    </Paper>
+                    {desktopConnected && (
+                      <Typography variant="caption" color="text.secondary" sx={{ mt: 1, display: 'block' }}>
+                        Session: {desktopSessionId} | Agent: {desktopAgent}
+                        {screenWidth > 0 && ` | Screen: ${screenWidth}x${screenHeight}`}
                       </Typography>
                     )}
                   </Box>
