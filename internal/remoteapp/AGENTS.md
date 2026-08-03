@@ -1,6 +1,6 @@
 # Remote App
 
-Screen capture and input replay for remote desktop control over a yamux stream. Uses robotgo for CGo-backed screen capture and input dispatch.
+Screen capture and input replay for remote desktop control over a yamux stream. Uses robotgo for screen capture and input dispatch (supports both CGo and pure-Go backends).
 
 ## Architecture
 
@@ -28,8 +28,8 @@ Max frame size: 4 MiB (`maxFrameSize`). `WriteFrame` constructs the full frame i
 
 ## Build Constraints
 
-- **`cgo` enabled** (default with CGo): Includes robotgo-backed `capture.go` and `input.go`.
-- **`!cgo`** (CGO_ENABLED=0): `capture_stub.go` and `input_stub.go` return `ErrNotSupported`. `Enabled()` returns false.
+- **Supported OS** (`darwin || windows || linux`): Includes robotgo-backed `capture.go` and `input.go`. Build with `-tags purego` for CGo-free compilation (see [robotgo CGo-free builds](https://github.com/go-vgo/robotgo#cgo-free-builds)).
+- **Unsupported OS** (e.g. freebsd, solaris): `capture_stub.go` and `input_stub.go` return `ErrNotSupported`. `Enabled()` returns false.
 
 `input_validation.go` has no build constraint — pure validation logic testable without robotgo.
 
