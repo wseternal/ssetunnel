@@ -27,10 +27,6 @@ const maxFrameSize = 4 << 20
 // MaxFrameSize returns the maximum allowed frame size.
 func MaxFrameSize() uint32 { return maxFrameSize }
 
-// ErrNotSupported is returned by stub implementations when the binary
-// was built without the "remoteapp" build tag.
-var ErrNotSupported = errors.New("remote app not supported: build with -tags remoteapp")
-
 // ErrFrameTooLarge is returned when a frame exceeds maxFrameSize.
 var ErrFrameTooLarge = errors.New("frame too large")
 

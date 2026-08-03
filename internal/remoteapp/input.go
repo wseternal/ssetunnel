@@ -1,5 +1,3 @@
-//go:build remoteapp
-
 package remoteapp
 
 import (
