@@ -640,8 +640,8 @@ export default function App() {
     const rect = img.getBoundingClientRect();
     const scaleX = screenWidth / rect.width;
     const scaleY = screenHeight / rect.height;
-    const x = Math.round((e.clientX - rect.left) * scaleX);
-    const y = Math.round((e.clientY - rect.top) * scaleY);
+    const x = Math.max(0, Math.min(screenWidth - 1, Math.round((e.clientX - rect.left) * scaleX)));
+    const y = Math.max(0, Math.min(screenHeight - 1, Math.round((e.clientY - rect.top) * scaleY)));
 
     if (e.type === 'click') {
       sendDesktopInput(sid, { type: 'mouse_click', x, y, button: 'left' }, signal);
@@ -691,7 +691,12 @@ export default function App() {
     const abort = desktopAbortRef.current;
     if (!abort) return;
     const sid = desktopSessionId;
-    const handler = (e: KeyboardEvent) => handleDesktopKey(e, sid, abort.signal);
+    const handler = (e: KeyboardEvent) => {
+      // Skip if focus is on an input, textarea, or select element
+      const target = e.target as HTMLElement;
+      if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT') return;
+      handleDesktopKey(e, sid, abort.signal);
+    };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
   }, [desktopConnected, desktopSessionId, handleDesktopKey]);

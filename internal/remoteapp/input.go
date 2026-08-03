@@ -57,7 +57,10 @@ func DispatchInput(event InputEvent, screenWidth, screenHeight int) error {
 			amt = 3
 		}
 		dir := event.Direction
-		if dir == "" {
+		switch dir {
+		case "up", "down", "left", "right":
+			// valid
+		default:
 			dir = "down"
 		}
 		robotgo.ScrollDir(amt, dir)

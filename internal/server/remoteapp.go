@@ -20,10 +20,6 @@ import (
 // Must match the constant in the agent package.
 const TargetRemoteApp = "__remote_app__"
 
-// remoteAppFPS is the requested screenshot rate from the agent.
-// The agent uses this as its capture interval.
-const remoteAppFPS = 3
-
 // RemoteAppConnectHandler returns an http.Handler that serves the remote
 // desktop connect endpoint (SSE downstream). It wraps the existing connect
 // infrastructure with forced target=__remote_app__ and user-scoped access.
