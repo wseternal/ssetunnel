@@ -7,3 +7,7 @@ package remoteapp
 func DispatchInput(event InputEvent, screenWidth, screenHeight int) error {
 	return ErrNotSupported
 }
+
+// ReleaseAllInputs releases all potentially held keys and mouse buttons.
+// This stub is a no-op.
+func ReleaseAllInputs() {}

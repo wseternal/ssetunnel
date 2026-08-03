@@ -148,17 +148,21 @@ func (h *Handler) handleRemoteApp(w http.ResponseWriter, r *http.Request) {
 		resize:  make(chan windowSize, 1), // unused for remote app but required by struct
 		cancel:  func() {},
 	}
+	bridgeDone := make(chan struct{})
 	h.connectSessions.Store(id, cs)
 	defer func() {
 		cs.up.Close()
 		stream.Close()
+		<-bridgeDone // wait for bridge goroutine to exit
 		h.connectSessions.Delete(id)
+		h.metrics.RecordSessionEnd(agentID)
 	}()
 
 	// Bridge goroutine: read framed input events from the pipe → write to yamux.
 	// The connect-up handler already wraps POST bodies as typed frames, so
 	// this is a raw byte copy (same pattern as shell).
 	go func() {
+		defer close(bridgeDone)
 		buf := bufferPool.Get().(*[]byte)
 		defer bufferPool.Put(buf)
 		for {
@@ -191,6 +195,8 @@ func (h *Handler) handleRemoteApp(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-SSET-Session", id)
 	transport.WriteHeaders(w)
 	f.Flush()
+
+	h.metrics.RecordSessionStart(agentID)
 
 	// SSE loop: read typed frames from yamux stream → write SSE events.
 	// The agent sends:
@@ -225,6 +231,7 @@ func (h *Handler) handleRemoteApp(w http.ResponseWriter, r *http.Request) {
 			if werr := writeSSEDataFrame(w, f, data); werr != nil {
 				return
 			}
+			h.metrics.RecordConnectBytes(agentID, 0, len(data))
 		case remoteapp.FrameScreenInfo:
 			// Write as named SSE event so frontend can distinguish.
 			if werr := writeSSENamedFrame(w, f, "screeninfo", data); werr != nil {
@@ -308,20 +315,42 @@ func (h *Handler) handleRemoteAppUp(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
-// writeSSEDataFrame writes a base64-encoded SSE data frame.
+// writeSSEDataFrame writes a base64-encoded SSE data frame using a streaming
+// encoder to avoid allocating a full base64 string copy.
 func writeSSEDataFrame(w io.Writer, f http.Flusher, payload []byte) error {
-	encoded := base64.StdEncoding.EncodeToString(payload)
-	if _, err := fmt.Fprintf(w, "data: %s\n\n", encoded); err != nil {
+	if _, err := io.WriteString(w, "data: "); err != nil {
+		return err
+	}
+	enc := base64.NewEncoder(base64.StdEncoding, w)
+	if _, err := enc.Write(payload); err != nil {
+		enc.Close()
+		return err
+	}
+	if err := enc.Close(); err != nil {
+		return err
+	}
+	if _, err := io.WriteString(w, "\n\n"); err != nil {
 		return err
 	}
 	f.Flush()
 	return nil
 }
 
-// writeSSENamedFrame writes a base64-encoded SSE named event frame.
+// writeSSENamedFrame writes a base64-encoded SSE named event frame using a
+// streaming encoder to avoid allocating a full base64 string copy.
 func writeSSENamedFrame(w io.Writer, f http.Flusher, eventName string, payload []byte) error {
-	encoded := base64.StdEncoding.EncodeToString(payload)
-	if _, err := fmt.Fprintf(w, "event: %s\ndata: %s\n\n", eventName, encoded); err != nil {
+	if _, err := fmt.Fprintf(w, "event: %s\ndata: ", eventName); err != nil {
+		return err
+	}
+	enc := base64.NewEncoder(base64.StdEncoding, w)
+	if _, err := enc.Write(payload); err != nil {
+		enc.Close()
+		return err
+	}
+	if err := enc.Close(); err != nil {
+		return err
+	}
+	if _, err := io.WriteString(w, "\n\n"); err != nil {
 		return err
 	}
 	f.Flush()

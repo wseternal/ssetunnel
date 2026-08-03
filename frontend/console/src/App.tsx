@@ -229,6 +229,7 @@ export default function App() {
   const desktopAbortRef = useRef<AbortController | null>(null);
   const desktopImgRef = useRef<HTMLImageElement | null>(null);
   const desktopContainerRef = useRef<HTMLDivElement | null>(null);
+  const desktopMouseMoveRef = useRef<number>(0); // throttle: last mouse_move timestamp
 
   const authHeaders = (): HeadersInit => sessionToken ? { Authorization: `Bearer ${sessionToken}` } : {};
 
@@ -651,6 +652,12 @@ export default function App() {
     } else if (e.type === 'wheel') {
       const dir = (e as unknown as WheelEvent).deltaY < 0 ? 'up' : 'down';
       sendDesktopInput(sid, { type: 'mouse_scroll', direction: dir, amount: 3 }, signal);
+    } else if (e.type === 'mousemove') {
+      // Throttle mouse_move to ~30 Hz (33 ms interval) to avoid flooding the agent.
+      const now = Date.now();
+      if (now - desktopMouseMoveRef.current < 33) return;
+      desktopMouseMoveRef.current = now;
+      sendDesktopInput(sid, { type: 'mouse_move', x, y }, signal);
     }
   }, [screenWidth, screenHeight, sendDesktopInput]);
 
@@ -1515,6 +1522,7 @@ export default function App() {
                       onClick={(e) => desktopConnected && desktopAbortRef.current && handleDesktopMouse(e, desktopSessionId, desktopAbortRef.current.signal)}
                       onContextMenu={(e) => desktopConnected && desktopAbortRef.current && handleDesktopMouse(e, desktopSessionId, desktopAbortRef.current.signal)}
                       onWheel={(e) => desktopConnected && desktopAbortRef.current && handleDesktopMouse(e as unknown as React.MouseEvent<HTMLDivElement>, desktopSessionId, desktopAbortRef.current.signal)}
+                      onMouseMove={(e) => desktopConnected && desktopAbortRef.current && handleDesktopMouse(e, desktopSessionId, desktopAbortRef.current.signal)}
                     >
                       {!desktopConnected && !desktopAgent && (
                         <Typography variant="body1" color="text.secondary">
@@ -1812,6 +1820,7 @@ export default function App() {
                       onClick={(e) => desktopConnected && desktopAbortRef.current && handleDesktopMouse(e, desktopSessionId, desktopAbortRef.current.signal)}
                       onContextMenu={(e) => desktopConnected && desktopAbortRef.current && handleDesktopMouse(e, desktopSessionId, desktopAbortRef.current.signal)}
                       onWheel={(e) => desktopConnected && desktopAbortRef.current && handleDesktopMouse(e as unknown as React.MouseEvent<HTMLDivElement>, desktopSessionId, desktopAbortRef.current.signal)}
+                      onMouseMove={(e) => desktopConnected && desktopAbortRef.current && handleDesktopMouse(e, desktopSessionId, desktopAbortRef.current.signal)}
                     >
                       {!desktopConnected && !desktopAgent && (
                         <Typography variant="body1" color="text.secondary">

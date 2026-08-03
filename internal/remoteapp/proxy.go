@@ -27,7 +27,12 @@ func ProxyRemoteApp(stream net.Conn) {
 
 	// Send screen dimensions as the first frame so the frontend can
 	// scale input coordinates.
-	info, _ := json.Marshal(ScreenInfo{Width: screenW, Height: screenH})
+	info, err := json.Marshal(ScreenInfo{Width: screenW, Height: screenH})
+	if err != nil {
+		log.Printf("remoteapp: marshal screen info: %v", err)
+		stream.Close()
+		return
+	}
 	if err := WriteFrame(stream, FrameScreenInfo, info); err != nil {
 		log.Printf("remoteapp: write screen info: %v", err)
 		stream.Close()
@@ -70,6 +75,7 @@ func ProxyRemoteApp(stream net.Conn) {
 
 	// Stream closed: cancel capture loop and wait.
 	cancel()
+	ReleaseAllInputs() // Release any held keys/buttons from lost "up" events.
 	stream.Close()
 	wg.Wait()
 	log.Printf("remoteapp: session ended")

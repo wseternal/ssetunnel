@@ -5,6 +5,7 @@ package remoteapp
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"image/jpeg"
 	"io"
 	"log"
@@ -17,6 +18,10 @@ import (
 // 50 balances bandwidth (~50–150 KB per 1080p frame) and clarity.
 const jpegQuality = 50
 
+// maxConsecutiveCaptureFails is the number of consecutive capture failures
+// before the loop gives up and returns an error (circuit breaker).
+const maxConsecutiveCaptureFails = 10
+
 // CaptureLoop captures the primary display at fps frames per second and
 // writes JPEG-encoded screenshots as typed frames to w. It runs until
 // ctx is canceled or w returns an error.
@@ -28,6 +33,10 @@ func CaptureLoop(ctx context.Context, w io.Writer, fps int) error {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
+	// Reuse buffer across frames to avoid ~150 KB/frame allocation.
+	var buf bytes.Buffer
+	consecutiveFails := 0
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -35,10 +44,16 @@ func CaptureLoop(ctx context.Context, w io.Writer, fps int) error {
 		case <-ticker.C:
 			img, err := robotgo.CaptureImg()
 			if err != nil {
-				log.Printf("remoteapp: capture: %v", err)
+				consecutiveFails++
+				if consecutiveFails >= maxConsecutiveCaptureFails {
+					return fmt.Errorf("capture failed %d consecutive times: %w", consecutiveFails, err)
+				}
+				log.Printf("remoteapp: capture: %v (attempt %d/%d)", err, consecutiveFails, maxConsecutiveCaptureFails)
 				continue
 			}
-			var buf bytes.Buffer
+			consecutiveFails = 0 // reset on success
+
+			buf.Reset()
 			if err := jpeg.Encode(&buf, img, &jpeg.Options{Quality: jpegQuality}); err != nil {
 				log.Printf("remoteapp: jpeg encode: %v", err)
 				continue
