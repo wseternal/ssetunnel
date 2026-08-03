@@ -593,12 +593,14 @@ func (a *API) handleConnectedAgents(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) handleAgents(w http.ResponseWriter, r *http.Request) {
-	if a.store == nil {
-		http.Error(w, "auth not configured", http.StatusServiceUnavailable)
-		return
-	}
-
 	if r.Method == "GET" {
+		// When auth is disabled, return empty list (no agent configs to manage).
+		if a.store == nil {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode([]auth.AgentConfig{})
+			return
+		}
+
 		configs, err := a.store.ListAgentConfigs(r.Context())
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -620,6 +622,12 @@ func (a *API) handleAgents(w http.ResponseWriter, r *http.Request) {
 
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(configs)
+		return
+	}
+
+	// POST/PUT/DELETE: require store for persistence.
+	if a.store == nil {
+		http.Error(w, "auth not configured", http.StatusServiceUnavailable)
 		return
 	}
 
