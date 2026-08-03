@@ -257,7 +257,13 @@ func (h *Handler) handleRemoteAppUp(w http.ResponseWriter, r *http.Request) {
 	cs := v.(*connectSession)
 
 	// Verify session ownership: non-admin users can only write to their own sessions.
+	// When auth is disabled (store == nil), sessInfo is nil and this check is skipped.
 	sessInfo := UserSessionFromContext(r)
+	if sessInfo == nil && cs.userID != 0 {
+		// Auth is enabled but session info missing — reject.
+		http.Error(w, "Unauthorized: user session required", http.StatusUnauthorized)
+		return
+	}
 	if sessInfo != nil && !isAdmin(sessInfo) && cs.userID != 0 && sessInfo.UserID != cs.userID {
 		http.Error(w, "access denied", http.StatusForbidden)
 		return
