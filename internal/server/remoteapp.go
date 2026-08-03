@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/hashicorp/yamux"
 	"github.com/wseternal/ssetunnel/internal/remoteapp"
 	"github.com/wseternal/ssetunnel/internal/transport"
 )
@@ -86,9 +87,27 @@ func (h *Handler) handleRemoteApp(w http.ResponseWriter, r *http.Request) {
 	agentID := q.Get("agent")
 
 	// Find the target agent's yamux session.
-	ms, sess := h.findYamuxByAgentID(agentID)
-	if ms == nil || ms.IsClosed() {
-		http.Error(w, fmt.Sprintf("agent %q not connected", agentID), http.StatusNotFound)
+	// Short-poll: wait up to 3 seconds for the agent to appear.
+	const connectWaitTimeout = 3 * time.Second
+	const connectPollInterval = 25 * time.Millisecond
+	var ms *yamux.Session
+	var sess *Session
+	deadline := time.Now().Add(connectWaitTimeout)
+	for {
+		ms, sess = h.findYamuxByAgentID(agentID)
+		if ms != nil && !ms.IsClosed() {
+			break
+		}
+		if time.Now().After(deadline) || r.Context().Err() != nil {
+			http.Error(w, fmt.Sprintf("agent %q not connected", agentID), http.StatusNotFound)
+			return
+		}
+		time.Sleep(connectPollInterval)
+	}
+
+	// Narrow TOCTOU: re-check session is alive before opening stream.
+	if ms.IsClosed() {
+		http.Error(w, "agent session replaced, retry", http.StatusServiceUnavailable)
 		return
 	}
 
