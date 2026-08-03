@@ -17,7 +17,7 @@ const defaultFPS = 3
 // goroutine. When either side closes, both are torn down.
 func ProxyRemoteApp(stream net.Conn) {
 	if !Enabled() {
-		log.Printf("remoteapp: not supported (build with cgo enabled)")
+		log.Printf("remoteapp: not supported on this OS")
 		stream.Close()
 		return
 	}

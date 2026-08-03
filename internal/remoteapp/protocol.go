@@ -27,9 +27,9 @@ const maxFrameSize = 4 << 20
 // MaxFrameSize returns the maximum allowed frame size.
 func MaxFrameSize() uint32 { return maxFrameSize }
 
-// ErrNotSupported is returned by stub implementations when the binary
-// was built without cgo support (CGO_ENABLED=0).
-var ErrNotSupported = errors.New("remote app not supported: build with cgo enabled")
+// ErrNotSupported is returned by stub implementations when the current
+// OS is not supported by the robotgo library (only darwin, windows, linux).
+var ErrNotSupported = errors.New("remote app not supported on this OS")
 
 // ErrFrameTooLarge is returned when a frame exceeds maxFrameSize.
 var ErrFrameTooLarge = errors.New("frame too large")
