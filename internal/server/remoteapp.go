@@ -315,11 +315,18 @@ func (h *Handler) handleRemoteAppUp(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
-// writeSSEDataFrame writes a base64-encoded SSE data frame using a streaming
-// encoder to avoid allocating a full base64 string copy.
-func writeSSEDataFrame(w io.Writer, f http.Flusher, payload []byte) error {
-	if _, err := io.WriteString(w, "data: "); err != nil {
-		return err
+// writeSSEBase64 writes a base64-encoded SSE frame using a streaming encoder
+// to avoid allocating a full base64 string copy. If eventName is empty, writes
+// a default "data:" frame; otherwise writes a named "event:" frame.
+func writeSSEBase64(w io.Writer, f http.Flusher, eventName string, payload []byte) error {
+	if eventName != "" {
+		if _, err := fmt.Fprintf(w, "event: %s\ndata: ", eventName); err != nil {
+			return err
+		}
+	} else {
+		if _, err := io.WriteString(w, "data: "); err != nil {
+			return err
+		}
 	}
 	enc := base64.NewEncoder(base64.StdEncoding, w)
 	if _, err := enc.Write(payload); err != nil {
@@ -336,23 +343,12 @@ func writeSSEDataFrame(w io.Writer, f http.Flusher, payload []byte) error {
 	return nil
 }
 
-// writeSSENamedFrame writes a base64-encoded SSE named event frame using a
-// streaming encoder to avoid allocating a full base64 string copy.
+// writeSSEDataFrame writes a base64-encoded SSE data frame.
+func writeSSEDataFrame(w io.Writer, f http.Flusher, payload []byte) error {
+	return writeSSEBase64(w, f, "", payload)
+}
+
+// writeSSENamedFrame writes a base64-encoded SSE named event frame.
 func writeSSENamedFrame(w io.Writer, f http.Flusher, eventName string, payload []byte) error {
-	if _, err := fmt.Fprintf(w, "event: %s\ndata: ", eventName); err != nil {
-		return err
-	}
-	enc := base64.NewEncoder(base64.StdEncoding, w)
-	if _, err := enc.Write(payload); err != nil {
-		enc.Close()
-		return err
-	}
-	if err := enc.Close(); err != nil {
-		return err
-	}
-	if _, err := io.WriteString(w, "\n\n"); err != nil {
-		return err
-	}
-	f.Flush()
-	return nil
+	return writeSSEBase64(w, f, eventName, payload)
 }
