@@ -35,21 +35,18 @@ var ErrNotSupported = errors.New("remote app not supported: build with -tags rem
 var ErrFrameTooLarge = errors.New("frame too large")
 
 // WriteFrame writes a typed length-prefixed frame: [type][4-byte BE length][data].
+// The entire frame is written in a single Write call to prevent interleaving
+// if multiple writers share the same stream.
 func WriteFrame(w io.Writer, frameType byte, data []byte) error {
 	if len(data) > maxFrameSize {
 		return fmt.Errorf("%w: %d bytes", ErrFrameTooLarge, len(data))
 	}
-	header := [5]byte{frameType}
-	binary.BigEndian.PutUint32(header[1:], uint32(len(data)))
-	if _, err := w.Write(header[:]); err != nil {
-		return err
-	}
-	if len(data) > 0 {
-		if _, err := w.Write(data); err != nil {
-			return err
-		}
-	}
-	return nil
+	buf := make([]byte, 5+len(data))
+	buf[0] = frameType
+	binary.BigEndian.PutUint32(buf[1:5], uint32(len(data)))
+	copy(buf[5:], data)
+	_, err := w.Write(buf)
+	return err
 }
 
 // ReadFrame reads a typed length-prefixed frame from r.

@@ -56,6 +56,9 @@ func DispatchInput(event InputEvent, screenWidth, screenHeight int) error {
 		if amt <= 0 {
 			amt = 3
 		}
+		if amt > 20 {
+			amt = 20
+		}
 		dir := event.Direction
 		switch dir {
 		case "up", "down", "left", "right":
@@ -97,9 +100,20 @@ func DispatchInput(event InputEvent, screenWidth, screenHeight int) error {
 		if state == "" {
 			state = "down"
 		}
+		if state != "down" && state != "up" {
+			return fmt.Errorf("invalid key_toggle state: %q", state)
+		}
 		robotgo.KeyToggle(key, state)
 
 	case "type_text":
+		if len(event.Text) > 256 {
+			return fmt.Errorf("type_text: text too long (%d chars)", len(event.Text))
+		}
+		for _, r := range event.Text {
+			if r < 0x20 || r == 0x7f {
+				return fmt.Errorf("type_text: control character rejected")
+			}
+		}
 		if event.Text != "" {
 			robotgo.Type(event.Text)
 		}

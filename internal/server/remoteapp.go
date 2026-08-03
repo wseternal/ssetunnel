@@ -1,13 +1,14 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
-	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"time"
@@ -111,6 +112,13 @@ func (h *Handler) handleRemoteApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Re-verify ownership against the resolved session (TOCTOU guard).
+	sessInfo := UserSessionFromContext(r)
+	if !isAdmin(sessInfo) && sess != nil && sess.UserID() != sessInfo.UserID {
+		http.Error(w, "agent not found or access denied", http.StatusNotFound)
+		return
+	}
+
 	// Open a yamux stream to the agent.
 	stream, err := ms.OpenStream()
 	if err != nil {
@@ -128,9 +136,14 @@ func (h *Handler) handleRemoteApp(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Create the connect bridge: up pipe for input events → yamux stream.
+	var ownerID int64
+	if sessInfo != nil {
+		ownerID = sessInfo.UserID
+	}
 	cs := &connectSession{
 		id:      id,
 		agentID: agentID,
+		userID:  ownerID,
 		up:      transport.NewPipe(connectUpPipeCap),
 		resize:  make(chan windowSize, 1), // unused for remote app but required by struct
 		cancel:  func() {},
@@ -185,7 +198,7 @@ func (h *Handler) handleRemoteApp(w http.ResponseWriter, r *http.Request) {
 	//   - FrameScreenInfo (0x03): JSON screen info → SSE "screeninfo" event
 	for {
 		stream.SetReadDeadline(time.Now().Add(h.heartbeat))
-		frameType, data, err := readTypedFrame(stream)
+		frameType, data, err := remoteapp.ReadFrame(stream)
 		if err != nil {
 			var nerr net.Error
 			if errors.As(err, &nerr) && nerr.Timeout() {
@@ -202,6 +215,7 @@ func (h *Handler) handleRemoteApp(w http.ResponseWriter, r *http.Request) {
 				}
 				continue
 			}
+			log.Printf("remoteapp: SSE loop read error agent=%s session=%s: %v", agentID, id, err)
 			return // stream closed
 		}
 
@@ -242,25 +256,38 @@ func (h *Handler) handleRemoteAppUp(w http.ResponseWriter, r *http.Request) {
 	}
 	cs := v.(*connectSession)
 
-	// Read the JSON input event body.
+	// Verify session ownership: non-admin users can only write to their own sessions.
+	sessInfo := UserSessionFromContext(r)
+	if sessInfo != nil && !isAdmin(sessInfo) && cs.userID != 0 && sessInfo.UserID != cs.userID {
+		http.Error(w, "access denied", http.StatusForbidden)
+		return
+	}
+
+	// Reject X-SSET-Flags (no reorder window on remoteapp connect-up).
+	if flags := r.Header.Get("X-SSET-Flags"); flags != "" {
+		http.Error(w, "X-SSET-Flags not supported on remoteapp connect-up", http.StatusBadRequest)
+		return
+	}
+
+	// Read and validate the JSON input event body.
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 4096))
 	if err != nil {
 		http.Error(w, "read body", http.StatusBadRequest)
 		return
 	}
-
-	// Validate it's valid JSON.
 	var evt remoteapp.InputEvent
 	if err := json.Unmarshal(body, &evt); err != nil {
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
 		return
 	}
 
-	// Wrap as typed frame: [FrameInput][4-byte BE length][JSON].
-	frame := make([]byte, 5+len(body))
-	frame[0] = remoteapp.FrameInput
-	binary.BigEndian.PutUint32(frame[1:5], uint32(len(body)))
-	copy(frame[5:], body)
+	// Wrap as typed frame using WriteFrame for atomic construction.
+	var frameBuf bytes.Buffer
+	if err := remoteapp.WriteFrame(&frameBuf, remoteapp.FrameInput, body); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	frame := frameBuf.Bytes()
 
 	if r.Context().Err() != nil {
 		http.Error(w, "client disconnected", http.StatusGone)
@@ -273,29 +300,6 @@ func (h *Handler) handleRemoteAppUp(w http.ResponseWriter, r *http.Request) {
 	}
 	h.metrics.RecordConnectBytes(cs.agentID, len(frame), 0)
 	w.WriteHeader(http.StatusOK)
-}
-
-// readTypedFrame reads one typed length-prefixed frame from a reader
-// with read deadline support. It uses a buffered approach to handle
-// the 5-byte header + variable-length payload.
-func readTypedFrame(r net.Conn) (frameType byte, data []byte, err error) {
-	var header [5]byte
-	if _, err := io.ReadFull(r, header[:]); err != nil {
-		return 0, nil, err
-	}
-	frameType = header[0]
-	length := binary.BigEndian.Uint32(header[1:])
-	if length > remoteapp.MaxFrameSize() {
-		return 0, nil, fmt.Errorf("frame too large: %d", length)
-	}
-	if length == 0 {
-		return frameType, nil, nil
-	}
-	data = make([]byte, length)
-	if _, err := io.ReadFull(r, data); err != nil {
-		return 0, nil, err
-	}
-	return frameType, data, nil
 }
 
 // writeSSEDataFrame writes a base64-encoded SSE data frame.

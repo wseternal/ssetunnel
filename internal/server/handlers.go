@@ -347,6 +347,7 @@ func parseCapsConcurrency(h string) int {
 type connectSession struct {
 	id      string
 	agentID string          // target agent ID for metrics attribution
+	userID  int64           // owning user ID for access control (0 = unset)
 	up      *transport.Pipe // POST bodies → yamux stream
 	resize  chan windowSize // PTY resize requests from the console
 	cancel  context.CancelFunc
