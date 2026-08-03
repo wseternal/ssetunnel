@@ -16,6 +16,12 @@ const defaultFPS = 3
 // in one goroutine while reading input events from the stream in the main
 // goroutine. When either side closes, both are torn down.
 func ProxyRemoteApp(stream net.Conn) {
+	if !Enabled() {
+		log.Printf("remoteapp: not supported (build with cgo enabled)")
+		stream.Close()
+		return
+	}
+
 	screenW, screenH := GetScreenSize()
 	log.Printf("remoteapp: session started (screen=%dx%d)", screenW, screenH)
 

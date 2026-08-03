@@ -26,9 +26,12 @@ Typed length-prefixed frames: `[type][4-byte BE length][data]`.
 
 Max frame size: 4 MiB (`maxFrameSize`). `WriteFrame` constructs the full frame in a single buffer and writes atomically to prevent interleaving. `ReadFrame` reads header then payload with `io.ReadFull`.
 
-## Build Requirements
+## Build Constraints
 
-This package requires the robotgo CGo dependency. `input_validation.go` contains pure validation logic testable without robotgo.
+- **`cgo` enabled** (default with CGo): Includes robotgo-backed `capture.go` and `input.go`.
+- **`!cgo`** (CGO_ENABLED=0): `capture_stub.go` and `input_stub.go` return `ErrNotSupported`. `Enabled()` returns false.
+
+`input_validation.go` has no build constraint — pure validation logic testable without robotgo.
 
 ## Capture Loop
 

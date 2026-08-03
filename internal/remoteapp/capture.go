@@ -1,3 +1,5 @@
+//go:build cgo
+
 package remoteapp
 
 import (
@@ -67,3 +69,6 @@ func CaptureLoop(ctx context.Context, w io.Writer, fps int) error {
 func GetScreenSize() (width, height int) {
 	return robotgo.GetScreenSize()
 }
+
+// Enabled reports whether the remote app feature is compiled in.
+func Enabled() bool { return true }
