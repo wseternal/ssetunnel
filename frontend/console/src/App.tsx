@@ -715,33 +715,36 @@ export default function App() {
     };
   }, []);
 
-  // Validate restored token on mount
+  // Validate restored token on mount, or detect auth-disabled mode.
+  // Always call /me: if auth is disabled (--disable-auth), the server injects
+  // a synthetic admin session and returns 200 even without a token.
   useEffect(() => {
-    if (sessionToken) {
-      fetch('/console/api/v1/me', { headers: { Authorization: `Bearer ${sessionToken}` } })
-        .then(async res => {
-          if (res.ok) {
-            const me = await res.json();
-            setUserRole(me.role ?? 'user');
-            localStorage.setItem('userRole', me.role ?? 'user');
-            setIsLoggedIn(true);
-            setRoleConfirmed(true);
-          } else {
-            localStorage.removeItem('sessionToken');
-            localStorage.removeItem('userRole');
-            setSessionToken('');
-            setUserRole('');
-            setRoleConfirmed(true);
-          }
-        })
-        .catch(() => {
+    const headers: HeadersInit = sessionToken
+      ? { Authorization: `Bearer ${sessionToken}` }
+      : {};
+    fetch('/console/api/v1/me', { headers })
+      .then(async res => {
+        if (res.ok) {
+          const me = await res.json();
+          setUserRole(me.role ?? 'user');
+          localStorage.setItem('userRole', me.role ?? 'user');
+          setIsLoggedIn(true);
+          setRoleConfirmed(true);
+        } else {
           localStorage.removeItem('sessionToken');
           localStorage.removeItem('userRole');
           setSessionToken('');
           setUserRole('');
           setRoleConfirmed(true);
-        });
-    }
+        }
+      })
+      .catch(() => {
+        localStorage.removeItem('sessionToken');
+        localStorage.removeItem('userRole');
+        setSessionToken('');
+        setUserRole('');
+        setRoleConfirmed(true);
+      });
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Reset tabIndex when role changes to avoid pointing at a non-existent tab.
