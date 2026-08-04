@@ -173,6 +173,40 @@ func TestServiceProgram_StopTimeout(t *testing.T) {
 	}
 }
 
+func TestSaveLoadServiceArgs(t *testing.T) {
+	t.Parallel()
+	// Use a temp dir to avoid touching the real ~/.ssetunnel/.
+	tmpDir := t.TempDir()
+	name := "test-svc-" + t.Name()
+
+	// Load from non-existent file returns nil.
+	args, err := loadServiceArgsFromDir(tmpDir, name)
+	if err != nil {
+		t.Fatalf("loadServiceArgs (missing): %v", err)
+	}
+	if args != nil {
+		t.Fatalf("loadServiceArgs (missing) = %v, want nil", args)
+	}
+
+	// Save and load roundtrip.
+	want := []string{"--base", "/sse", "--db-url", "postgres:embedded:?datapath=/tmp/data"}
+	if err := saveServiceArgsToDir(tmpDir, name, want); err != nil {
+		t.Fatalf("saveServiceArgs: %v", err)
+	}
+	got, err := loadServiceArgsFromDir(tmpDir, name)
+	if err != nil {
+		t.Fatalf("loadServiceArgs: %v", err)
+	}
+	if len(got) != len(want) {
+		t.Fatalf("roundtrip = %v, want %v", got, want)
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			t.Fatalf("roundtrip[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
 func TestRegistry_CloseAll(t *testing.T) {
 	t.Parallel()
 	reg := server.NewRegistry()
