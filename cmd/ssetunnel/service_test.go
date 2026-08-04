@@ -234,6 +234,50 @@ func TestServiceUserPersistedInSavedArgs(t *testing.T) {
 	}
 }
 
+func TestBareStartLoadsSavedArgs(t *testing.T) {
+	// Override pidDir to use a temp dir so loadServiceArgs reads
+	// from our test fixture instead of ~/.ssetunnel/.
+	tmpDir := t.TempDir()
+	origPidDir := pidDir
+	pidDir = func() string { return tmpDir }
+	t.Cleanup(func() { pidDir = origPidDir })
+
+	// Pre-save args for "ssetunnel-server" (the name dispatchServiceAction
+	// builds for subcommand="server").
+	want := []string{"--base", "/sse", "--listen", ":9090"}
+	if err := saveServiceArgsToDir(tmpDir, "ssetunnel-server", want); err != nil {
+		t.Fatalf("saveServiceArgs: %v", err)
+	}
+
+	// Verify that loadServiceArgs (the function dispatchServiceAction
+	// calls on bare start) loads the saved flags correctly.
+	got, err := loadServiceArgs("ssetunnel-server")
+	if err != nil {
+		t.Fatalf("loadServiceArgs: %v", err)
+	}
+	if len(got) != len(want) {
+		t.Fatalf("loaded = %v, want %v", got, want)
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			t.Fatalf("loaded[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+
+	// Verify that the loaded flags produce the correct buildServiceArgs
+	// output when used as runtimeFlags in a bare start.
+	svcArgs := buildServiceArgs("server", append([]string{"start"}, got...))
+	wantSvc := []string{"server", "run", "--base", "/sse", "--listen", ":9090"}
+	if len(svcArgs) != len(wantSvc) {
+		t.Fatalf("buildServiceArgs = %v, want %v", svcArgs, wantSvc)
+	}
+	for i := range svcArgs {
+		if svcArgs[i] != wantSvc[i] {
+			t.Fatalf("buildServiceArgs[%d] = %q, want %q", i, svcArgs[i], wantSvc[i])
+		}
+	}
+}
+
 func TestRegistry_CloseAll(t *testing.T) {
 	t.Parallel()
 	reg := server.NewRegistry()

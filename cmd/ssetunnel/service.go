@@ -183,7 +183,11 @@ func dispatchServiceAction(subcommand string, args []string) (handled bool, err 
 			return true, fmt.Errorf("install service: %w (may need root/sudo)", ierr)
 		}
 		// Persist runtime flags so a subsequent bare "start" reuses them.
+		// New flags fully replace any previously saved flags.
 		if len(runtimeFlags) > 0 {
+			if prev, _ := loadServiceArgs(svcConfig.Name); len(prev) > 0 {
+				fmt.Println("NOTE: new flags replace previously saved flags.")
+			}
 			if err := saveServiceArgs(svcConfig.Name, runtimeFlags); err != nil {
 				log.Printf("warning: failed to save service args: %v", err)
 			}
@@ -273,8 +277,9 @@ func sendReload(svcConfig *service.Config) error {
 	return nil
 }
 
-// pidDir returns the directory for PID files (~/.ssetunnel/).
-func pidDir() string {
+// pidDir returns the directory for PID and args files (~/.ssetunnel/).
+// Tests may override this variable to redirect to a temp directory.
+var pidDir = func() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return filepath.Join(os.TempDir(), ".ssetunnel")
