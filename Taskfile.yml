@@ -78,24 +78,6 @@ tasks:
     cmds:
       - go run -ldflags "{{.LDFLAGS}}" ./cmd/ssetunnel {{.CLI_ARGS}}
 
-  go:release-linux:
-    desc: Build Linux native release binary
-    cmds:
-      - mkdir -p {{.DIST}}
-      - go build -trimpath -ldflags "{{.RELEASE_LDFLAGS}}" -o {{.DIST}}/{{.BIN}}-linux-{{ARCH}} ./cmd/ssetunnel
-
-  go:release-darwin:
-    desc: Build macOS native release binary
-    cmds:
-      - mkdir -p {{.DIST}}
-      - go build -trimpath -ldflags "{{.RELEASE_LDFLAGS}}" -o {{.DIST}}/{{.BIN}}-darwin-{{ARCH}} ./cmd/ssetunnel
-
-  go:release-windows:
-    desc: Build Windows native release binary
-    cmds:
-      - mkdir -p {{.DIST}}
-      - go build -trimpath -ldflags "{{.RELEASE_LDFLAGS}}" -o {{.DIST}}/{{.BIN}}-windows-{{ARCH}}.exe ./cmd/ssetunnel
-
   go:release:
     desc: Build native release binary for current platform
     cmds:

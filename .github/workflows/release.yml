@@ -13,13 +13,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: macos-latest
-            task: go:release-darwin
-          - os: ubuntu-latest
-            task: go:release-linux
-          - os: windows-latest
-            task: go:release-windows
+        os: [macos-latest, ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout Code
@@ -49,7 +43,7 @@ jobs:
           VERSION: ${{ github.ref_name }}
         run: |
           echo "${VERSION#v}" > version.txt
-          task ${{ matrix.task }}
+          task go:release
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
