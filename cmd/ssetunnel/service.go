@@ -118,11 +118,32 @@ func dispatchServiceAction(subcommand string, args []string) (handled bool, err 
 	// - Root without --service-user → error (handled above).
 	userService := os.Getuid() != 0
 
+	// Runtime flags are everything after the action verb, excluding
+	// --service-user which was already extracted above.
+	runtimeFlags := filteredArgs[1:]
+
+	// --service-user affects the service definition (UserName), not the
+	// runtime. Include it in the persisted flags so a subsequent bare
+	// "start" can reconstruct the full configuration.
+	if serviceUser != "" {
+		runtimeFlags = append([]string{"--service-user", serviceUser}, runtimeFlags...)
+	}
+
+	// When "start" is invoked without runtime flags, load persisted
+	// flags from the previous "start" (if any) so the user doesn't
+	// have to re-specify --base, --db-url, etc. every time.
+	if action == "start" && len(runtimeFlags) == 0 {
+		if saved, loadErr := loadServiceArgs("ssetunnel-" + subcommand); loadErr == nil && len(saved) > 0 {
+			runtimeFlags = saved
+			fmt.Println("Using saved service args: " + strings.Join(saved, " "))
+		}
+	}
+
 	svcConfig := &service.Config{
 		Name:        "ssetunnel-" + subcommand,
 		DisplayName: "ssetunnel " + subcommand,
 		Description: "ssetunnel " + subcommand + " daemon",
-		Arguments:   buildServiceArgs(subcommand, filteredArgs),
+		Arguments:   buildServiceArgs(subcommand, append([]string{action}, runtimeFlags...)),
 		Option:      service.KeyValue{},
 	}
 	if userService {
@@ -133,7 +154,7 @@ func dispatchServiceAction(subcommand string, args []string) (handled bool, err 
 
 	prg := &serviceProgram{
 		name:  svcConfig.Name,
-		runFn: buildRunFn(subcommand, filteredArgs[1:]), // strip the action verb
+		runFn: buildRunFn(subcommand, runtimeFlags),
 	}
 
 	svc, err := service.New(prg, svcConfig)
@@ -149,6 +170,9 @@ func dispatchServiceAction(subcommand string, args []string) (handled bool, err 
 		st, serr := svc.Status()
 		if serr == nil && st == service.StatusRunning {
 			fmt.Println("Service is already running.")
+			if len(runtimeFlags) > 0 {
+				fmt.Println("NOTE: new flags were not applied. Stop the service first, then re-start to change configuration.")
+			}
 			return true, nil
 		}
 		// Uninstall any existing service definition first so that
@@ -157,6 +181,16 @@ func dispatchServiceAction(subcommand string, args []string) (handled bool, err 
 		_ = svc.Uninstall()
 		if ierr := svc.Install(); ierr != nil {
 			return true, fmt.Errorf("install service: %w (may need root/sudo)", ierr)
+		}
+		// Persist runtime flags so a subsequent bare "start" reuses them.
+		// New flags fully replace any previously saved flags.
+		if len(runtimeFlags) > 0 {
+			if prev, _ := loadServiceArgs(svcConfig.Name); len(prev) > 0 {
+				fmt.Println("NOTE: new flags replace previously saved flags.")
+			}
+			if err := saveServiceArgs(svcConfig.Name, runtimeFlags); err != nil {
+				log.Printf("warning: failed to save service args: %v", err)
+			}
 		}
 		if serr := svc.Start(); serr != nil {
 			return true, fmt.Errorf("start: %w", serr)
@@ -243,8 +277,9 @@ func sendReload(svcConfig *service.Config) error {
 	return nil
 }
 
-// pidDir returns the directory for PID files (~/.ssetunnel/).
-func pidDir() string {
+// pidDir returns the directory for PID and args files (~/.ssetunnel/).
+// Tests may override this variable to redirect to a temp directory.
+var pidDir = func() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return filepath.Join(os.TempDir(), ".ssetunnel")
@@ -284,6 +319,42 @@ func readPIDFile(name string) (int, error) {
 		return 0, err
 	}
 	return strconv.Atoi(strings.TrimSpace(string(data)))
+}
+
+// saveServiceArgs persists runtime flags so a subsequent bare "start"
+// can reuse them without the user having to re-specify every flag.
+func saveServiceArgs(name string, args []string) error {
+	return saveServiceArgsToDir(pidDir(), name, args)
+}
+
+// saveServiceArgsToDir is the testable core of saveServiceArgs.
+func saveServiceArgsToDir(dir, name string, args []string) error {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(dir, name+".args"), []byte(strings.Join(args, "\n")), 0o600)
+}
+
+// loadServiceArgs loads previously saved runtime flags.
+// Returns nil if no saved args exist.
+func loadServiceArgs(name string) ([]string, error) {
+	return loadServiceArgsFromDir(pidDir(), name)
+}
+
+// loadServiceArgsFromDir is the testable core of loadServiceArgs.
+func loadServiceArgsFromDir(dir, name string) ([]string, error) {
+	data, err := os.ReadFile(filepath.Join(dir, name+".args"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	text := strings.TrimSpace(string(data))
+	if text == "" {
+		return nil, nil
+	}
+	return strings.Split(text, "\n"), nil
 }
 
 // extractFlag removes a --key value pair from args and returns the value

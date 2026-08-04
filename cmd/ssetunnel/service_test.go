@@ -173,6 +173,111 @@ func TestServiceProgram_StopTimeout(t *testing.T) {
 	}
 }
 
+func TestSaveLoadServiceArgs(t *testing.T) {
+	t.Parallel()
+	// Use a temp dir to avoid touching the real ~/.ssetunnel/.
+	tmpDir := t.TempDir()
+	name := "test-svc-" + t.Name()
+
+	// Load from non-existent file returns nil.
+	args, err := loadServiceArgsFromDir(tmpDir, name)
+	if err != nil {
+		t.Fatalf("loadServiceArgs (missing): %v", err)
+	}
+	if args != nil {
+		t.Fatalf("loadServiceArgs (missing) = %v, want nil", args)
+	}
+
+	// Save and load roundtrip.
+	want := []string{"--base", "/sse", "--db-url", "postgres:embedded:?datapath=/tmp/data"}
+	if err := saveServiceArgsToDir(tmpDir, name, want); err != nil {
+		t.Fatalf("saveServiceArgs: %v", err)
+	}
+	got, err := loadServiceArgsFromDir(tmpDir, name)
+	if err != nil {
+		t.Fatalf("loadServiceArgs: %v", err)
+	}
+	if len(got) != len(want) {
+		t.Fatalf("roundtrip = %v, want %v", got, want)
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			t.Fatalf("roundtrip[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestServiceUserPersistedInSavedArgs(t *testing.T) {
+	t.Parallel()
+	// Verify that --service-user survives save/load roundtrip so a
+	// subsequent bare "start" can reconstruct the service identity.
+	tmpDir := t.TempDir()
+	name := "test-svc-user"
+
+	saved := []string{"--service-user", "svcuser", "--base", "/foo"}
+	if err := saveServiceArgsToDir(tmpDir, name, saved); err != nil {
+		t.Fatalf("saveServiceArgs: %v", err)
+	}
+	got, err := loadServiceArgsFromDir(tmpDir, name)
+	if err != nil {
+		t.Fatalf("loadServiceArgs: %v", err)
+	}
+
+	// extractFlag should recover --service-user from the loaded args.
+	svcUser, remaining := extractFlag(got, "--service-user")
+	if svcUser != "svcuser" {
+		t.Errorf("extracted --service-user = %q, want %q", svcUser, "svcuser")
+	}
+	// Remaining should be just --base /foo.
+	if len(remaining) != 2 || remaining[0] != "--base" || remaining[1] != "/foo" {
+		t.Errorf("remaining after extract = %v, want [--base /foo]", remaining)
+	}
+}
+
+func TestBareStartLoadsSavedArgs(t *testing.T) {
+	// Override pidDir to use a temp dir so loadServiceArgs reads
+	// from our test fixture instead of ~/.ssetunnel/.
+	tmpDir := t.TempDir()
+	origPidDir := pidDir
+	pidDir = func() string { return tmpDir }
+	t.Cleanup(func() { pidDir = origPidDir })
+
+	// Pre-save args for "ssetunnel-server" (the name dispatchServiceAction
+	// builds for subcommand="server").
+	want := []string{"--base", "/sse", "--listen", ":9090"}
+	if err := saveServiceArgsToDir(tmpDir, "ssetunnel-server", want); err != nil {
+		t.Fatalf("saveServiceArgs: %v", err)
+	}
+
+	// Verify that loadServiceArgs (the function dispatchServiceAction
+	// calls on bare start) loads the saved flags correctly.
+	got, err := loadServiceArgs("ssetunnel-server")
+	if err != nil {
+		t.Fatalf("loadServiceArgs: %v", err)
+	}
+	if len(got) != len(want) {
+		t.Fatalf("loaded = %v, want %v", got, want)
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			t.Fatalf("loaded[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+
+	// Verify that the loaded flags produce the correct buildServiceArgs
+	// output when used as runtimeFlags in a bare start.
+	svcArgs := buildServiceArgs("server", append([]string{"start"}, got...))
+	wantSvc := []string{"server", "run", "--base", "/sse", "--listen", ":9090"}
+	if len(svcArgs) != len(wantSvc) {
+		t.Fatalf("buildServiceArgs = %v, want %v", svcArgs, wantSvc)
+	}
+	for i := range svcArgs {
+		if svcArgs[i] != wantSvc[i] {
+			t.Fatalf("buildServiceArgs[%d] = %q, want %q", i, svcArgs[i], wantSvc[i])
+		}
+	}
+}
+
 func TestRegistry_CloseAll(t *testing.T) {
 	t.Parallel()
 	reg := server.NewRegistry()
