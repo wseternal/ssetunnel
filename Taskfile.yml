@@ -79,34 +79,28 @@ tasks:
       - go run -ldflags "{{.LDFLAGS}}" ./cmd/ssetunnel {{.CLI_ARGS}}
 
   go:release-linux:
-    desc: Build Linux amd64+arm64 release binaries
+    desc: Build Linux native release binary
     cmds:
       - mkdir -p {{.DIST}}
-      - CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "{{.RELEASE_LDFLAGS}}" -o {{.DIST}}/{{.BIN}}-linux-amd64 ./cmd/ssetunnel
-      - CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags "{{.RELEASE_LDFLAGS}}" -o {{.DIST}}/{{.BIN}}-linux-arm64 ./cmd/ssetunnel
+      - go build -trimpath -ldflags "{{.RELEASE_LDFLAGS}}" -o {{.DIST}}/{{.BIN}}-linux-{{ARCH}} ./cmd/ssetunnel
 
   go:release-darwin:
-    desc: Build macOS amd64+arm64 release binaries
+    desc: Build macOS native release binary
     cmds:
       - mkdir -p {{.DIST}}
-      - CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags "{{.RELEASE_LDFLAGS}}" -o {{.DIST}}/{{.BIN}}-darwin-arm64 ./cmd/ssetunnel
-      - CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -trimpath -ldflags "{{.RELEASE_LDFLAGS}}" -o {{.DIST}}/{{.BIN}}-darwin-amd64 ./cmd/ssetunnel
+      - go build -trimpath -ldflags "{{.RELEASE_LDFLAGS}}" -o {{.DIST}}/{{.BIN}}-darwin-{{ARCH}} ./cmd/ssetunnel
 
   go:release-windows:
-    desc: Build Windows amd64 release binary
+    desc: Build Windows native release binary
     cmds:
       - mkdir -p {{.DIST}}
-      - CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags "{{.RELEASE_LDFLAGS}}" -o {{.DIST}}/{{.BIN}}-windows-amd64.exe ./cmd/ssetunnel
+      - go build -trimpath -ldflags "{{.RELEASE_LDFLAGS}}" -o {{.DIST}}/{{.BIN}}-windows-{{ARCH}}.exe ./cmd/ssetunnel
 
   go:release:
-    desc: Cross-compile all platforms (static binaries)
+    desc: Build native release binary for current platform
     cmds:
       - mkdir -p {{.DIST}}
-      - CGO_ENABLED=0 GOOS=darwin  GOARCH=arm64 go build -trimpath -ldflags "{{.RELEASE_LDFLAGS}}" -o {{.DIST}}/{{.BIN}}-darwin-arm64   ./cmd/ssetunnel
-      - CGO_ENABLED=0 GOOS=darwin  GOARCH=amd64 go build -trimpath -ldflags "{{.RELEASE_LDFLAGS}}" -o {{.DIST}}/{{.BIN}}-darwin-amd64   ./cmd/ssetunnel
-      - CGO_ENABLED=0 GOOS=linux   GOARCH=amd64 go build -trimpath -ldflags "{{.RELEASE_LDFLAGS}}" -o {{.DIST}}/{{.BIN}}-linux-amd64    ./cmd/ssetunnel
-      - CGO_ENABLED=0 GOOS=linux   GOARCH=arm64 go build -trimpath -ldflags "{{.RELEASE_LDFLAGS}}" -o {{.DIST}}/{{.BIN}}-linux-arm64    ./cmd/ssetunnel
-      - CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags "{{.RELEASE_LDFLAGS}}" -o {{.DIST}}/{{.BIN}}-windows-amd64.exe ./cmd/ssetunnel
+      - go build -trimpath -ldflags "{{.RELEASE_LDFLAGS}}" -o {{.DIST}}/{{.BIN}}-{{OS}}-{{ARCH}} ./cmd/ssetunnel
 
   go:clean:
     desc: Clean Go build artifacts
