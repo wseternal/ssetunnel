@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.1.0](https://github.com/wseternal/ssetunnel/compare/v1.0.5...v1.1.0) (2026-08-04)
+
+
+### Features
+
+* add remote desktop control via robotgo ([#25](https://github.com/wseternal/ssetunnel/issues/25)) ([806d2fc](https://github.com/wseternal/ssetunnel/commit/806d2fcbe8310979339b1674f614af38ed092376))
+
+
+### Bug Fixes
+
+* switch release builds to native CGo builds ([4394e86](https://github.com/wseternal/ssetunnel/commit/4394e86c926670dddda2a5fe7906c57ffd8ef6d6))
+
 ## [1.0.5](https://github.com/wseternal/ssetunnel/compare/v1.0.4...v1.0.5) (2026-08-02)
 
 
