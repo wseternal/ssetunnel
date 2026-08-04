@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.1.1](https://github.com/wseternal/ssetunnel/compare/v1.1.0...v1.1.1) (2026-08-04)
+
+
+### Bug Fixes
+
+* exclude release-please branches from CI ([e9bf0a2](https://github.com/wseternal/ssetunnel/commit/e9bf0a22b55a57d34237e4b55112433731f1aebb))
+* repair shell/desktop reconnection after tab switch ([04ba2dd](https://github.com/wseternal/ssetunnel/commit/04ba2dda67b6749a565bf6ba576fa7d246ba78b1))
+* simplify release tasks to single go:release ([1e91b80](https://github.com/wseternal/ssetunnel/commit/1e91b805760251596726d6699bbdf88216da0d9e))
+
 ## [1.1.0](https://github.com/wseternal/ssetunnel/compare/v1.0.5...v1.1.0) (2026-08-04)
 
 
