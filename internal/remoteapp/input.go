@@ -14,11 +14,17 @@ import (
 func DispatchInput(event InputEvent, screenWidth, screenHeight int) error {
 	switch event.Type {
 	case "mouse_move":
-		x, y := clampCoords(event.X, event.Y, screenWidth, screenHeight)
+		x, y, ok := clampCoords(event.X, event.Y, screenWidth, screenHeight)
+		if !ok {
+			return nil // screen dimensions invalid; skip
+		}
 		robotgo.Move(x, y)
 
 	case "mouse_click":
-		x, y := clampCoords(event.X, event.Y, screenWidth, screenHeight)
+		x, y, ok := clampCoords(event.X, event.Y, screenWidth, screenHeight)
+		if !ok {
+			return nil
+		}
 		robotgo.Move(x, y)
 		btn := mapButton(event.Button)
 		robotgo.Click(btn)
@@ -29,7 +35,10 @@ func DispatchInput(event InputEvent, screenWidth, screenHeight int) error {
 		robotgo.ScrollDir(amt, dir)
 
 	case "mouse_drag":
-		x, y := clampCoords(event.X, event.Y, screenWidth, screenHeight)
+		x, y, ok := clampCoords(event.X, event.Y, screenWidth, screenHeight)
+		if !ok {
+			return nil
+		}
 		btn := mapButton(event.Button)
 		if event.State == "down" {
 			robotgo.Toggle(btn, "down")

@@ -10,18 +10,24 @@ func TestClampCoords(t *testing.T) {
 		name         string
 		x, y, w, h   int
 		wantX, wantY int
+		wantOK       bool
 	}{
-		{"normal", 100, 200, 1920, 1080, 100, 200},
-		{"negative x", -5, 100, 1920, 1080, 0, 100},
-		{"negative y", 100, -5, 1920, 1080, 100, 0},
-		{"overflow x", 1920, 100, 1920, 1080, 1919, 100},
-		{"overflow y", 100, 1080, 1920, 1080, 100, 1079},
-		{"zero screen", 50, 50, 0, 0, 50, 50},
+		{"normal", 100, 200, 1920, 1080, 100, 200, true},
+		{"negative x", -5, 100, 1920, 1080, 0, 100, true},
+		{"negative y", 100, -5, 1920, 1080, 100, 0, true},
+		{"overflow x", 1920, 100, 1920, 1080, 1919, 100, true},
+		{"overflow y", 100, 1080, 1920, 1080, 100, 1079, true},
+		{"zero screen", 50, 50, 0, 0, 0, 0, false},
+		{"negative screen", 50, 50, -1, -1, 0, 0, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			gotX, gotY := clampCoords(tt.x, tt.y, tt.w, tt.h)
-			if gotX != tt.wantX || gotY != tt.wantY {
+			gotX, gotY, gotOK := clampCoords(tt.x, tt.y, tt.w, tt.h)
+			if gotOK != tt.wantOK {
+				t.Errorf("clampCoords(%d,%d,%d,%d) ok = %v, want %v",
+					tt.x, tt.y, tt.w, tt.h, gotOK, tt.wantOK)
+			}
+			if gotOK && (gotX != tt.wantX || gotY != tt.wantY) {
 				t.Errorf("clampCoords(%d,%d,%d,%d) = (%d,%d), want (%d,%d)",
 					tt.x, tt.y, tt.w, tt.h, gotX, gotY, tt.wantX, tt.wantY)
 			}

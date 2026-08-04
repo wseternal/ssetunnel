@@ -55,7 +55,11 @@ func CaptureLoop(ctx context.Context, w io.Writer, fps int) error {
 
 			buf.Reset()
 			if err := jpeg.Encode(&buf, img, &jpeg.Options{Quality: jpegQuality}); err != nil {
-				log.Printf("remoteapp: jpeg encode: %v", err)
+				consecutiveFails++
+				if consecutiveFails >= maxConsecutiveCaptureFails {
+					return fmt.Errorf("jpeg encode failed %d consecutive times: %w", consecutiveFails, err)
+				}
+				log.Printf("remoteapp: jpeg encode: %v (attempt %d/%d)", err, consecutiveFails, maxConsecutiveCaptureFails)
 				continue
 			}
 			if err := WriteFrame(w, FrameScreenshot, buf.Bytes()); err != nil {

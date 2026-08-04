@@ -113,10 +113,13 @@ func (h *Handler) handleRemoteApp(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Re-verify ownership against the resolved session (TOCTOU guard).
+	// Fail closed: if sess is nil (race during reconnect), deny non-admin users.
 	sessInfo := UserSessionFromContext(r)
-	if !isAdmin(sessInfo) && sess != nil && sess.UserID() != sessInfo.UserID {
-		http.Error(w, "agent not found or access denied", http.StatusNotFound)
-		return
+	if !isAdmin(sessInfo) {
+		if sess == nil || sess.UserID() != sessInfo.UserID {
+			http.Error(w, "agent not found or access denied", http.StatusNotFound)
+			return
+		}
 	}
 
 	// Open a yamux stream to the agent.
@@ -169,11 +172,15 @@ func (h *Handler) handleRemoteApp(w http.ResponseWriter, r *http.Request) {
 			n, err := cs.up.Read(*buf)
 			if n > 0 {
 				if _, werr := stream.Write((*buf)[:n]); werr != nil {
+					log.Printf("remoteapp: bridge write error agent=%s session=%s: %v", agentID, id, werr)
 					stream.Close()
 					return
 				}
 			}
 			if err != nil {
+				if err != io.EOF {
+					log.Printf("remoteapp: bridge read error agent=%s session=%s: %v", agentID, id, err)
+				}
 				stream.Close()
 				return
 			}
@@ -197,6 +204,7 @@ func (h *Handler) handleRemoteApp(w http.ResponseWriter, r *http.Request) {
 	f.Flush()
 
 	h.metrics.RecordSessionStart(agentID)
+	log.Printf("remoteapp: session started agent=%s session=%s user=%d", agentID, id, ownerID)
 
 	// SSE loop: read typed frames from yamux stream → write SSE events.
 	// The agent sends:
@@ -264,7 +272,8 @@ func (h *Handler) handleRemoteAppUp(w http.ResponseWriter, r *http.Request) {
 	cs := v.(*connectSession)
 
 	// Verify session ownership: non-admin users can only write to their own sessions.
-	// When auth is disabled (store == nil), sessInfo is nil and this check is skipped.
+	// When auth is disabled, UserSessionMiddleware injects a synthetic admin with
+	// UserID=0, so sessInfo is never nil here.
 	sessInfo := UserSessionFromContext(r)
 	if sessInfo == nil && cs.userID != 0 {
 		// Auth is enabled but session info missing — reject.

@@ -30,20 +30,25 @@ var validKeys = map[string]bool{
 }
 
 // clampCoords clamps x, y to the valid screen range [0, w) / [0, h).
-func clampCoords(x, y, w, h int) (int, int) {
+// Returns false if screen dimensions are invalid (w <= 0 or h <= 0),
+// in which case the coordinates should not be used.
+func clampCoords(x, y, w, h int) (int, int, bool) {
+	if w <= 0 || h <= 0 {
+		return 0, 0, false
+	}
 	if x < 0 {
 		x = 0
 	}
 	if y < 0 {
 		y = 0
 	}
-	if w > 0 && x >= w {
+	if x >= w {
 		x = w - 1
 	}
-	if h > 0 && y >= h {
+	if y >= h {
 		y = h - 1
 	}
-	return x, y
+	return x, y, true
 }
 
 // mapButton maps a button name to robotgo's expected value.
@@ -58,17 +63,19 @@ func mapButton(btn string) string {
 	}
 }
 
+// validModifiers is a whitelist of recognized robotgo modifier names.
+var validModifiers = map[string]bool{
+	"ctrl": true, "control": true,
+	"shift": true,
+	"alt": true, "option": true,
+	"cmd": true, "command": true, "super": true,
+}
+
 // sanitizeModifiers filters modifier keys to valid robotgo values.
 func sanitizeModifiers(mods []string) []string {
-	valid := map[string]bool{
-		"ctrl": true, "control": true,
-		"shift": true,
-		"alt": true, "option": true,
-		"cmd": true, "command": true, "super": true,
-	}
 	var out []string
 	for _, m := range mods {
-		if valid[strings.ToLower(m)] {
+		if validModifiers[strings.ToLower(m)] {
 			out = append(out, strings.ToLower(m))
 		}
 	}
