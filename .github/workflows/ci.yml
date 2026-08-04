@@ -3,6 +3,7 @@ on:
   push:
     branches-ignore:
       - main
+      - 'release-please-*'
 permissions:
   contents: "read"
   repository-projects: "read"
