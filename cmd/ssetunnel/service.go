@@ -118,8 +118,16 @@ func dispatchServiceAction(subcommand string, args []string) (handled bool, err 
 	// - Root without --service-user → error (handled above).
 	userService := os.Getuid() != 0
 
-	// Runtime flags are everything after the action verb.
+	// Runtime flags are everything after the action verb, excluding
+	// --service-user which was already extracted above.
 	runtimeFlags := filteredArgs[1:]
+
+	// --service-user affects the service definition (UserName), not the
+	// runtime. Include it in the persisted flags so a subsequent bare
+	// "start" can reconstruct the full configuration.
+	if serviceUser != "" {
+		runtimeFlags = append([]string{"--service-user", serviceUser}, runtimeFlags...)
+	}
 
 	// When "start" is invoked without runtime flags, load persisted
 	// flags from the previous "start" (if any) so the user doesn't
@@ -127,7 +135,7 @@ func dispatchServiceAction(subcommand string, args []string) (handled bool, err 
 	if action == "start" && len(runtimeFlags) == 0 {
 		if saved, loadErr := loadServiceArgs("ssetunnel-" + subcommand); loadErr == nil && len(saved) > 0 {
 			runtimeFlags = saved
-			fmt.Printf("Using saved service args: %s\n", strings.Join(saved, " "))
+			fmt.Println("Using saved service args: " + strings.Join(saved, " "))
 		}
 	}
 
@@ -162,6 +170,9 @@ func dispatchServiceAction(subcommand string, args []string) (handled bool, err 
 		st, serr := svc.Status()
 		if serr == nil && st == service.StatusRunning {
 			fmt.Println("Service is already running.")
+			if len(runtimeFlags) > 0 {
+				fmt.Println("NOTE: new flags were not applied. Stop the service first, then re-start to change configuration.")
+			}
 			return true, nil
 		}
 		// Uninstall any existing service definition first so that

@@ -207,6 +207,33 @@ func TestSaveLoadServiceArgs(t *testing.T) {
 	}
 }
 
+func TestServiceUserPersistedInSavedArgs(t *testing.T) {
+	t.Parallel()
+	// Verify that --service-user survives save/load roundtrip so a
+	// subsequent bare "start" can reconstruct the service identity.
+	tmpDir := t.TempDir()
+	name := "test-svc-user"
+
+	saved := []string{"--service-user", "svcuser", "--base", "/foo"}
+	if err := saveServiceArgsToDir(tmpDir, name, saved); err != nil {
+		t.Fatalf("saveServiceArgs: %v", err)
+	}
+	got, err := loadServiceArgsFromDir(tmpDir, name)
+	if err != nil {
+		t.Fatalf("loadServiceArgs: %v", err)
+	}
+
+	// extractFlag should recover --service-user from the loaded args.
+	svcUser, remaining := extractFlag(got, "--service-user")
+	if svcUser != "svcuser" {
+		t.Errorf("extracted --service-user = %q, want %q", svcUser, "svcuser")
+	}
+	// Remaining should be just --base /foo.
+	if len(remaining) != 2 || remaining[0] != "--base" || remaining[1] != "/foo" {
+		t.Errorf("remaining after extract = %v, want [--base /foo]", remaining)
+	}
+}
+
 func TestRegistry_CloseAll(t *testing.T) {
 	t.Parallel()
 	reg := server.NewRegistry()
