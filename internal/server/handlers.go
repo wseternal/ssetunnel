@@ -347,6 +347,7 @@ func parseCapsConcurrency(h string) int {
 type connectSession struct {
 	id      string
 	agentID string          // target agent ID for metrics attribution
+	userID  int64           // owning user ID for access control (0 = unset)
 	up      *transport.Pipe // POST bodies → yamux stream
 	resize  chan windowSize // PTY resize requests from the console
 	cancel  context.CancelFunc
@@ -470,9 +471,14 @@ func (h *Handler) handleConnect(w http.ResponseWriter, r *http.Request) {
 	// The pipe capacity matches the server's batch ceiling (1 MiB) so a
 	// single large POST never blocks on the pipe before the yamux consumer
 	// has a chance to drain it.
+	var ownerID int64
+	if si := UserSessionFromContext(r); si != nil {
+		ownerID = si.UserID
+	}
 	cs := &connectSession{
 		id:      id,
 		agentID: agentID,
+		userID:  ownerID,
 		up:      transport.NewPipe(connectUpPipeCap),
 		resize:  make(chan windowSize, 1),
 		cancel:  func() {}, // no-op; cleanup is handled by the deferred teardown below
@@ -609,6 +615,17 @@ func (h *Handler) handleConnectUp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cs := v.(*connectSession)
+
+	// Verify session ownership: non-admin users can only write to their own sessions.
+	sessInfo := UserSessionFromContext(r)
+	if sessInfo == nil && cs.userID != 0 {
+		http.Error(w, "Unauthorized: user session required", http.StatusUnauthorized)
+		return
+	}
+	if sessInfo != nil && !isAdmin(sessInfo) && cs.userID != 0 && sessInfo.UserID != cs.userID {
+		http.Error(w, "access denied", http.StatusForbidden)
+		return
+	}
 
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxUpBody))
 	if err != nil {

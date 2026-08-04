@@ -16,6 +16,7 @@ import (
 	"github.com/cenkalti/backoff/v4"
 	"github.com/wseternal/ssetunnel/internal/metrics"
 	"github.com/wseternal/ssetunnel/internal/mux"
+	"github.com/wseternal/ssetunnel/internal/remoteapp"
 	"github.com/wseternal/ssetunnel/internal/transport"
 )
 
@@ -205,6 +206,12 @@ func (a *Agent) proxy(stream net.Conn) {
 	// Shell target: spawn a local shell with PTY instead of dialing TCP.
 	if target == TargetShell {
 		proxyShell(stream)
+		return
+	}
+
+	// Remote app target: screen capture + input replay via robotgo.
+	if target == TargetRemoteApp {
+		remoteapp.ProxyRemoteApp(stream)
 		return
 	}
 

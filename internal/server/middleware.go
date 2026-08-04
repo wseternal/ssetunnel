@@ -169,11 +169,21 @@ func ConnectAuthMiddleware(store *auth.Store) func(http.Handler) http.Handler {
 
 // UserSessionMiddleware validates user session tokens (from ~/.ssetunnel/session).
 // It checks the user_sessions table and stores the UserSessionInfo in the request context.
+// When store is nil (auth disabled), it injects a synthetic admin session so console
+// endpoints work without requiring login.
 func UserSessionMiddleware(store *auth.Store) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if store == nil {
-				next.ServeHTTP(w, r)
+				// Auth disabled: inject synthetic admin session so console works
+				sessInfo := &auth.UserSessionInfo{
+					UserID:      0,
+					Role:        "admin",
+					PermConnect: true,
+					PermAgent:   true,
+				}
+				ctx := context.WithValue(r.Context(), userSessionKey, sessInfo)
+				next.ServeHTTP(w, r.WithContext(ctx))
 				return
 			}
 

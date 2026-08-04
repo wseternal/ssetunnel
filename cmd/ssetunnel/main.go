@@ -168,8 +168,8 @@ func runServer(ctx context.Context, args []string) error {
 		// PostgreSQL's initdb refuses to initialise a data directory
 		// owned by the superuser. Fail early with a clear message.
 		if os.Getuid() == 0 && isEmbeddedPostgres(targetDBURL) {
-			return fmt.Errorf("embedded postgres cannot run as root (initdb restriction); "+
-				"either run as a non-root user (recommended: ssetunnel server start --service-user ssetunnel) "+
+			return fmt.Errorf("embedded postgres cannot run as root (initdb restriction); " +
+				"either run as a non-root user (recommended: ssetunnel server start --service-user ssetunnel) " +
 				"or set --db-url to an external PostgreSQL instance")
 		}
 
@@ -207,16 +207,15 @@ func runServer(ctx context.Context, args []string) error {
 		if anyTOTP, err := store.AnyTOTPEnrolled(ctx); err == nil && !anyTOTP {
 			log.Println("server: no users have TOTP enrolled — per-user TOTP must be set up via the console for two-factor authentication")
 		}
-
-		if *consoleListen != "" {
-			var err error
-			consoleLn, err = net.Listen("tcp", *consoleListen)
-			if err != nil {
-				return fmt.Errorf("listen console %s: %w", *consoleListen, err)
-			}
-		}
 	}
 
+	if *consoleListen != "" {
+		var err error
+		consoleLn, err = net.Listen("tcp", *consoleListen)
+		if err != nil {
+			return fmt.Errorf("listen console %s: %w", *consoleListen, err)
+		}
+	}
 	// Open the HTTP listener eagerly so address-in-use errors surface
 	// before we start serving.
 	httpLn, err := net.Listen("tcp", *listen)
