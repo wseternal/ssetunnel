@@ -49,10 +49,10 @@ func DispatchInput(event InputEvent, screenWidth, screenHeight int) error {
 			return nil
 		}
 		btn := mapButton(event.Button)
+		robotgo.Move(x, y)
 		if event.State == "down" {
 			robotgo.Toggle(btn, "down")
 		}
-		robotgo.Move(x, y)
 		if event.State == "up" {
 			robotgo.Toggle(btn, "up")
 		}
