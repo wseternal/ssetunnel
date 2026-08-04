@@ -378,6 +378,14 @@ export default function App() {
       shellAbortRef.current.abort();
     }
 
+    // If xterm exists but its DOM element is detached (Shell tab was unmounted),
+    // dispose and recreate — otherwise output goes to an invisible orphaned node.
+    if (xtermRef.current && termRef.current && !termRef.current.contains(xtermRef.current.element)) {
+      xtermRef.current.dispose();
+      xtermRef.current = null;
+      fitAddonRef.current = null;
+    }
+
     // Initialize xterm if not already.
     if (!xtermRef.current && termRef.current) {
       const fitAddon = new FitAddon();
@@ -413,9 +421,6 @@ export default function App() {
 
     // Set up input handler: send keystrokes via POST.
     const sendInput = async (data: string) => {
-      if (!shellConnected && !abort.signal.aborted) {
-        // Still connecting, buffer input? No, just send.
-      }
       try {
         await fetch('/console/api/v1/shell/connect-up', {
           method: 'POST',
@@ -524,9 +529,9 @@ export default function App() {
       }
       setShellConnected(false);
       setShellSessionId('');
-      shellAbortRef.current = null;
+      if (shellAbortRef.current === abort) shellAbortRef.current = null;
     }
-  }, [sessionToken, shellConnected, parseSSEFrames]);
+  }, [sessionToken, parseSSEFrames]);
 
   // --- Remote Desktop ---
 
@@ -628,7 +633,7 @@ export default function App() {
     } finally {
       setDesktopConnected(false);
       setDesktopSessionId('');
-      desktopAbortRef.current = null;
+      if (desktopAbortRef.current === abort) desktopAbortRef.current = null;
     }
   }, [sessionToken]);
 
