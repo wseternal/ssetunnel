@@ -188,3 +188,26 @@ func TestValidKeysWhitelist(t *testing.T) {
 		}
 	}
 }
+
+func TestValidateInputEventType(t *testing.T) {
+	tests := []struct {
+		in   string
+		want bool
+	}{
+		{"mouse_move", true},
+		{"mouse_click", true},
+		{"mouse_scroll", true},
+		{"mouse_drag", true},
+		{"key_tap", true},
+		{"key_toggle", true},
+		{"type_text", true},
+		{"", false},
+		{"unknown", false},
+		{"MOUSE_MOVE", false}, // case-sensitive
+	}
+	for _, tt := range tests {
+		if got := ValidateInputEventType(tt.in); got != tt.want {
+			t.Errorf("ValidateInputEventType(%q) = %v, want %v", tt.in, got, tt.want)
+		}
+	}
+}

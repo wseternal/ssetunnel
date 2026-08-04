@@ -651,7 +651,7 @@ export default function App() {
       sendDesktopInput(sid, { type: 'mouse_click', x, y, button: 'right' }, signal);
     } else if (e.type === 'wheel') {
       const dir = (e as unknown as WheelEvent).deltaY < 0 ? 'up' : 'down';
-      sendDesktopInput(sid, { type: 'mouse_scroll', direction: dir, amount: 3 }, signal);
+      sendDesktopInput(sid, { type: 'mouse_scroll', x, y, direction: dir, amount: 3 }, signal);
     } else if (e.type === 'mousemove') {
       // Throttle mouse_move to ~30 Hz (33 ms interval) to avoid flooding the agent.
       const now = Date.now();
@@ -1101,6 +1101,92 @@ export default function App() {
     (col) => col.key !== 'actions'
   );
 
+  // Shared Desktop panel JSX (used in both admin and non-admin tab sections).
+  const desktopPanel = (
+    <Box>
+      <PageHeader
+        title="Remote Desktop"
+        actions={
+          <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
+            <FormControl size="small" sx={{ minWidth: 180 }}>
+              <InputLabel>Agent</InputLabel>
+              <Select
+                value={desktopAgent}
+                label="Agent"
+                onChange={(e) => setDesktopAgent(e.target.value)}
+                disabled={desktopConnected}
+              >
+                {connectedAgents.map((ca) => (
+                  <MenuItem key={ca.agent_id} value={ca.agent_id}>{ca.agent_id}</MenuItem>
+                ))}
+              </Select>
+            </FormControl>
+            {desktopConnected ? (
+              <Button variant="outlined" color="warning" onClick={disconnectDesktop}>
+                Disconnect
+              </Button>
+            ) : (
+              <Button
+                variant="contained"
+                startIcon={<DesktopWindowsIcon />}
+                onClick={() => connectDesktop(desktopAgent)}
+                disabled={!desktopAgent}
+              >
+                Connect
+              </Button>
+            )}
+          </Box>
+        }
+      />
+      {connectedAgents.length === 0 && (
+        <Alert severity="info" sx={{ mb: 2 }}>No agents connected. Start an agent to use remote desktop.</Alert>
+      )}
+      <Paper
+        ref={desktopContainerRef}
+        sx={{
+          bgcolor: '#1e1e2e',
+          p: 0.5,
+          borderRadius: 2,
+          minHeight: 400,
+          display: 'flex',
+          justifyContent: 'center',
+          alignItems: 'center',
+          cursor: desktopConnected ? 'crosshair' : 'default',
+          overflow: 'hidden',
+          position: 'relative',
+        }}
+        onClick={(e) => desktopConnected && desktopAbortRef.current && handleDesktopMouse(e, desktopSessionId, desktopAbortRef.current.signal)}
+        onContextMenu={(e) => desktopConnected && desktopAbortRef.current && handleDesktopMouse(e, desktopSessionId, desktopAbortRef.current.signal)}
+        onWheel={(e) => desktopConnected && desktopAbortRef.current && handleDesktopMouse(e as unknown as React.MouseEvent<HTMLDivElement>, desktopSessionId, desktopAbortRef.current.signal)}
+        onMouseMove={(e) => desktopConnected && desktopAbortRef.current && handleDesktopMouse(e, desktopSessionId, desktopAbortRef.current.signal)}
+      >
+        {!desktopConnected && !desktopAgent && (
+          <Typography variant="body1" color="text.secondary">
+            Select an agent and click Connect to start remote desktop
+          </Typography>
+        )}
+        <img
+          ref={desktopImgRef}
+          alt="Remote Desktop"
+          style={{
+            maxWidth: '100%',
+            maxHeight: '80vh',
+            display: desktopConnected ? 'block' : 'none',
+            userSelect: 'none',
+            pointerEvents: 'none',
+          }}
+          draggable={false}
+        />
+      </Paper>
+      {desktopConnected && (
+        <Typography variant="caption" color="text.secondary" sx={{ mt: 1, display: 'block' }}>
+          Session: {desktopSessionId} | Agent: {desktopAgent}
+          {screenWidth > 0 && ` | Screen: ${screenWidth}x${screenHeight}`}
+        </Typography>
+      )}
+    </Box>
+  );
+
   return (
     <ThemeProvider theme={theme}>
       <CssBaseline />
@@ -1469,90 +1555,7 @@ export default function App() {
                     )}
                   </Box>
                 )}
-                {tabIndex === 5 && (
-                  <Box>
-                    <PageHeader
-                      title="Remote Desktop"
-                      actions={
-                        <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
-                          <FormControl size="small" sx={{ minWidth: 180 }}>
-                            <InputLabel>Agent</InputLabel>
-                            <Select
-                              value={desktopAgent}
-                              label="Agent"
-                              onChange={(e) => setDesktopAgent(e.target.value)}
-                              disabled={desktopConnected}
-                            >
-                              {connectedAgents.map((ca) => (
-                                <MenuItem key={ca.agent_id} value={ca.agent_id}>{ca.agent_id}</MenuItem>
-                              ))}
-                            </Select>
-                          </FormControl>
-                          {desktopConnected ? (
-                            <Button variant="outlined" color="warning" onClick={disconnectDesktop}>
-                              Disconnect
-                            </Button>
-                          ) : (
-                            <Button
-                              variant="contained"
-                              startIcon={<DesktopWindowsIcon />}
-                              onClick={() => connectDesktop(desktopAgent)}
-                              disabled={!desktopAgent}
-                            >
-                              Connect
-                            </Button>
-                          )}
-                        </Box>
-                      }
-                    />
-                    {connectedAgents.length === 0 && (
-                      <Alert severity="info" sx={{ mb: 2 }}>No agents connected. Start an agent to use remote desktop.</Alert>
-                    )}
-                    <Paper
-                      ref={desktopContainerRef}
-                      sx={{
-                        bgcolor: '#1e1e2e',
-                        p: 0.5,
-                        borderRadius: 2,
-                        minHeight: 400,
-                        display: 'flex',
-                        justifyContent: 'center',
-                        alignItems: 'center',
-                        cursor: desktopConnected ? 'crosshair' : 'default',
-                        overflow: 'hidden',
-                        position: 'relative',
-                      }}
-                      onClick={(e) => desktopConnected && desktopAbortRef.current && handleDesktopMouse(e, desktopSessionId, desktopAbortRef.current.signal)}
-                      onContextMenu={(e) => desktopConnected && desktopAbortRef.current && handleDesktopMouse(e, desktopSessionId, desktopAbortRef.current.signal)}
-                      onWheel={(e) => desktopConnected && desktopAbortRef.current && handleDesktopMouse(e as unknown as React.MouseEvent<HTMLDivElement>, desktopSessionId, desktopAbortRef.current.signal)}
-                      onMouseMove={(e) => desktopConnected && desktopAbortRef.current && handleDesktopMouse(e, desktopSessionId, desktopAbortRef.current.signal)}
-                    >
-                      {!desktopConnected && !desktopAgent && (
-                        <Typography variant="body1" color="text.secondary">
-                          Select an agent and click Connect to start remote desktop
-                        </Typography>
-                      )}
-                      <img
-                        ref={desktopImgRef}
-                        alt="Remote Desktop"
-                        style={{
-                          maxWidth: '100%',
-                          maxHeight: '80vh',
-                          display: desktopConnected ? 'block' : 'none',
-                          userSelect: 'none',
-                          pointerEvents: 'none',
-                        }}
-                        draggable={false}
-                      />
-                    </Paper>
-                    {desktopConnected && (
-                      <Typography variant="caption" color="text.secondary" sx={{ mt: 1, display: 'block' }}>
-                        Session: {desktopSessionId} | Agent: {desktopAgent}
-                        {screenWidth > 0 && ` | Screen: ${screenWidth}x${screenHeight}`}
-                      </Typography>
-                    )}
-                  </Box>
-                )}
+                {tabIndex === 5 && desktopPanel}
               </>
             ) : (
               <>
@@ -1767,90 +1770,7 @@ export default function App() {
                     )}
                   </Box>
                 )}
-                {tabIndex === 4 && (
-                  <Box>
-                    <PageHeader
-                      title="Remote Desktop"
-                      actions={
-                        <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
-                          <FormControl size="small" sx={{ minWidth: 180 }}>
-                            <InputLabel>Agent</InputLabel>
-                            <Select
-                              value={desktopAgent}
-                              label="Agent"
-                              onChange={(e) => setDesktopAgent(e.target.value)}
-                              disabled={desktopConnected}
-                            >
-                              {connectedAgents.map((ca) => (
-                                <MenuItem key={ca.agent_id} value={ca.agent_id}>{ca.agent_id}</MenuItem>
-                              ))}
-                            </Select>
-                          </FormControl>
-                          {desktopConnected ? (
-                            <Button variant="outlined" color="warning" onClick={disconnectDesktop}>
-                              Disconnect
-                            </Button>
-                          ) : (
-                            <Button
-                              variant="contained"
-                              startIcon={<DesktopWindowsIcon />}
-                              onClick={() => connectDesktop(desktopAgent)}
-                              disabled={!desktopAgent}
-                            >
-                              Connect
-                            </Button>
-                          )}
-                        </Box>
-                      }
-                    />
-                    {connectedAgents.length === 0 && (
-                      <Alert severity="info" sx={{ mb: 2 }}>No agents connected. Start an agent to use remote desktop.</Alert>
-                    )}
-                    <Paper
-                      ref={desktopContainerRef}
-                      sx={{
-                        bgcolor: '#1e1e2e',
-                        p: 0.5,
-                        borderRadius: 2,
-                        minHeight: 400,
-                        display: 'flex',
-                        justifyContent: 'center',
-                        alignItems: 'center',
-                        cursor: desktopConnected ? 'crosshair' : 'default',
-                        overflow: 'hidden',
-                        position: 'relative',
-                      }}
-                      onClick={(e) => desktopConnected && desktopAbortRef.current && handleDesktopMouse(e, desktopSessionId, desktopAbortRef.current.signal)}
-                      onContextMenu={(e) => desktopConnected && desktopAbortRef.current && handleDesktopMouse(e, desktopSessionId, desktopAbortRef.current.signal)}
-                      onWheel={(e) => desktopConnected && desktopAbortRef.current && handleDesktopMouse(e as unknown as React.MouseEvent<HTMLDivElement>, desktopSessionId, desktopAbortRef.current.signal)}
-                      onMouseMove={(e) => desktopConnected && desktopAbortRef.current && handleDesktopMouse(e, desktopSessionId, desktopAbortRef.current.signal)}
-                    >
-                      {!desktopConnected && !desktopAgent && (
-                        <Typography variant="body1" color="text.secondary">
-                          Select an agent and click Connect to start remote desktop
-                        </Typography>
-                      )}
-                      <img
-                        ref={desktopImgRef}
-                        alt="Remote Desktop"
-                        style={{
-                          maxWidth: '100%',
-                          maxHeight: '80vh',
-                          display: desktopConnected ? 'block' : 'none',
-                          userSelect: 'none',
-                          pointerEvents: 'none',
-                        }}
-                        draggable={false}
-                      />
-                    </Paper>
-                    {desktopConnected && (
-                      <Typography variant="caption" color="text.secondary" sx={{ mt: 1, display: 'block' }}>
-                        Session: {desktopSessionId} | Agent: {desktopAgent}
-                        {screenWidth > 0 && ` | Screen: ${screenWidth}x${screenHeight}`}
-                      </Typography>
-                    )}
-                  </Box>
-                )}
+                {tabIndex === 4 && desktopPanel}
               </>
             )}
 

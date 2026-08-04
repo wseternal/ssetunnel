@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sync"
 )
 
 // Frame type identifiers for the yamux stream wire protocol.
@@ -34,18 +35,32 @@ var ErrNotSupported = errors.New("remote app not supported on this OS")
 // ErrFrameTooLarge is returned when a frame exceeds maxFrameSize.
 var ErrFrameTooLarge = errors.New("frame too large")
 
+// headerPool reuses 5-byte frame headers to avoid per-frame allocations.
+var headerPool = sync.Pool{
+	New: func() any { b := make([]byte, 5); return &b },
+}
+
 // WriteFrame writes a typed length-prefixed frame: [type][4-byte BE length][data].
-// The entire frame is written in a single Write call to prevent interleaving
-// if multiple writers share the same stream.
+// The header and payload are written in two calls to avoid allocating a
+// combined buffer (~150 KB per screenshot frame). Yamux streams are not
+// shared between writers on the same stream, so two writes are safe.
 func WriteFrame(w io.Writer, frameType byte, data []byte) error {
 	if len(data) > maxFrameSize {
 		return fmt.Errorf("%w: %d bytes", ErrFrameTooLarge, len(data))
 	}
-	buf := make([]byte, 5+len(data))
-	buf[0] = frameType
-	binary.BigEndian.PutUint32(buf[1:5], uint32(len(data)))
-	copy(buf[5:], data)
-	_, err := w.Write(buf)
+	hp := headerPool.Get().(*[]byte)
+	header := *hp
+	header[0] = frameType
+	binary.BigEndian.PutUint32(header[1:5], uint32(len(data)))
+	_, err := w.Write(header)
+	if err != nil {
+		headerPool.Put(hp)
+		return err
+	}
+	headerPool.Put(hp)
+	if len(data) > 0 {
+		_, err = w.Write(data)
+	}
 	return err
 }
 
@@ -69,6 +84,32 @@ func ReadFrame(r io.Reader) (frameType byte, data []byte, err error) {
 		return 0, nil, err
 	}
 	return frameType, data, nil
+}
+
+// ReadFrameInto reads a typed length-prefixed frame into a caller-supplied
+// buffer, avoiding per-frame allocations. Returns the frame type, number of
+// payload bytes read, and any error. The buffer must have capacity >= the
+// frame's payload length; otherwise ErrFrameTooLarge is returned.
+func ReadFrameInto(r io.Reader, buf []byte) (frameType byte, n int, err error) {
+	var header [5]byte
+	if _, err := io.ReadFull(r, header[:]); err != nil {
+		return 0, 0, err
+	}
+	frameType = header[0]
+	length := binary.BigEndian.Uint32(header[1:])
+	if length > maxFrameSize {
+		return 0, 0, fmt.Errorf("%w: %d bytes", ErrFrameTooLarge, length)
+	}
+	if length == 0 {
+		return frameType, 0, nil
+	}
+	if int(length) > cap(buf) {
+		return 0, 0, fmt.Errorf("%w: buffer too small (%d < %d)", ErrFrameTooLarge, cap(buf), length)
+	}
+	if _, err := io.ReadFull(r, buf[:length]); err != nil {
+		return 0, 0, err
+	}
+	return frameType, int(length), nil
 }
 
 // InputEvent represents a mouse or keyboard event sent from the browser

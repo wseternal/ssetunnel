@@ -98,6 +98,86 @@ func TestMultipleFramesSequential(t *testing.T) {
 	}
 }
 
+func TestReadFrameIntoRoundTrip(t *testing.T) {
+	tests := []struct {
+		name      string
+		frameType byte
+		data      []byte
+	}{
+		{"screenshot", FrameScreenshot, []byte("fake-jpeg-data")},
+		{"input", FrameInput, []byte(`{"type":"mouse_click","x":100,"y":200}`)},
+		{"empty data", FrameScreenshot, nil},
+		{"large data", FrameScreenshot, bytes.Repeat([]byte{0xAB}, 1<<16)},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			err := WriteFrame(&buf, tt.frameType, tt.data)
+			if err != nil {
+				t.Fatalf("WriteFrame: %v", err)
+			}
+
+			readBuf := make([]byte, maxFrameSize)
+			gotType, n, err := ReadFrameInto(&buf, readBuf)
+			if err != nil {
+				t.Fatalf("ReadFrameInto: %v", err)
+			}
+			if gotType != tt.frameType {
+				t.Errorf("frame type: got 0x%02x, want 0x%02x", gotType, tt.frameType)
+			}
+			wantLen := 0
+			if tt.data != nil {
+				wantLen = len(tt.data)
+			}
+			if n != wantLen {
+				t.Errorf("n: got %d, want %d", n, wantLen)
+			}
+			if tt.data != nil && !bytes.Equal(readBuf[:n], tt.data) {
+				t.Errorf("data mismatch")
+			}
+		})
+	}
+}
+
+func TestReadFrameIntoBufferTooSmall(t *testing.T) {
+	var buf bytes.Buffer
+	data := bytes.Repeat([]byte{0xAB}, 1024)
+	if err := WriteFrame(&buf, FrameScreenshot, data); err != nil {
+		t.Fatalf("WriteFrame: %v", err)
+	}
+
+	// Provide a buffer smaller than the frame payload.
+	small := make([]byte, 256)
+	_, _, err := ReadFrameInto(&buf, small)
+	if err == nil {
+		t.Fatal("expected error for buffer too small")
+	}
+}
+
+func BenchmarkWriteFrame(b *testing.B) {
+	data := bytes.Repeat([]byte{0xAB}, 150_000) // ~150 KB JPEG
+	var buf bytes.Buffer
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		buf.Reset()
+		_ = WriteFrame(&buf, FrameScreenshot, data)
+	}
+}
+
+func BenchmarkReadFrameInto(b *testing.B) {
+	data := bytes.Repeat([]byte{0xAB}, 150_000)
+	readBuf := make([]byte, maxFrameSize)
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		var buf bytes.Buffer
+		_ = WriteFrame(&buf, FrameScreenshot, data)
+		_, _, _ = ReadFrameInto(&buf, readBuf)
+	}
+}
+
 func TestInputEventJSON(t *testing.T) {
 	raw := `{"type":"mouse_click","x":500,"y":300,"button":"left"}`
 	var evt InputEvent

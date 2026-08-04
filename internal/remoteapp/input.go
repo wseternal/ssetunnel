@@ -30,11 +30,20 @@ func DispatchInput(event InputEvent, screenWidth, screenHeight int) error {
 		robotgo.Click(btn)
 
 	case "mouse_scroll":
+		x, y, ok := clampCoords(event.X, event.Y, screenWidth, screenHeight)
+		if !ok {
+			return nil
+		}
+		robotgo.Move(x, y)
 		amt := ValidateScrollAmount(event.Amount)
 		dir := ValidateScrollDirection(event.Direction)
 		robotgo.ScrollDir(amt, dir)
 
 	case "mouse_drag":
+		if event.State != "down" && event.State != "up" {
+			log.Printf("remoteapp: mouse_drag: invalid state %q; skipping", event.State)
+			return nil
+		}
 		x, y, ok := clampCoords(event.X, event.Y, screenWidth, screenHeight)
 		if !ok {
 			return nil

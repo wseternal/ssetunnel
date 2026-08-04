@@ -148,7 +148,7 @@ func (h *Handler) handleRemoteApp(w http.ResponseWriter, r *http.Request) {
 		agentID: agentID,
 		userID:  ownerID,
 		up:      transport.NewPipe(connectUpPipeCap),
-		resize:  make(chan windowSize, 1), // unused for remote app but required by struct
+		resize:  nil, // remote app does not use PTY resize; nil-channel is safe in select
 		cancel:  func() {},
 	}
 	bridgeDone := make(chan struct{})
@@ -206,13 +206,16 @@ func (h *Handler) handleRemoteApp(w http.ResponseWriter, r *http.Request) {
 	h.metrics.RecordSessionStart(agentID)
 	log.Printf("remoteapp: session started agent=%s session=%s user=%d", agentID, id, ownerID)
 
+	// Reusable buffer for reading frames from the agent (avoids per-frame alloc).
+	readBuf := make([]byte, remoteapp.MaxFrameSize())
+
 	// SSE loop: read typed frames from yamux stream → write SSE events.
 	// The agent sends:
 	//   - FrameScreenshot (0x01): JPEG data → base64 SSE data frame
 	//   - FrameScreenInfo (0x03): JSON screen info → SSE "screeninfo" event
 	for {
 		stream.SetReadDeadline(time.Now().Add(h.heartbeat))
-		frameType, data, err := remoteapp.ReadFrame(stream)
+		frameType, n, err := remoteapp.ReadFrameInto(stream, readBuf)
 		if err != nil {
 			var nerr net.Error
 			if errors.As(err, &nerr) && nerr.Timeout() {
@@ -236,13 +239,13 @@ func (h *Handler) handleRemoteApp(w http.ResponseWriter, r *http.Request) {
 		switch frameType {
 		case remoteapp.FrameScreenshot:
 			// Write as default SSE data frame (base64-encoded JPEG).
-			if werr := writeSSEDataFrame(w, f, data); werr != nil {
+			if werr := writeSSEDataFrame(w, f, readBuf[:n]); werr != nil {
 				return
 			}
-			h.metrics.RecordConnectBytes(agentID, 0, len(data))
+			h.metrics.RecordConnectBytes(agentID, 0, n)
 		case remoteapp.FrameScreenInfo:
 			// Write as named SSE event so frontend can distinguish.
-			if werr := writeSSENamedFrame(w, f, "screeninfo", data); werr != nil {
+			if werr := writeSSENamedFrame(w, f, "screeninfo", readBuf[:n]); werr != nil {
 				return
 			}
 		default:
@@ -300,6 +303,10 @@ func (h *Handler) handleRemoteAppUp(w http.ResponseWriter, r *http.Request) {
 	var evt remoteapp.InputEvent
 	if err := json.Unmarshal(body, &evt); err != nil {
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+	if !remoteapp.ValidateInputEventType(evt.Type) {
+		http.Error(w, "unknown input event type", http.StatusBadRequest)
 		return
 	}
 
