@@ -719,19 +719,23 @@ export default function App() {
   // Poll per-agent metrics while desktop is connected.
   useEffect(() => {
     if (!desktopConnected || !desktopAgent || !sessionToken) return;
+    const ac = new AbortController();
     const fetchDesktopMetrics = async () => {
       try {
-        const res = await fetch('/console/api/v1/metrics/agents', { headers: authHeaders() });
+        const res = await fetch('/console/api/v1/metrics/agents', {
+          headers: authHeaders(),
+          signal: ac.signal,
+        });
         if (res.ok) {
           const all: AgentMetrics[] = await res.json();
           const match = all.find((am) => am.agent_id === desktopAgent);
           setDesktopMetrics(match ? match.snapshot : null);
         }
-      } catch { /* ignore polling errors */ }
+      } catch { /* ignore polling / abort errors */ }
     };
     fetchDesktopMetrics();
     const interval = setInterval(fetchDesktopMetrics, 10000);
-    return () => clearInterval(interval);
+    return () => { clearInterval(interval); ac.abort(); };
   }, [desktopConnected, desktopAgent, sessionToken]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Cleanup desktop connection on unmount
