@@ -3,6 +3,7 @@ package metrics
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -18,6 +19,12 @@ type Store struct {
 
 // OpenStore opens (or creates) a BadgerDB at dir for metrics storage.
 func OpenStore(dir string) (*Store, error) {
+	// Pre-create the directory so BadgerDB doesn't fail with a cryptic
+	// "Create a new file" error when the parent path is missing or has
+	// restrictive permissions (common under systemd user services).
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, fmt.Errorf("create metrics dir %s: %w", dir, err)
+	}
 	opts := badger.DefaultOptions(dir)
 	opts.Logger = nil          // silence badger logs
 	opts.SyncWrites = false    // metrics are not critical enough for fsync
