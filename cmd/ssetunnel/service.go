@@ -22,6 +22,7 @@ import (
 var serviceActions = map[string]bool{
 	"run": true, "start": true, "stop": true,
 	"restart": true, "status": true, "reload": true,
+	"uninstall": true,
 }
 
 // serviceProgram implements service.Interface, wrapping either runServer
@@ -225,6 +226,22 @@ func dispatchServiceAction(subcommand string, args []string) (handled bool, err 
 
 	case "reload":
 		return true, sendReload(svcConfig)
+
+	case "uninstall":
+		// Stop the service first if it is running.
+		// Errors are ignored — the service may already be stopped or absent.
+		_ = svc.Stop()
+		if uerr := svc.Uninstall(); uerr != nil {
+			return true, fmt.Errorf("uninstall service: %w (may need root/sudo)", uerr)
+		}
+		// Clean up persisted state.
+		removePIDFile(svcConfig.Name)
+		argsPath := filepath.Join(pidDir(), svcConfig.Name+".args")
+		if rerr := os.Remove(argsPath); rerr != nil && !os.IsNotExist(rerr) {
+			log.Printf("warning: failed to remove saved args: %v", rerr)
+		}
+		fmt.Println("Service uninstalled.")
+		return true, nil
 	}
 	return false, nil
 }
