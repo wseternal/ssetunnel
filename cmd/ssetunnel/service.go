@@ -22,6 +22,7 @@ import (
 var serviceActions = map[string]bool{
 	"run": true, "start": true, "stop": true,
 	"restart": true, "status": true, "reload": true,
+	"uninstall": true,
 }
 
 // serviceProgram implements service.Interface, wrapping either runServer
@@ -99,8 +100,10 @@ func dispatchServiceAction(subcommand string, args []string) (handled bool, err 
 	// Running the daemon as root causes embedded postgres to fail
 	// (initdb refuses to run as root), so we encourage non-root service
 	// users. When running as root, --service-user must be specified.
-	if serviceUser == "" {
-		if os.Getuid() == 0 && (action == "start" || action == "run") {
+	// Only auto-detect for actions that create or run the service;
+	// stop/restart/status/uninstall identify the service by name alone.
+	if serviceUser == "" && (action == "start" || action == "run") {
+		if os.Getuid() == 0 {
 			return true, fmt.Errorf("running as root is not supported (embedded postgres initdb restriction); "+
 				"specify --service-user <name> to run the daemon as a non-root user")
 		}
@@ -225,18 +228,36 @@ func dispatchServiceAction(subcommand string, args []string) (handled bool, err 
 
 	case "reload":
 		return true, sendReload(svcConfig)
+
+	case "uninstall":
+		// Stop the service first if it is running.
+		// Errors are ignored — the service may already be stopped or absent.
+		_ = svc.Stop()
+		if uerr := svc.Uninstall(); uerr != nil {
+			return true, fmt.Errorf("uninstall service: %w (may need root/sudo)", uerr)
+		}
+		// Clean up persisted state.
+		removePIDFile(svcConfig.Name)
+		argsPath := filepath.Join(pidDir(), svcConfig.Name+".args")
+		if rerr := os.Remove(argsPath); rerr != nil && !os.IsNotExist(rerr) {
+			log.Printf("warning: failed to remove saved args: %v", rerr)
+		}
+		fmt.Println("Service uninstalled.")
+		return true, nil
 	}
 	return false, nil
 }
 
 // buildRunFn returns a closure that calls runServer or runAgent with the
-// action verb already stripped from args.
+// action verb already stripped from args.  --service-user is filtered out
+// because it is a service-installer flag, not a runtime flag.
 func buildRunFn(subcommand string, args []string) func(context.Context) error {
+	filtered := stripFlag(args, "--service-user")
 	switch subcommand {
 	case "server":
-		return func(ctx context.Context) error { return runServer(ctx, args) }
+		return func(ctx context.Context) error { return runServer(ctx, filtered) }
 	case "agent":
-		return func(ctx context.Context) error { return runAgent(ctx, args) }
+		return func(ctx context.Context) error { return runAgent(ctx, filtered) }
 	default:
 		return func(context.Context) error {
 			return fmt.Errorf("unsupported subcommand for service: %s", subcommand)
@@ -247,12 +268,14 @@ func buildRunFn(subcommand string, args []string) func(context.Context) error {
 // buildServiceArgs constructs the Arguments slice for service.Config.
 // The OS service manager invokes: binary <Arguments...>.
 // We replace the action verb with "run" and preserve all remaining flags.
+// --service-user is stripped: it is consumed by the service installer
+// (service.Config.UserName) and is not a runtime flag the daemon recognises.
 func buildServiceArgs(subcommand string, args []string) []string {
 	out := []string{subcommand, "run"}
 	if len(args) > 1 {
 		out = append(out, args[1:]...)
 	}
-	return out
+	return stripFlag(out, "--service-user")
 }
 
 // sendReload sends SIGHUP to the running service process.  It reads the
@@ -381,4 +404,12 @@ func extractFlag(args []string, key string) (value string, remaining []string) {
 		remaining = append(remaining, arg)
 	}
 	return value, remaining
+}
+
+// stripFlag removes all occurrences of a --key (and its value) from args.
+// It is a convenience wrapper around extractFlag for cases where the value
+// is not needed (e.g. filtering installer-only flags from runtime args).
+func stripFlag(args []string, key string) []string {
+	_, remaining := extractFlag(args, key)
+	return remaining
 }

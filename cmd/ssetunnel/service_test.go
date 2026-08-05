@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"os"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -90,6 +91,16 @@ func TestBuildServiceArgs(t *testing.T) {
 			"bare action",
 			"server", []string{"run"},
 			[]string{"server", "run"},
+		},
+		{
+			"strips --service-user space form",
+			"server", []string{"start", "--service-user", "alice", "--listen", ":8080"},
+			[]string{"server", "run", "--listen", ":8080"},
+		},
+		{
+			"strips --service-user equals form",
+			"server", []string{"start", "--service-user=bob", "--base", "/foo"},
+			[]string{"server", "run", "--base", "/foo"},
 		},
 	}
 	for _, tt := range tests {
@@ -298,5 +309,79 @@ func TestRegistry_CloseAll(t *testing.T) {
 		default:
 			t.Fatalf("session %d not closed after CloseAll", i)
 		}
+	}
+}
+
+func TestUninstallIsServiceAction(t *testing.T) {
+	t.Parallel()
+	if !serviceActions["uninstall"] {
+		t.Fatal("\"uninstall\" not in serviceActions map")
+	}
+}
+
+func TestUninstallCleansSavedArgs(t *testing.T) {
+	tmpDir := t.TempDir()
+	origPidDir := pidDir
+	pidDir = func() string { return tmpDir }
+	t.Cleanup(func() { pidDir = origPidDir })
+
+	// Pre-save args for "ssetunnel-server".
+	if err := saveServiceArgsToDir(tmpDir, "ssetunnel-server", []string{"--base", "/foo"}); err != nil {
+		t.Fatalf("saveServiceArgs: %v", err)
+	}
+	// Write a fake PID file.
+	writePIDFile("ssetunnel-server")
+
+	// Verify files exist.
+	argsPath := tmpDir + "/ssetunnel-server.args"
+	pidPath := tmpDir + "/ssetunnel-server.pid"
+	if _, err := os.Stat(argsPath); err != nil {
+		t.Fatalf("args file missing: %v", err)
+	}
+	if _, err := os.Stat(pidPath); err != nil {
+		t.Fatalf("pid file missing: %v", err)
+	}
+
+	// Simulate the cleanup that the uninstall handler performs.
+	removePIDFile("ssetunnel-server")
+	if err := os.Remove(argsPath); err != nil && !os.IsNotExist(err) {
+		t.Fatalf("remove args: %v", err)
+	}
+
+	// Verify both files are gone.
+	if _, err := os.Stat(argsPath); !os.IsNotExist(err) {
+		t.Error("args file still exists after uninstall cleanup")
+	}
+	if _, err := os.Stat(pidPath); !os.IsNotExist(err) {
+		t.Error("pid file still exists after uninstall cleanup")
+	}
+}
+
+func TestStripFlag(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		args []string
+		key  string
+		want []string
+	}{
+		{"not present", []string{"--listen", ":8080"}, "--service-user", []string{"--listen", ":8080"}},
+		{"space form", []string{"--service-user", "alice", "--listen", ":8080"}, "--service-user", []string{"--listen", ":8080"}},
+		{"equals form", []string{"--service-user=bob", "--base", "/foo"}, "--service-user", []string{"--base", "/foo"}},
+		{"only flag", []string{"--service-user", "carol"}, "--service-user", nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := stripFlag(tt.args, tt.key)
+			if len(got) != len(tt.want) {
+				t.Fatalf("stripFlag = %v, want %v", got, tt.want)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Fatalf("stripFlag[%d] = %q, want %q", i, got[i], tt.want[i])
+				}
+			}
+		})
 	}
 }

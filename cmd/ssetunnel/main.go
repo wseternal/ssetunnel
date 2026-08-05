@@ -37,9 +37,9 @@ const usage = `usage: ssetunnel <command> [flags]
 
 commands:
   server    run the public tunnel server
-            service actions: run, start, stop, restart, status, reload
+            service actions: run, start, stop, restart, status, reload, uninstall
   agent     run the agent inside the restricted network
-            service actions: run, start, stop, restart, status, reload
+            service actions: run, start, stop, restart, status, reload, uninstall
   connect   run the user connect client wrapper
   login     authenticate and store a session for agent/connect
   probe     measure a server's POST path (body cap, throttling)
