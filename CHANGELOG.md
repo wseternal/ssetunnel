@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.3.0](https://github.com/wseternal/ssetunnel/compare/v1.2.0...v1.3.0) (2026-08-05)
+
+
+### Features
+
+* add uninstall service action for server and agent ([#31](https://github.com/wseternal/ssetunnel/issues/31)) ([07bfc86](https://github.com/wseternal/ssetunnel/commit/07bfc86576e61afff9a35fa2a8018fd0a6eaac0b))
+
 ## [1.2.0](https://github.com/wseternal/ssetunnel/compare/v1.1.1...v1.2.0) (2026-08-05)
 
 
