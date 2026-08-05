@@ -249,13 +249,15 @@ func dispatchServiceAction(subcommand string, args []string) (handled bool, err 
 }
 
 // buildRunFn returns a closure that calls runServer or runAgent with the
-// action verb already stripped from args.
+// action verb already stripped from args.  --service-user is filtered out
+// because it is a service-installer flag, not a runtime flag.
 func buildRunFn(subcommand string, args []string) func(context.Context) error {
+	filtered := stripFlag(args, "--service-user")
 	switch subcommand {
 	case "server":
-		return func(ctx context.Context) error { return runServer(ctx, args) }
+		return func(ctx context.Context) error { return runServer(ctx, filtered) }
 	case "agent":
-		return func(ctx context.Context) error { return runAgent(ctx, args) }
+		return func(ctx context.Context) error { return runAgent(ctx, filtered) }
 	default:
 		return func(context.Context) error {
 			return fmt.Errorf("unsupported subcommand for service: %s", subcommand)
@@ -266,12 +268,14 @@ func buildRunFn(subcommand string, args []string) func(context.Context) error {
 // buildServiceArgs constructs the Arguments slice for service.Config.
 // The OS service manager invokes: binary <Arguments...>.
 // We replace the action verb with "run" and preserve all remaining flags.
+// --service-user is stripped: it is consumed by the service installer
+// (service.Config.UserName) and is not a runtime flag the daemon recognises.
 func buildServiceArgs(subcommand string, args []string) []string {
 	out := []string{subcommand, "run"}
 	if len(args) > 1 {
 		out = append(out, args[1:]...)
 	}
-	return out
+	return stripFlag(out, "--service-user")
 }
 
 // sendReload sends SIGHUP to the running service process.  It reads the
@@ -400,4 +404,12 @@ func extractFlag(args []string, key string) (value string, remaining []string) {
 		remaining = append(remaining, arg)
 	}
 	return value, remaining
+}
+
+// stripFlag removes all occurrences of a --key (and its value) from args.
+// It is a convenience wrapper around extractFlag for cases where the value
+// is not needed (e.g. filtering installer-only flags from runtime args).
+func stripFlag(args []string, key string) []string {
+	_, remaining := extractFlag(args, key)
+	return remaining
 }

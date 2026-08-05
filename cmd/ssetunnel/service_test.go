@@ -92,6 +92,16 @@ func TestBuildServiceArgs(t *testing.T) {
 			"server", []string{"run"},
 			[]string{"server", "run"},
 		},
+		{
+			"strips --service-user space form",
+			"server", []string{"start", "--service-user", "alice", "--listen", ":8080"},
+			[]string{"server", "run", "--listen", ":8080"},
+		},
+		{
+			"strips --service-user equals form",
+			"server", []string{"start", "--service-user=bob", "--base", "/foo"},
+			[]string{"server", "run", "--base", "/foo"},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -344,5 +354,34 @@ func TestUninstallCleansSavedArgs(t *testing.T) {
 	}
 	if _, err := os.Stat(pidPath); !os.IsNotExist(err) {
 		t.Error("pid file still exists after uninstall cleanup")
+	}
+}
+
+func TestStripFlag(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		args []string
+		key  string
+		want []string
+	}{
+		{"not present", []string{"--listen", ":8080"}, "--service-user", []string{"--listen", ":8080"}},
+		{"space form", []string{"--service-user", "alice", "--listen", ":8080"}, "--service-user", []string{"--listen", ":8080"}},
+		{"equals form", []string{"--service-user=bob", "--base", "/foo"}, "--service-user", []string{"--base", "/foo"}},
+		{"only flag", []string{"--service-user", "carol"}, "--service-user", nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := stripFlag(tt.args, tt.key)
+			if len(got) != len(tt.want) {
+				t.Fatalf("stripFlag = %v, want %v", got, tt.want)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Fatalf("stripFlag[%d] = %q, want %q", i, got[i], tt.want[i])
+				}
+			}
+		})
 	}
 }
