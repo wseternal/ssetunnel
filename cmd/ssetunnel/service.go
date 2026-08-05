@@ -100,8 +100,10 @@ func dispatchServiceAction(subcommand string, args []string) (handled bool, err 
 	// Running the daemon as root causes embedded postgres to fail
 	// (initdb refuses to run as root), so we encourage non-root service
 	// users. When running as root, --service-user must be specified.
-	if serviceUser == "" {
-		if os.Getuid() == 0 && (action == "start" || action == "run") {
+	// Only auto-detect for actions that create or run the service;
+	// stop/restart/status/uninstall identify the service by name alone.
+	if serviceUser == "" && (action == "start" || action == "run") {
+		if os.Getuid() == 0 {
 			return true, fmt.Errorf("running as root is not supported (embedded postgres initdb restriction); "+
 				"specify --service-user <name> to run the daemon as a non-root user")
 		}
