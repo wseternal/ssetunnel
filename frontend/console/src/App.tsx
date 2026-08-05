@@ -230,6 +230,7 @@ export default function App() {
   const desktopImgRef = useRef<HTMLImageElement | null>(null);
   const desktopContainerRef = useRef<HTMLDivElement | null>(null);
   const desktopMouseMoveRef = useRef<number>(0); // throttle: last mouse_move timestamp
+  const [desktopMetrics, setDesktopMetrics] = useState<MetricSnapshot | null>(null);
 
   const authHeaders = (): HeadersInit => sessionToken ? { Authorization: `Bearer ${sessionToken}` } : {};
 
@@ -557,6 +558,7 @@ export default function App() {
     setDesktopSessionId('');
     setScreenWidth(0);
     setScreenHeight(0);
+    setDesktopMetrics(null);
   }, []);
 
   const connectDesktop = useCallback(async (agentID: string) => {
@@ -633,6 +635,7 @@ export default function App() {
     } finally {
       setDesktopConnected(false);
       setDesktopSessionId('');
+      setDesktopMetrics(null);
       if (desktopAbortRef.current === abort) desktopAbortRef.current = null;
     }
   }, [sessionToken]);
@@ -712,6 +715,28 @@ export default function App() {
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
   }, [desktopConnected, desktopSessionId, handleDesktopKey]);
+
+  // Poll per-agent metrics while desktop is connected.
+  useEffect(() => {
+    if (!desktopConnected || !desktopAgent || !sessionToken) return;
+    const ac = new AbortController();
+    const fetchDesktopMetrics = async () => {
+      try {
+        const res = await fetch('/console/api/v1/metrics/agents', {
+          headers: authHeaders(),
+          signal: ac.signal,
+        });
+        if (res.ok) {
+          const all: AgentMetrics[] = await res.json();
+          const match = all.find((am) => am.agent_id === desktopAgent);
+          setDesktopMetrics(match ? match.snapshot : null);
+        }
+      } catch { /* ignore polling / abort errors */ }
+    };
+    fetchDesktopMetrics();
+    const interval = setInterval(fetchDesktopMetrics, 10000);
+    return () => { clearInterval(interval); ac.abort(); };
+  }, [desktopConnected, desktopAgent, sessionToken]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Cleanup desktop connection on unmount
   useEffect(() => {
@@ -1188,6 +1213,25 @@ export default function App() {
           Session: {desktopSessionId} | Agent: {desktopAgent}
           {screenWidth > 0 && ` | Screen: ${screenWidth}x${screenHeight}`}
         </Typography>
+      )}
+      {desktopConnected && desktopMetrics && (
+        <Box sx={{ display: 'flex', gap: 1.5, mt: 1.5, flexWrap: 'wrap' }}>
+          {[
+            { label: 'Upload', value: `${(desktopMetrics.throughput_up_p50_bps / 1024).toFixed(1)} KB/s` },
+            { label: 'Download', value: `${(desktopMetrics.throughput_dn_p50_bps / 1024).toFixed(1)} KB/s` },
+            { label: 'Latency p50', value: `${desktopMetrics.latency_p50_ms.toFixed(0)} ms` },
+            { label: 'Latency p95', value: `${desktopMetrics.latency_p95_ms.toFixed(0)} ms` },
+            { label: 'Error Rate', value: `${(desktopMetrics.error_rate * 100).toFixed(2)}%`, color: desktopMetrics.error_rate > 0.01 ? 'error.main' : undefined },
+            { label: 'Active Conns', value: `${desktopMetrics.active_conns}` },
+          ].map((m) => (
+            <Card key={m.label} sx={{ minWidth: 110, flex: '1 1 110px' }}>
+              <CardContent sx={{ py: 0.75, '&:last-child': { pb: 0.75 } }}>
+                <Typography variant="caption" color="text.secondary">{m.label}</Typography>
+                <Typography variant="body2" sx={{ fontWeight: 600, color: m.color ?? 'text.primary' }}>{m.value}</Typography>
+              </CardContent>
+            </Card>
+          ))}
+        </Box>
       )}
     </Box>
   );

@@ -8,10 +8,10 @@ Multi-command CLI binary. Dispatches to server, agent, connect, login, or probe 
 ```bash
 ssetunnel server [--listen :8080] [--console-listen :8081] \
   [--base /tunnel] [--heartbeat 15s] [--db-url URL] \
-  [--metrics-dir /var/metrics] [--metrics-retention 7d] [--metrics-flush 10s] [--tuner-interval 30s] \
+  [--metrics-dir ~/.ssetunnel/metrics] [--metrics-retention 7d] [--metrics-flush 10s] [--tuner-interval 30s] \
   [--disable-auth]
 ```
-Runs the public tunnel server. Opens HTTP listener (agent tunnel + connect endpoints) and optional console HTTP listener. With `--disable-auth`, skips DB pool, auth store, and console server. Auto-seeds an admin user on first startup. `--base` prefixes all tunnel endpoints (e.g. `/tunnel/events`). `--metrics-dir` enables transport metrics collection and auto-tuning. `--totp-secret` is deprecated (per-user TOTP is now used).
+Runs the public tunnel server. Opens HTTP listener (agent tunnel + connect endpoints) and optional console HTTP listener. With `--disable-auth`, skips DB pool, auth store, and console server. Auto-seeds an admin user on first startup. `--base` prefixes all tunnel endpoints (e.g. `/tunnel/events`). `--metrics-dir` defaults to `~/.ssetunnel/metrics` (pass `--metrics-dir=""` to disable). `--totp-secret` is deprecated (per-user TOTP is now used).
 
 ### `agent`
 ```bash
