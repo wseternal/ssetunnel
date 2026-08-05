@@ -107,7 +107,7 @@ go test ./... -timeout 120s                       # full suite (needs Docker for
 ### Local Development
 ```bash
 ./local.sh server --disable-auth                  # server without auth (dev mode)
-./local.sh server --metrics-dir /tmp/metrics      # server with auto-tuning enabled
+./local.sh server --metrics-dir=""               # server with metrics disabled
 ./local.sh agent --target 127.0.0.1:22            # agent proxying to local sshd
 ssh -o ProxyCommand="./local.sh connect --local -" user@127.0.0.1   # SSH through tunnel
 ```
