@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -18,12 +19,21 @@ type Store struct {
 }
 
 // OpenStore opens (or creates) a BadgerDB at dir for metrics storage.
+// It pre-creates the directory if missing and removes stale zero-byte
+// memtable WAL files left behind by an unclean shutdown. BadgerDB v4
+// treats empty .mem files as a fatal error (returns the internal sentinel
+// z.NewFile which openMemTables does not handle), preventing the database
+// from opening at all.
 func OpenStore(dir string) (*Store, error) {
-	// Pre-create the directory so BadgerDB doesn't fail with a cryptic
-	// "Create a new file" error when the parent path is missing or has
-	// restrictive permissions (common under systemd user services).
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("create metrics dir %s: %w", dir, err)
+	}
+	// Clean up stale zero-byte .mem files from a prior unclean shutdown.
+	// BadgerDB's openMemTables does not handle the z.NewFile sentinel
+	// ("Create a new file") returned for empty memtable WALs, causing
+	// a fatal "while opening memtables" error.
+	if err := cleanStaleMemTables(dir); err != nil {
+		return nil, fmt.Errorf("clean stale memtables in %s: %w", dir, err)
 	}
 	opts := badger.DefaultOptions(dir)
 	opts.Logger = nil          // silence badger logs
@@ -34,6 +44,33 @@ func OpenStore(dir string) (*Store, error) {
 		return nil, fmt.Errorf("open badger %s: %w", dir, err)
 	}
 	return &Store{db: db}, nil
+}
+
+// cleanStaleMemTables removes zero-byte .mem files from dir.
+// BadgerDB v4 writes memtable WALs as NNNNN.mem. If the process is killed
+// mid-creation, an empty .mem file may remain; on next open, BadgerDB
+// returns the z.NewFile sentinel which openMemTables treats as fatal.
+// Removing these files is safe: they contain no data.
+func cleanStaleMemTables(dir string) error {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		// Directory may not exist yet on first run; let badger handle it.
+		return nil
+	}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".mem") {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil || info.Size() > 0 {
+			continue
+		}
+		// Empty .mem file — safe to remove.
+		if rmErr := os.Remove(filepath.Join(dir, e.Name())); rmErr != nil && !os.IsNotExist(rmErr) {
+			return rmErr
+		}
+	}
+	return nil
 }
 
 // Close closes the underlying BadgerDB.
