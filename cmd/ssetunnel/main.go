@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -96,8 +97,14 @@ func runServer(ctx context.Context, args []string) error {
 	basePath := fs.String("base", "", "HTTP path prefix for all tunnel endpoints (e.g. /tunnel)")
 	heartbeat := fs.Duration("heartbeat", 15*time.Second, "SSE heartbeat interval")
 	dbURL := fs.String("db-url", os.Getenv("DATABASE_URL"), "PostgreSQL DB connection URL (default uses testcontainer if empty)")
+	// Default metrics directory: ~/.ssetunnel/metrics (empty = metrics disabled).
+	var defaultMetricsDir string
+	if home, err := os.UserHomeDir(); err == nil {
+		defaultMetricsDir = filepath.Join(home, ".ssetunnel", "metrics")
+	}
+
 	disableAuth := fs.Bool("disable-auth", false, "Disable authentication enforcement")
-	metricsDir := fs.String("metrics-dir", "", "Directory for BadgerDB metrics storage (empty = metrics disabled)")
+	metricsDir := fs.String("metrics-dir", defaultMetricsDir, "Directory for BadgerDB metrics storage (empty = metrics disabled)")
 	metricsRetention := fs.Duration("metrics-retention", 7*24*time.Hour, "How long to retain metrics data (default: 7 days)")
 	metricsFlush := fs.Duration("metrics-flush", 10*time.Second, "Interval for flushing metrics to disk (default: 10s)")
 	tunerInterval := fs.Duration("tuner-interval", 30*time.Second, "Interval for auto-tuner evaluation (default: 30s)")
