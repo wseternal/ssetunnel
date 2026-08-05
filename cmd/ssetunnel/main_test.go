@@ -38,7 +38,7 @@ func TestRunServer_AddressAlreadyBound(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
 
-			args := []string{"--disable-auth"}
+			args := []string{"--disable-auth", "--metrics-dir="}
 			switch tt.bindFlag {
 			case "listen":
 				args = append(args, "--listen", addr)
@@ -48,6 +48,7 @@ func TestRunServer_AddressAlreadyBound(t *testing.T) {
 				args = []string{
 					"--listen", "127.0.0.1:0",
 					"--console-listen", addr,
+					"--metrics-dir=",
 				}
 			}
 

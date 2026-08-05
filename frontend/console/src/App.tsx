@@ -726,7 +726,6 @@ export default function App() {
           headers: authHeaders(),
           signal: ac.signal,
         });
-        if (!checkAuth(res)) return;
         if (res.ok) {
           const all: AgentMetrics[] = await res.json();
           const match = all.find((am) => am.agent_id === desktopAgent);
