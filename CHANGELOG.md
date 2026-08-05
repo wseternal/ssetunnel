@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.3.1](https://github.com/wseternal/ssetunnel/compare/v1.3.0...v1.3.1) (2026-08-05)
+
+
+### Bug Fixes
+
+* **metrics:** pre-create metrics directory before opening BadgerDB ([#33](https://github.com/wseternal/ssetunnel/issues/33)) ([5433c85](https://github.com/wseternal/ssetunnel/commit/5433c854efc83cdc87e2905e8562303dde22cf38))
+
 ## [1.3.0](https://github.com/wseternal/ssetunnel/compare/v1.2.0...v1.3.0) (2026-08-05)
 
 
