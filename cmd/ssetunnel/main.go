@@ -131,9 +131,6 @@ func runServer(ctx context.Context, args []string) error {
 
 	// Metrics and auto-tuner setup (optional, enabled by --metrics-dir).
 	if *metricsDir != "" {
-		if err := os.MkdirAll(*metricsDir, 0o755); err != nil {
-			return fmt.Errorf("create metrics dir %s: %w", *metricsDir, err)
-		}
 		metricsStore, err := metrics.OpenStore(*metricsDir)
 		if err != nil {
 			return fmt.Errorf("open metrics store: %w", err)

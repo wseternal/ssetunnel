@@ -1,6 +1,8 @@
 package metrics
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -170,6 +172,64 @@ func TestStore_PruneOlderThan(t *testing.T) {
 	}
 	if got[0].BytesUp != 200 {
 		t.Errorf("expected recent sample, got bytes=%d", got[0].BytesUp)
+	}
+}
+
+func TestStore_CreatesMissingDirectory(t *testing.T) {
+	// Simulate the systemd startup scenario where ~/.ssetunnel/metrics
+	// does not yet exist. OpenStore must create it rather than fail with
+	// a cryptic badger "Create a new file" error.
+	dir := filepath.Join(t.TempDir(), "deep", "nested", "metrics")
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("expected dir to not exist yet: %v", err)
+	}
+	s, err := OpenStore(dir)
+	if err != nil {
+		t.Fatalf("OpenStore should create missing dir, got: %v", err)
+	}
+	t.Cleanup(func() { s.Close() })
+
+	// Verify the directory was actually created.
+	info, err := os.Stat(dir)
+	if err != nil {
+		t.Fatalf("dir should exist after OpenStore: %v", err)
+	}
+	if !info.IsDir() {
+		t.Fatal("expected dir, got non-dir")
+	}
+}
+
+// TestStore_CleansStaleMemTables reproduces the production failure where
+// an unclean shutdown left a zero-byte .mem file in the BadgerDB directory.
+// BadgerDB v4's openMemTables does not handle the z.NewFile sentinel
+// returned for empty memtable WALs, causing a fatal "while opening
+// memtables err: while opening fid: 1 err: Create a new file" error.
+// OpenStore must remove these stale files before calling badger.Open.
+func TestStore_CleansStaleMemTables(t *testing.T) {
+	dir := t.TempDir()
+
+	// Create a zero-byte .mem file with a high fid number so that
+	// BadgerDB's newMemTable (which starts at fid 0/1) won't recreate
+	// the same path and mask the cleanup.
+	stalePath := filepath.Join(dir, "99999.mem")
+	if err := os.WriteFile(stalePath, nil, 0o644); err != nil {
+		t.Fatalf("create stale .mem file: %v", err)
+	}
+	// Sanity: file exists and is empty.
+	if info, err := os.Stat(stalePath); err != nil || info.Size() != 0 {
+		t.Fatalf("expected empty file, got size=%d err=%v", info.Size(), err)
+	}
+
+	// OpenStore should remove the stale .mem file and open successfully.
+	s, err := OpenStore(dir)
+	if err != nil {
+		t.Fatalf("OpenStore failed with stale .mem present: %v", err)
+	}
+	t.Cleanup(func() { s.Close() })
+
+	// The stale zero-byte .mem file must have been removed.
+	if _, err := os.Stat(stalePath); !os.IsNotExist(err) {
+		t.Errorf("stale .mem file was not removed: exists=%v err=%v", err == nil, err)
 	}
 }
 
