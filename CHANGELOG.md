@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.2.0](https://github.com/wseternal/ssetunnel/compare/v1.1.1...v1.2.0) (2026-08-05)
+
+
+### Features
+
+* **console:** display network diagnostics on remote desktop panel ([#30](https://github.com/wseternal/ssetunnel/issues/30)) ([6b82e87](https://github.com/wseternal/ssetunnel/commit/6b82e8787472c8b9376cbad62bb2ddfd44b70cd3))
+
+
+### Bug Fixes
+
+* **service:** persist runtime flags so bare start reuses previous args ([#28](https://github.com/wseternal/ssetunnel/issues/28)) ([3dcc3e0](https://github.com/wseternal/ssetunnel/commit/3dcc3e041ae6865befc30e0b64c4b549027f01df))
+
 ## [1.1.1](https://github.com/wseternal/ssetunnel/compare/v1.1.0...v1.1.1) (2026-08-04)
 
 
