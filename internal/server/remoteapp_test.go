@@ -246,6 +246,56 @@ func TestHandleRemoteAppUp_InvalidInputType(t *testing.T) {
 	}
 }
 
+func TestScreenshotTimestampStripAndAckRoundTrip(t *testing.T) {
+	t.Parallel()
+	// Build a synthetic FrameScreenshot payload: [8-byte BE timestamp][JPEG].
+	ts := time.Date(2025, 8, 1, 12, 0, 0, 0, time.UTC)
+	jpeg := []byte("fake-jpeg-data-for-server-test")
+	var payload bytes.Buffer
+	var tsBuf [remoteapp.ScreenshotTimestampSize]byte
+	binary.BigEndian.PutUint64(tsBuf[:], uint64(ts.UnixMilli()))
+	payload.Write(tsBuf[:])
+	payload.Write(jpeg)
+
+	// ParseScreenshotTimestamp should split timestamp and JPEG correctly.
+	gotTS, gotJPEG, ok := remoteapp.ParseScreenshotTimestamp(payload.Bytes())
+	if !ok {
+		t.Fatal("ParseScreenshotTimestamp: ok=false")
+	}
+	if !gotTS.Equal(ts.Truncate(time.Millisecond)) {
+		t.Errorf("timestamp: got %v, want %v", gotTS, ts)
+	}
+	if !bytes.Equal(gotJPEG, jpeg) {
+		t.Errorf("jpeg: got %d bytes, want %d bytes", len(gotJPEG), len(jpeg))
+	}
+
+	// WriteScreenshotAck should produce a valid ACK frame.
+	var ackBuf bytes.Buffer
+	if err := remoteapp.WriteScreenshotAck(&ackBuf, gotTS); err != nil {
+		t.Fatalf("WriteScreenshotAck: %v", err)
+	}
+	ft, ackData, err := remoteapp.ReadFrame(&ackBuf)
+	if err != nil {
+		t.Fatalf("ReadFrame on ACK: %v", err)
+	}
+	if ft != remoteapp.FrameScreenshotAck {
+		t.Errorf("ACK frame type: got 0x%02x, want 0x%02x", ft, remoteapp.FrameScreenshotAck)
+	}
+	ackTS, ok := remoteapp.ParseScreenshotAck(ackData)
+	if !ok {
+		t.Fatal("ParseScreenshotAck: ok=false")
+	}
+	if !ackTS.Equal(ts.Truncate(time.Millisecond)) {
+		t.Errorf("ACK timestamp: got %v, want %v", ackTS, ts)
+	}
+
+	// Malformed payload (shorter than timestamp prefix) should return ok=false.
+	_, _, ok = remoteapp.ParseScreenshotTimestamp([]byte("short"))
+	if ok {
+		t.Error("expected ok=false for short payload")
+	}
+}
+
 func TestWriteSSELogEvent(t *testing.T) {
 	t.Parallel()
 	rec := httptest.NewRecorder()

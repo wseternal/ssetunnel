@@ -7,9 +7,8 @@ import (
 	"io"
 )
 
-// CaptureLoop captures screenshots at the specified FPS and writes them
-// as typed frames to w. This stub implementation returns ErrNotSupported.
-func CaptureLoop(ctx context.Context, w io.Writer, fps int) error {
+// CaptureLoop is the stub for unsupported platforms. Returns ErrNotSupported.
+func CaptureLoop(ctx context.Context, w io.Writer, captureNow <-chan struct{}) error {
 	return ErrNotSupported
 }
 

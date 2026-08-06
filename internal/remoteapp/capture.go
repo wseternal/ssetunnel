@@ -22,22 +22,27 @@ const jpegQuality = 50
 // before the loop gives up and returns an error (circuit breaker).
 const maxConsecutiveCaptureFails = 10
 
-// CaptureLoop captures the primary display at fps frames per second and
-// writes JPEG-encoded screenshots as typed frames to w. It runs until
-// ctx is canceled or w returns an error. Log events are also written to w
-// for console observability.
+// idleTimeout is the fallback capture interval when no action events are
+// received. If only mouse_move events arrive (which don't change the screen),
+// the capture loop suppresses action-driven captures. This timer ensures at
+// least one screenshot is sent every idleTimeout to keep the frontend updated.
+const idleTimeout = 15 * time.Second
+
+// CaptureLoop captures the primary display and writes JPEG-encoded
+// screenshots as typed frames to w. It runs until ctx is canceled or w
+// returns an error. Log events are also written to w for observability.
+//
+// Capture is triggered by two signals:
+//   - captureNow channel: immediate capture on action events (clicks, keys)
+//   - 15-second idle timer: fallback when no action events are received
+//
+// Mouse-move events do NOT trigger captures (they don't change the screen).
+// When a captureNow signal fires, the idle timer is reset so captures don't
+// double-fire.
 //
 // If w is a *lockedWriter (as used by ProxyRemoteApp), all frame and log
-// writes are mutex-guarded for concurrent safety. Otherwise, writes use
-// the bare WriteFrame/WriteLogEvent functions (caller must serialize).
-func CaptureLoop(ctx context.Context, w io.Writer, fps int) error {
-	if fps <= 0 {
-		fps = 3
-	}
-	interval := time.Second / time.Duration(fps)
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-
+// writes are mutex-guarded for concurrent safety.
+func CaptureLoop(ctx context.Context, w io.Writer, captureNow <-chan struct{}) error {
 	// Detect lockedWriter for mutex-guarded writes.
 	lw, _ := w.(*lockedWriter)
 
@@ -52,48 +57,71 @@ func CaptureLoop(ctx context.Context, w io.Writer, fps int) error {
 			_ = WriteLogEvent(w, severity, message)
 		}
 	}
-	writeScreenshot := func(data []byte) error {
+	writeScreenshot := func(jpegData []byte) error {
 		if lw != nil {
-			return lw.writeFrame(FrameScreenshot, data)
+			return lw.writeScreenshotWithTimestamp(jpegData, time.Now())
 		}
-		return WriteFrame(w, FrameScreenshot, data)
+		return WriteScreenshotWithTimestamp(w, jpegData, time.Now())
 	}
 
-	writeLog("info", fmt.Sprintf("capture started at %d FPS", fps))
+	captureAndSend := func() error {
+		img, err := robotgo.CaptureImg()
+		if err != nil {
+			consecutiveFails++
+			if consecutiveFails >= maxConsecutiveCaptureFails {
+				writeLog("error", fmt.Sprintf("capture circuit breaker: %d consecutive failures: %v", consecutiveFails, err))
+				return fmt.Errorf("capture failed %d consecutive times: %w", consecutiveFails, err)
+			}
+			log.Printf("remoteapp: capture: %v (attempt %d/%d)", err, consecutiveFails, maxConsecutiveCaptureFails)
+			writeLog("warn", fmt.Sprintf("capture failed (attempt %d/%d): %v", consecutiveFails, maxConsecutiveCaptureFails, err))
+			return nil // non-fatal
+		}
+		consecutiveFails = 0 // reset on success
+
+		buf.Reset()
+		if err := jpeg.Encode(&buf, img, &jpeg.Options{Quality: jpegQuality}); err != nil {
+			consecutiveFails++
+			if consecutiveFails >= maxConsecutiveCaptureFails {
+				writeLog("error", fmt.Sprintf("jpeg encode circuit breaker: %d consecutive failures: %v", consecutiveFails, err))
+				return fmt.Errorf("jpeg encode failed %d consecutive times: %w", consecutiveFails, err)
+			}
+			log.Printf("remoteapp: jpeg encode: %v (attempt %d/%d)", err, consecutiveFails, maxConsecutiveCaptureFails)
+			writeLog("warn", fmt.Sprintf("jpeg encode failed (attempt %d/%d): %v", consecutiveFails, maxConsecutiveCaptureFails, err))
+			return nil // non-fatal
+		}
+		return writeScreenshot(buf.Bytes())
+	}
+
+	writeLog("info", "capture started (signal-driven, 15s idle fallback)")
+
+	// Initial capture on startup.
+	if err := captureAndSend(); err != nil {
+		return err
+	}
+
+	idleTimer := time.NewTimer(idleTimeout)
+	defer idleTimer.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
 			writeLog("info", "capture stopped (context canceled)")
 			return ctx.Err()
-		case <-ticker.C:
-			img, err := robotgo.CaptureImg()
-			if err != nil {
-				consecutiveFails++
-				if consecutiveFails >= maxConsecutiveCaptureFails {
-					writeLog("error", fmt.Sprintf("capture circuit breaker: %d consecutive failures: %v", consecutiveFails, err))
-					return fmt.Errorf("capture failed %d consecutive times: %w", consecutiveFails, err)
-				}
-				log.Printf("remoteapp: capture: %v (attempt %d/%d)", err, consecutiveFails, maxConsecutiveCaptureFails)
-				writeLog("warn", fmt.Sprintf("capture failed (attempt %d/%d): %v", consecutiveFails, maxConsecutiveCaptureFails, err))
-				continue
-			}
-			consecutiveFails = 0 // reset on success
-
-			buf.Reset()
-			if err := jpeg.Encode(&buf, img, &jpeg.Options{Quality: jpegQuality}); err != nil {
-				consecutiveFails++
-				if consecutiveFails >= maxConsecutiveCaptureFails {
-					writeLog("error", fmt.Sprintf("jpeg encode circuit breaker: %d consecutive failures: %v", consecutiveFails, err))
-					return fmt.Errorf("jpeg encode failed %d consecutive times: %w", consecutiveFails, err)
-				}
-				log.Printf("remoteapp: jpeg encode: %v (attempt %d/%d)", err, consecutiveFails, maxConsecutiveCaptureFails)
-				writeLog("warn", fmt.Sprintf("jpeg encode failed (attempt %d/%d): %v", consecutiveFails, maxConsecutiveCaptureFails, err))
-				continue
-			}
-			if err := writeScreenshot(buf.Bytes()); err != nil {
+		case <-captureNow:
+			// Immediate capture on action event: capture now,
+			// then reset idle timer. Go 1.23+ Reset is safe
+			// on expired timers.
+			if err := captureAndSend(); err != nil {
 				return err
 			}
+			idleTimer.Reset(idleTimeout)
+		case <-idleTimer.C:
+			// Idle fallback: capture to keep frontend updated when
+			// no action events have been received for idleTimeout.
+			if err := captureAndSend(); err != nil {
+				return err
+			}
+			idleTimer.Reset(idleTimeout)
 		}
 	}
 }

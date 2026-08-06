@@ -20,10 +20,13 @@ Typed length-prefixed frames: `[type][4-byte BE length][data]`.
 
 | Type | ID | Direction | Payload |
 |---|---|---|---|
-| `FrameScreenshot` | 0x01 | Agent → Server | JPEG image (quality 50) |
+| `FrameScreenshot` | 0x01 | Agent → Server | [8-byte BE UnixMilli timestamp][JPEG data (quality 50)] |
 | `FrameInput` | 0x02 | Server → Agent | JSON `InputEvent` |
 | `FrameScreenInfo` | 0x03 | Agent → Server | JSON `ScreenInfo{width,height}` |
 | `FrameLogEvent` | 0x04 | Agent → Server | JSON `LogEvent{ts,sev,src,msg}` |
+| `FrameScreenshotAck` | 0x05 | Server → Agent | 8-byte BE UnixMilli (ACK for received screenshot) |
+
+> **Breaking change:** `FrameScreenshot` payload now includes an 8-byte timestamp prefix. Agent and server must run the same version — mismatched versions will produce corrupt screenshots during a rolling deployment.
 
 Max frame size: 4 MiB (`maxFrameSize`). `WriteFrame` constructs the header and payload in two separate writes to avoid allocating a combined ~150 KB buffer. Callers MUST ensure exclusive access to the writer for the duration of a `WriteFrame` call; the two writes are NOT atomic. Use `lockedWriter` for concurrent access. `ReadFrame` reads header then payload with `io.ReadFull`.
 
@@ -36,11 +39,17 @@ Max frame size: 4 MiB (`maxFrameSize`). `WriteFrame` constructs the header and p
 
 ## Capture Loop
 
-`CaptureLoop(ctx, w, fps)` captures the primary display at `fps` (default 3) and writes JPEG-encoded screenshots as typed frames.
+`CaptureLoop(ctx, w, captureNow <-chan struct{})` captures the primary display and writes timestamped JPEG screenshots as typed frames. It is signal-driven:
 
+- **`captureNow` channel**: Immediate capture on action events (clicks, keys, scrolls). Buffered 1 for coalescing.
+- **15-second idle timer**: Fallback capture when no action events are received, keeping the frontend updated.
+- **Mouse-move suppression**: Mouse-move events do NOT trigger captures (they don't change the screen).
+- **Initial capture**: One screenshot on startup before entering the select loop.
 - **Buffer reuse**: Single `bytes.Buffer` reused across frames (~150 KB/frame savings).
-- **Circuit breaker**: After `maxConsecutiveCaptureFails` (10) consecutive capture failures, returns an error instead of logging indefinitely.
+- **Circuit breaker**: After `maxConsecutiveCaptureFails` (10) consecutive failures, returns an error.
 - **JPEG quality**: 50 balances bandwidth (~50–150 KB per 1080p frame) and clarity.
+
+Each screenshot payload is prefixed with an 8-byte big-endian Unix-millisecond timestamp (`ScreenshotTimestampSize = 8`). The server parses and strips this prefix before forwarding JPEG to the frontend, and sends a `FrameScreenshotAck` back to the agent.
 
 ## Input Dispatch
 
@@ -77,8 +86,8 @@ Typed error types: `InvalidKeyError`, `InvalidModifierError`, `TextTooLongError`
 `ProxyRemoteApp(stream net.Conn)` orchestrates:
 1. Wrap stream in a `lockedWriter` for concurrent-safe frame writes
 2. Send `FrameScreenInfo` with initial screen dimensions
-3. Start `CaptureLoop` goroutine (receives `lockedWriter` as `io.Writer`)
-4. Main loop: `ReadFrame` → dispatch input events
+3. Create `captureNow` channel (buffered 1) and start `CaptureLoop` goroutine
+4. Main loop: `ReadFrame` → dispatch input events; signal `captureNow` on action events (all except `mouse_move`); handle `FrameScreenshotAck` from server
 5. On stream close: cancel capture, `ReleaseAllInputs`, wait for capture goroutine, emit "session ended" log event, close `lockedWriter`, close stream
 
 ## Concurrency Model
@@ -88,6 +97,7 @@ The agent→server direction has concurrent writers: the capture goroutine (scre
 - `Write(p []byte)` — mutex-guarded single write (satisfies `io.Writer` for non-aware callers like `WriteFrame`)
 - `writeFrame(frameType, data)` — mutex held across header+data `WriteFrame` (atomic frame construction)
 - `writeLogEvent(severity, message)` — build `LogEvent` JSON + `writeFrame` under mutex
+- `writeScreenshotWithTimestamp(jpegData, ts)` — build timestamped payload + `writeFrame` under mutex
 - `close()` — set `closed=true` under mutex, preventing further writes
 
 `CaptureLoop` detects `*lockedWriter` via type assertion to use mutex-guarded methods; otherwise falls back to bare `WriteFrame`/`WriteLogEvent` (caller must serialize).
