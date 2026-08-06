@@ -65,8 +65,8 @@ Thread-safe `map[string]*Session`. `Replace` closes stale sessions on reconnect.
 3. TOCTOU re-verify ownership after poll resolves
 4. Open yamux stream, write target header if dynamic target mode
 5. Create `connectSession` with up pipe, store in `connectSessions` map
-6. Bridge goroutine: pipe → yamux stream (with `bridgeDone` channel for clean shutdown)
-7. SSE loop: `remoteapp.ReadFrame` → base64 SSE (screenshots as default data frames, screen info as named `screeninfo` event)
+6. Bridge goroutine: pipe → yamux stream (with `bridgeDone` channel for clean shutdown); `streamMu` serializes writes from bridge and SSE loop
+7. SSE loop: `remoteapp.ReadFrame` → base64 SSE (screenshots: parse+strip 8-byte timestamp prefix, forward JPEG only, send `FrameScreenshotAck` back to agent; screen info as named `screeninfo` event)
 8. Stream base64 encoding via `base64.NewEncoder` to avoid full-string allocation
 9. Metrics: `RecordSessionStart/End`, downstream bytes per screenshot frame
 

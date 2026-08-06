@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sync"
 	"testing"
+	"time"
 )
 
 func TestWriteReadFrameRoundTrip(t *testing.T) {
@@ -288,5 +289,77 @@ func TestLockedWriterClosePreventsWrites(t *testing.T) {
 	_, err := lw.Write([]byte("raw"))
 	if err != ErrWriterClosed {
 		t.Errorf("Write after close: got %v, want %v", err, ErrWriterClosed)
+	}
+}
+
+func TestScreenshotTimestampRoundTrip(t *testing.T) {
+	jpegData := []byte("fake-jpeg-data-for-timestamp-test")
+	ts := time.Date(2025, 7, 31, 12, 30, 45, 123_000_000, time.UTC)
+
+	var buf bytes.Buffer
+	if err := WriteScreenshotWithTimestamp(&buf, jpegData, ts); err != nil {
+		t.Fatalf("WriteScreenshotWithTimestamp: %v", err)
+	}
+
+	frameType, data, err := ReadFrame(&buf)
+	if err != nil {
+		t.Fatalf("ReadFrame: %v", err)
+	}
+	if frameType != FrameScreenshot {
+		t.Errorf("frame type: got 0x%02x, want 0x%02x", frameType, FrameScreenshot)
+	}
+
+	gotTS, gotJPEG, ok := ParseScreenshotTimestamp(data)
+	if !ok {
+		t.Fatal("ParseScreenshotTimestamp: ok=false")
+	}
+	if !gotTS.Equal(ts.Truncate(time.Millisecond)) {
+		t.Errorf("timestamp: got %v, want %v", gotTS, ts)
+	}
+	if !bytes.Equal(gotJPEG, jpegData) {
+		t.Errorf("jpeg data: got %d bytes, want %d bytes", len(gotJPEG), len(jpegData))
+	}
+}
+
+func TestParseScreenshotTimestampTooShort(t *testing.T) {
+	_, _, ok := ParseScreenshotTimestamp([]byte("short"))
+	if ok {
+		t.Error("expected ok=false for short payload")
+	}
+}
+
+func TestScreenshotAckRoundTrip(t *testing.T) {
+	ts := time.Date(2025, 7, 31, 15, 0, 0, 0, time.UTC)
+
+	var buf bytes.Buffer
+	if err := WriteScreenshotAck(&buf, ts); err != nil {
+		t.Fatalf("WriteScreenshotAck: %v", err)
+	}
+
+	frameType, data, err := ReadFrame(&buf)
+	if err != nil {
+		t.Fatalf("ReadFrame: %v", err)
+	}
+	if frameType != FrameScreenshotAck {
+		t.Errorf("frame type: got 0x%02x, want 0x%02x", frameType, FrameScreenshotAck)
+	}
+
+	gotTS, ok := ParseScreenshotAck(data)
+	if !ok {
+		t.Fatal("ParseScreenshotAck: ok=false")
+	}
+	if !gotTS.Equal(ts.Truncate(time.Millisecond)) {
+		t.Errorf("timestamp: got %v, want %v", gotTS, ts)
+	}
+}
+
+func TestParseScreenshotAckWrongSize(t *testing.T) {
+	_, ok := ParseScreenshotAck([]byte("too-short"))
+	if ok {
+		t.Error("expected ok=false for wrong-size payload")
+	}
+	_, ok = ParseScreenshotAck(nil)
+	if ok {
+		t.Error("expected ok=false for nil payload")
 	}
 }

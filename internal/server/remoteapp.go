@@ -11,6 +11,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/hashicorp/yamux"
@@ -161,9 +162,11 @@ func (h *Handler) handleRemoteApp(w http.ResponseWriter, r *http.Request) {
 		h.metrics.RecordSessionEnd(agentID)
 	}()
 
+	// streamMu serializes writes to the yamux stream from the bridge
+	// goroutine (input events) and the SSE loop (ACK frames).
+	var streamMu sync.Mutex
+
 	// Bridge goroutine: read framed input events from the pipe → write to yamux.
-	// The connect-up handler already wraps POST bodies as typed frames, so
-	// this is a raw byte copy (same pattern as shell).
 	go func() {
 		defer close(bridgeDone)
 		buf := bufferPool.Get().(*[]byte)
@@ -171,7 +174,10 @@ func (h *Handler) handleRemoteApp(w http.ResponseWriter, r *http.Request) {
 		for {
 			n, err := cs.up.Read(*buf)
 			if n > 0 {
-				if _, werr := stream.Write((*buf)[:n]); werr != nil {
+				streamMu.Lock()
+				_, werr := stream.Write((*buf)[:n])
+				streamMu.Unlock()
+				if werr != nil {
 					log.Printf("remoteapp: bridge write error agent=%s session=%s: %v", agentID, id, werr)
 					stream.Close()
 					return
@@ -221,7 +227,7 @@ func (h *Handler) handleRemoteApp(w http.ResponseWriter, r *http.Request) {
 
 	// SSE loop: read typed frames from yamux stream → write SSE events.
 	// The agent sends:
-	//   - FrameScreenshot (0x01): JPEG data → base64 SSE data frame
+	//   - FrameScreenshot (0x01): [8-byte BE timestamp][JPEG] → base64 SSE data frame + ACK
 	//   - FrameScreenInfo (0x03): JSON screen info → SSE "screeninfo" event
 	//   - FrameLogEvent (0x04): JSON log event → SSE "log" event (observability)
 	for {
@@ -251,11 +257,27 @@ func (h *Handler) handleRemoteApp(w http.ResponseWriter, r *http.Request) {
 
 		switch frameType {
 		case remoteapp.FrameScreenshot:
-			// Write as default SSE data frame (base64-encoded JPEG).
-			if werr := writeSSEDataFrame(w, f, readBuf[:n]); werr != nil {
+			// Parse and strip the 8-byte timestamp prefix from the payload.
+			// Forward only the JPEG data to the frontend; ACK back to agent.
+			ts, jpegData, ok := remoteapp.ParseScreenshotTimestamp(readBuf[:n])
+			if !ok {
+				// Malformed: payload shorter than timestamp prefix.
+				// Skip this frame rather than sending corrupt data.
+				log.Printf("remoteapp: malformed screenshot frame (no timestamp) agent=%s session=%s", agentID, id)
+				continue
+			}
+			if werr := writeSSEDataFrame(w, f, jpegData); werr != nil {
 				return
 			}
-			h.metrics.RecordConnectBytes(agentID, 0, n)
+			h.metrics.RecordConnectBytes(agentID, 0, len(jpegData))
+			// Send ACK back to the agent via yamux stream.
+			streamMu.Lock()
+			ackErr := remoteapp.WriteScreenshotAck(stream, ts)
+			streamMu.Unlock()
+			if ackErr != nil {
+				log.Printf("remoteapp: write ACK agent=%s session=%s: %v", agentID, id, ackErr)
+				return
+			}
 		case remoteapp.FrameScreenInfo:
 			// Write as named SSE event so frontend can distinguish.
 			if werr := writeSSENamedFrame(w, f, "screeninfo", readBuf[:n]); werr != nil {
