@@ -264,6 +264,7 @@ func (h *Handler) handleRemoteApp(w http.ResponseWriter, r *http.Request) {
 				// Malformed: payload shorter than timestamp prefix.
 				// Skip this frame rather than sending corrupt data.
 				log.Printf("remoteapp: malformed screenshot frame (no timestamp) agent=%s session=%s", agentID, id)
+				_ = writeSSELogEvent(w, f, "warn", "server", "malformed screenshot frame (no timestamp)")
 				continue
 			}
 			if werr := writeSSEDataFrame(w, f, jpegData); werr != nil {

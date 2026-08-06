@@ -175,6 +175,9 @@ func WriteLogEvent(w io.Writer, severity, message string) error {
 // Wire format: [FrameScreenshot header][8-byte BE UnixMilli][JPEG data].
 // Writes header, timestamp, and JPEG as three separate writes to avoid
 // allocating a combined ~150 KB payload buffer.
+//
+// Callers MUST ensure exclusive access to w for the duration of this call;
+// the three writes are NOT atomic. Use a lockedWriter for concurrent access.
 func WriteScreenshotWithTimestamp(w io.Writer, jpegData []byte, ts time.Time) error {
 	totalLen := ScreenshotTimestampSize + len(jpegData)
 	if totalLen > maxFrameSize {

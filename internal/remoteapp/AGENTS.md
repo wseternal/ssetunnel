@@ -26,6 +26,8 @@ Typed length-prefixed frames: `[type][4-byte BE length][data]`.
 | `FrameLogEvent` | 0x04 | Agent → Server | JSON `LogEvent{ts,sev,src,msg}` |
 | `FrameScreenshotAck` | 0x05 | Server → Agent | 8-byte BE UnixMilli (ACK for received screenshot) |
 
+> **Breaking change:** `FrameScreenshot` payload now includes an 8-byte timestamp prefix. Agent and server must run the same version — mismatched versions will produce corrupt screenshots during a rolling deployment.
+
 Max frame size: 4 MiB (`maxFrameSize`). `WriteFrame` constructs the header and payload in two separate writes to avoid allocating a combined ~150 KB buffer. Callers MUST ensure exclusive access to the writer for the duration of a `WriteFrame` call; the two writes are NOT atomic. Use `lockedWriter` for concurrent access. `ReadFrame` reads header then payload with `io.ReadFull`.
 
 ## Build Constraints

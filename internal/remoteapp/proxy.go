@@ -122,6 +122,11 @@ func ProxyRemoteApp(stream net.Conn) {
 		case FrameScreenshotAck:
 			if ts, ok := ParseScreenshotAck(data); ok {
 				lastAckUnixMilli.Store(ts.UnixMilli())
+			} else {
+				log.Printf("remoteapp: malformed screenshot ACK (%d bytes)", len(data))
+				if werr := lw.writeLogEvent("warn", fmt.Sprintf("malformed screenshot ACK (%d bytes)", len(data))); werr != nil {
+					log.Printf("remoteapp: writeLogEvent: %v", werr)
+				}
 			}
 		default:
 			log.Printf("remoteapp: unexpected frame type: 0x%02x", frameType)
