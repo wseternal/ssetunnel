@@ -286,6 +286,9 @@ func TestLockedWriterClosePreventsWrites(t *testing.T) {
 	if err := lw.writeFrame(FrameScreenshot, []byte("data")); err != ErrWriterClosed {
 		t.Errorf("writeFrame after close: got %v, want %v", err, ErrWriterClosed)
 	}
+	if err := lw.writeScreenshotWithTimestamp([]byte("jpeg"), time.Now()); err != ErrWriterClosed {
+		t.Errorf("writeScreenshotWithTimestamp after close: got %v, want %v", err, ErrWriterClosed)
+	}
 	_, err := lw.Write([]byte("raw"))
 	if err != ErrWriterClosed {
 		t.Errorf("Write after close: got %v, want %v", err, ErrWriterClosed)

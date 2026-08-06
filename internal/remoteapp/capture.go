@@ -64,17 +64,6 @@ func CaptureLoop(ctx context.Context, w io.Writer, captureNow <-chan struct{}) e
 		return WriteScreenshotWithTimestamp(w, jpegData, time.Now())
 	}
 
-	// drainTimer drains the timer channel if it has a pending fire,
-	// preventing a double-capture when an immediate signal arrives.
-	drainTimer := func(t *time.Timer) {
-		if !t.Stop() {
-			select {
-			case <-t.C:
-			default:
-			}
-		}
-	}
-
 	captureAndSend := func() error {
 		img, err := robotgo.CaptureImg()
 		if err != nil {
@@ -119,9 +108,9 @@ func CaptureLoop(ctx context.Context, w io.Writer, captureNow <-chan struct{}) e
 			writeLog("info", "capture stopped (context canceled)")
 			return ctx.Err()
 		case <-captureNow:
-			// Immediate capture on action event: drain idle timer,
-			// capture now, then reset idle timer.
-			drainTimer(idleTimer)
+			// Immediate capture on action event: capture now,
+			// then reset idle timer. Go 1.23+ Reset is safe
+			// on expired timers.
 			if err := captureAndSend(); err != nil {
 				return err
 			}

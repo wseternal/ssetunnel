@@ -63,7 +63,7 @@ func ProxyRemoteApp(stream net.Conn) {
 	captureNow := make(chan struct{}, 1)
 
 	// lastAckUnixMilli tracks the latest server-ACK'd screenshot timestamp
-	// for observability. Read atomically by the log goroutine if needed.
+	// for observability. Loaded at session teardown for the final log line.
 	var lastAckUnixMilli atomic.Int64
 
 	var wg sync.WaitGroup

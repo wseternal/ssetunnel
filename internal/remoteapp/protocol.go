@@ -173,11 +173,31 @@ func WriteLogEvent(w io.Writer, severity, message string) error {
 // WriteScreenshotWithTimestamp writes a FrameScreenshot with an 8-byte
 // big-endian Unix-millisecond timestamp prepended to the JPEG payload.
 // Wire format: [FrameScreenshot header][8-byte BE UnixMilli][JPEG data].
+// Writes header, timestamp, and JPEG as three separate writes to avoid
+// allocating a combined ~150 KB payload buffer.
 func WriteScreenshotWithTimestamp(w io.Writer, jpegData []byte, ts time.Time) error {
-	payload := make([]byte, ScreenshotTimestampSize+len(jpegData))
-	binary.BigEndian.PutUint64(payload[:ScreenshotTimestampSize], uint64(ts.UnixMilli()))
-	copy(payload[ScreenshotTimestampSize:], jpegData)
-	return WriteFrame(w, FrameScreenshot, payload)
+	totalLen := ScreenshotTimestampSize + len(jpegData)
+	if totalLen > maxFrameSize {
+		return fmt.Errorf("%w: %d bytes", ErrFrameTooLarge, totalLen)
+	}
+	hp := headerPool.Get().(*[]byte)
+	header := *hp
+	header[0] = FrameScreenshot
+	binary.BigEndian.PutUint32(header[1:5], uint32(totalLen))
+	_, err := w.Write(header)
+	headerPool.Put(hp)
+	if err != nil {
+		return err
+	}
+	var tsBuf [ScreenshotTimestampSize]byte
+	binary.BigEndian.PutUint64(tsBuf[:], uint64(ts.UnixMilli()))
+	if _, err := w.Write(tsBuf[:]); err != nil {
+		return err
+	}
+	if len(jpegData) > 0 {
+		_, err = w.Write(jpegData)
+	}
+	return err
 }
 
 // ParseScreenshotTimestamp splits a FrameScreenshot payload into the
@@ -256,7 +276,8 @@ func (lw *lockedWriter) writeLogEvent(severity, message string) error {
 }
 
 // writeScreenshotWithTimestamp writes a FrameScreenshot with an 8-byte
-// timestamp prefix under a single lock hold.
+// timestamp prefix under a single lock hold. Uses three separate writes
+// (header + timestamp + JPEG) to avoid allocating a combined payload buffer.
 func (lw *lockedWriter) writeScreenshotWithTimestamp(jpegData []byte, ts time.Time) error {
 	lw.mu.Lock()
 	defer lw.mu.Unlock()

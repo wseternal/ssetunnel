@@ -276,6 +276,7 @@ func (h *Handler) handleRemoteApp(w http.ResponseWriter, r *http.Request) {
 			streamMu.Unlock()
 			if ackErr != nil {
 				log.Printf("remoteapp: write ACK agent=%s session=%s: %v", agentID, id, ackErr)
+				_ = writeSSELogEvent(w, f, "error", "server", fmt.Sprintf("ACK write failed: %v", ackErr))
 				return
 			}
 		case remoteapp.FrameScreenInfo:
