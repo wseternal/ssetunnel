@@ -247,26 +247,23 @@ func (lw *lockedWriter) writeFrame(frameType byte, data []byte) error {
 // writeLogEvent serializes a LogEvent and writes it as a FrameLogEvent frame
 // under a single lock hold.
 func (lw *lockedWriter) writeLogEvent(severity, message string) error {
-	evt := LogEvent{
-		TS:       time.Now().UTC().Format(time.RFC3339Nano),
-		Severity: severity,
-		Source:   "agent",
-		Message:  message,
+	lw.mu.Lock()
+	defer lw.mu.Unlock()
+	if lw.closed {
+		return ErrWriterClosed
 	}
-	data, err := json.Marshal(evt)
-	if err != nil {
-		return err
-	}
-	return lw.writeFrame(FrameLogEvent, data)
+	return WriteLogEvent(lw.w, severity, message)
 }
 
 // writeScreenshotWithTimestamp writes a FrameScreenshot with an 8-byte
 // timestamp prefix under a single lock hold.
 func (lw *lockedWriter) writeScreenshotWithTimestamp(jpegData []byte, ts time.Time) error {
-	payload := make([]byte, ScreenshotTimestampSize+len(jpegData))
-	binary.BigEndian.PutUint64(payload[:ScreenshotTimestampSize], uint64(ts.UnixMilli()))
-	copy(payload[ScreenshotTimestampSize:], jpegData)
-	return lw.writeFrame(FrameScreenshot, payload)
+	lw.mu.Lock()
+	defer lw.mu.Unlock()
+	if lw.closed {
+		return ErrWriterClosed
+	}
+	return WriteScreenshotWithTimestamp(lw.w, jpegData, ts)
 }
 
 // close marks the writer as closed, preventing further writes.
