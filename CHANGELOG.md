@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.4.0](https://github.com/wseternal/ssetunnel/compare/v1.3.1...v1.4.0) (2026-08-06)
+
+
+### Features
+
+* **remoteapp:** add real-time activity log for remote desktop sessions ([#35](https://github.com/wseternal/ssetunnel/issues/35)) ([fbe00c1](https://github.com/wseternal/ssetunnel/commit/fbe00c17c0e6dcec2a5ac01999c0fba3855536ce))
+
 ## [1.3.1](https://github.com/wseternal/ssetunnel/compare/v1.3.0...v1.3.1) (2026-08-05)
 
 
