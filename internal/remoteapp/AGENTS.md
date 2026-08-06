@@ -23,8 +23,9 @@ Typed length-prefixed frames: `[type][4-byte BE length][data]`.
 | `FrameScreenshot` | 0x01 | Agent → Server | JPEG image (quality 50) |
 | `FrameInput` | 0x02 | Server → Agent | JSON `InputEvent` |
 | `FrameScreenInfo` | 0x03 | Agent → Server | JSON `ScreenInfo{width,height}` |
+| `FrameLogEvent` | 0x04 | Agent → Server | JSON `LogEvent{ts,sev,src,msg}` |
 
-Max frame size: 4 MiB (`maxFrameSize`). `WriteFrame` constructs the full frame in a single buffer and writes atomically to prevent interleaving. `ReadFrame` reads header then payload with `io.ReadFull`.
+Max frame size: 4 MiB (`maxFrameSize`). `WriteFrame` constructs the header and payload in two separate writes to avoid allocating a combined ~150 KB buffer. Callers MUST ensure exclusive access to the writer for the duration of a `WriteFrame` call; the two writes are NOT atomic. Use `lockedWriter` for concurrent access. `ReadFrame` reads header then payload with `io.ReadFull`.
 
 ## Build Constraints
 
@@ -74,13 +75,35 @@ Typed error types: `InvalidKeyError`, `InvalidModifierError`, `TextTooLongError`
 ## Agent-Side Proxy
 
 `ProxyRemoteApp(stream net.Conn)` orchestrates:
-1. Send `FrameScreenInfo` with initial screen dimensions
-2. Start `CaptureLoop` goroutine
-3. Main loop: `ReadFrame` → dispatch input events
-4. On stream close: cancel capture, `ReleaseAllInputs`, close stream, wait for capture goroutine
+1. Wrap stream in a `lockedWriter` for concurrent-safe frame writes
+2. Send `FrameScreenInfo` with initial screen dimensions
+3. Start `CaptureLoop` goroutine (receives `lockedWriter` as `io.Writer`)
+4. Main loop: `ReadFrame` → dispatch input events
+5. On stream close: cancel capture, `ReleaseAllInputs`, wait for capture goroutine, emit "session ended" log event, close `lockedWriter`, close stream
+
+## Concurrency Model
+
+The agent→server direction has concurrent writers: the capture goroutine (screenshots + log events) and the main goroutine (input dispatch log events). A `lockedWriter` wraps the yamux stream with a `sync.Mutex` to serialize all frame writes:
+
+- `Write(p []byte)` — mutex-guarded single write (satisfies `io.Writer` for non-aware callers like `WriteFrame`)
+- `writeFrame(frameType, data)` — mutex held across header+data `WriteFrame` (atomic frame construction)
+- `writeLogEvent(severity, message)` — build `LogEvent` JSON + `writeFrame` under mutex
+- `close()` — set `closed=true` under mutex, preventing further writes
+
+`CaptureLoop` detects `*lockedWriter` via type assertion to use mutex-guarded methods; otherwise falls back to bare `WriteFrame`/`WriteLogEvent` (caller must serialize).
+
+## Log Event Flow
+
+Agent-side `lockedWriter.writeLogEvent` and server-side `writeSSELogEvent` produce `LogEvent` JSON frames:
+
+1. Agent emits log events for: session start/stop, capture start/stop, input dispatch (except `mouse_move`), errors
+2. Server validates agent log events: enforce `src=agent`, validate `sev` ∈ {info, warn, error}, cap `msg` at 1024 chars
+3. Server injects its own events: stream opened, stream closed, agent session died
+4. Server forwards validated events as SSE `event: log` frames to the console frontend
+5. Frontend renders log entries with severity-based coloring and auto-scroll
 
 ## Rules
-* **Single writer per direction**: Only the capture loop writes screenshots to the stream; only the main loop reads input frames. No concurrent writers in the same direction.
+* **lockedWriter for concurrent writes**: All agent→server frame writes go through a `lockedWriter` that serializes access with a mutex. The capture goroutine and main goroutine share the same `lockedWriter`.
 * **Fail-fast**: Capture write errors, stream read errors, and robotgo panics terminate the session.
 * **No partial recovery**: A dead stream means a new session — agents do not attempt to recover mid-stream.
 * **robotgo is blocking**: All robotgo calls block the calling goroutine. Input dispatch runs in the main loop (serial), not a goroutine, to avoid input reordering.

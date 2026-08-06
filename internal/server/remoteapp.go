@@ -211,6 +211,11 @@ func (h *Handler) handleRemoteApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Emit "stream closed" on every exit path (normal disconnect, error, etc.).
+	defer func() {
+		_ = writeSSELogEvent(w, f, "info", "server", "stream closed")
+	}()
+
 	// Reusable buffer for reading frames from the agent (avoids per-frame alloc).
 	readBuf := make([]byte, remoteapp.MaxFrameSize())
 
@@ -256,11 +261,30 @@ func (h *Handler) handleRemoteApp(w http.ResponseWriter, r *http.Request) {
 			if werr := writeSSENamedFrame(w, f, "screeninfo", readBuf[:n]); werr != nil {
 				return
 			}
+			h.metrics.RecordConnectBytes(agentID, 0, n)
 		case remoteapp.FrameLogEvent:
-			// Forward agent log event as SSE "log" event (base64 JSON).
-			if werr := writeSSENamedFrame(w, f, "log", readBuf[:n]); werr != nil {
+			// Validate and sanitize agent log event before forwarding.
+			var logEvt remoteapp.LogEvent
+			if err := json.Unmarshal(readBuf[:n], &logEvt); err != nil {
+				continue // skip malformed log events
+			}
+			logEvt.Source = "agent" // enforce provenance
+			switch logEvt.Severity {
+			case "info", "warn", "error":
+			default:
+				logEvt.Severity = "info"
+			}
+			if len(logEvt.Message) > 1024 {
+				logEvt.Message = logEvt.Message[:1024]
+			}
+			sanitized, err := json.Marshal(logEvt)
+			if err != nil {
+				continue
+			}
+			if werr := writeSSENamedFrame(w, f, "log", sanitized); werr != nil {
 				return
 			}
+			h.metrics.RecordConnectBytes(agentID, 0, n)
 		default:
 			// Unknown frame type from agent; skip.
 		}

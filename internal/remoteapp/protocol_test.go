@@ -3,6 +3,8 @@ package remoteapp
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
+	"sync"
 	"testing"
 )
 
@@ -218,5 +220,73 @@ func TestWriteLogEventRoundTrip(t *testing.T) {
 	}
 	if evt.TS == "" {
 		t.Error("timestamp should not be empty")
+	}
+}
+
+func TestLockedWriterConcurrent(t *testing.T) {
+	const goroutines = 10
+	const writesPerGoroutine = 100
+
+	var buf bytes.Buffer
+	lw := &lockedWriter{w: &buf}
+
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+	for g := 0; g < goroutines; g++ {
+		go func(id int) {
+			defer wg.Done()
+			for i := 0; i < writesPerGoroutine; i++ {
+				msg := fmt.Sprintf("g%d-msg%d", id, i)
+				if err := lw.writeLogEvent("info", msg); err != nil {
+					t.Errorf("writeLogEvent: %v", err)
+					return
+				}
+			}
+		}(g)
+	}
+	wg.Wait()
+	lw.close()
+
+	// Verify all frames are parseable.
+	reader := bytes.NewReader(buf.Bytes())
+	count := 0
+	for {
+		frameType, data, err := ReadFrame(reader)
+		if err != nil {
+			break
+		}
+		if frameType != FrameLogEvent {
+			t.Errorf("unexpected frame type: 0x%02x", frameType)
+		}
+		var evt LogEvent
+		if err := json.Unmarshal(data, &evt); err != nil {
+			t.Fatalf("unmarshal log event at frame %d: %v", count, err)
+		}
+		if evt.Source != "agent" {
+			t.Errorf("frame %d: source = %q, want %q", count, evt.Source, "agent")
+		}
+		count++
+	}
+
+	want := goroutines * writesPerGoroutine
+	if count != want {
+		t.Errorf("frame count: got %d, want %d", count, want)
+	}
+}
+
+func TestLockedWriterClosePreventsWrites(t *testing.T) {
+	var buf bytes.Buffer
+	lw := &lockedWriter{w: &buf}
+	lw.close()
+
+	if err := lw.writeLogEvent("info", "should fail"); err != ErrWriterClosed {
+		t.Errorf("writeLogEvent after close: got %v, want %v", err, ErrWriterClosed)
+	}
+	if err := lw.writeFrame(FrameScreenshot, []byte("data")); err != ErrWriterClosed {
+		t.Errorf("writeFrame after close: got %v, want %v", err, ErrWriterClosed)
+	}
+	_, err := lw.Write([]byte("raw"))
+	if err != ErrWriterClosed {
+		t.Errorf("Write after close: got %v, want %v", err, ErrWriterClosed)
 	}
 }

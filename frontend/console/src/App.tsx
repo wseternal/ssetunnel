@@ -638,7 +638,7 @@ export default function App() {
                 const next = [...prev, entry];
                 return next.length > MAX_DESKTOP_LOGS ? next.slice(-MAX_DESKTOP_LOGS) : next;
               });
-            } catch { /* ignore */ }
+            } catch (e) { console.warn('failed to parse log event:', e); }
           } else {
             // Screenshot frame: update image src
             if (desktopImgRef.current) {
@@ -655,6 +655,7 @@ export default function App() {
       setDesktopConnected(false);
       setDesktopSessionId('');
       setDesktopMetrics(null);
+      setDesktopLogs([]);
       if (desktopAbortRef.current === abort) desktopAbortRef.current = null;
     }
   }, [sessionToken]);
@@ -767,7 +768,11 @@ export default function App() {
   // Auto-scroll desktop log to bottom on new entries.
   useEffect(() => {
     if (desktopLogRef.current) {
-      desktopLogRef.current.scrollTop = desktopLogRef.current.scrollHeight;
+      requestAnimationFrame(() => {
+        if (desktopLogRef.current) {
+          desktopLogRef.current.scrollTop = desktopLogRef.current.scrollHeight;
+        }
+      });
     }
   }, [desktopLogs]);
 
@@ -1259,7 +1264,7 @@ export default function App() {
           ))}
         </Box>
       )}
-      {desktopConnected && desktopLogs.length > 0 && (
+      {desktopLogs.length > 0 && (
         <Box sx={{ mt: 1.5 }}>
           <Typography variant="subtitle2" color="text.secondary" sx={{ mb: 0.5 }}>Activity Log</Typography>
           <Paper
@@ -1276,11 +1281,11 @@ export default function App() {
             }}
           >
             {desktopLogs.map((entry, i) => {
-              const sevColor = entry.sev === 'error' ? '#f44336' : entry.sev === 'warn' ? '#ffa726' : '#9e9e9e';
+              const sevColor = entry.sev === 'error' ? '#f44336' : entry.sev === 'warn' ? '#ffa726' : '#e0e0e0';
               const srcColor = entry.src === 'server' ? '#42a5f5' : '#66bb6a';
               const time = entry.ts ? new Date(entry.ts).toLocaleTimeString() : '';
               return (
-                <Box key={i} sx={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                <Box key={`${entry.ts}-${i}`} sx={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                   <span style={{ color: '#666' }}>{time}</span>
                   {' '}
                   <span style={{ color: sevColor, fontWeight: 600, textTransform: 'uppercase', minWidth: 40, display: 'inline-block' }}>{entry.sev}</span>

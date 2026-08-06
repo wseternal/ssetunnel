@@ -15,7 +15,8 @@ const defaultFPS = 3
 // ProxyRemoteApp bridges a yamux stream with screen capture and input replay.
 // It sends screen dimensions as the first frame, then runs a capture loop
 // in one goroutine while reading input events from the stream in the main
-// goroutine. When either side closes, both are torn down.
+// goroutine. A lockedWriter serializes all writes to the stream.
+// When either side closes, both are torn down.
 func ProxyRemoteApp(stream net.Conn) {
 	if !Enabled() {
 		log.Printf("remoteapp: not supported on this OS")
@@ -26,6 +27,9 @@ func ProxyRemoteApp(stream net.Conn) {
 	screenW, screenH := GetScreenSize()
 	log.Printf("remoteapp: session started (screen=%dx%d)", screenW, screenH)
 
+	// Wrap stream in a lockedWriter for concurrent-safe frame writes.
+	lw := &lockedWriter{w: stream}
+
 	// Send screen dimensions as the first frame so the frontend can
 	// scale input coordinates.
 	info, err := json.Marshal(ScreenInfo{Width: screenW, Height: screenH})
@@ -34,14 +38,16 @@ func ProxyRemoteApp(stream net.Conn) {
 		stream.Close()
 		return
 	}
-	if err := WriteFrame(stream, FrameScreenInfo, info); err != nil {
+	if err := lw.writeFrame(FrameScreenInfo, info); err != nil {
 		log.Printf("remoteapp: write screen info: %v", err)
 		stream.Close()
 		return
 	}
 
 	// Emit observability event: session started.
-	_ = WriteLogEvent(stream, "info", fmt.Sprintf("session started (screen=%dx%d)", screenW, screenH))
+	if err := lw.writeLogEvent("info", fmt.Sprintf("session started (screen=%dx%d)", screenW, screenH)); err != nil {
+		log.Printf("remoteapp: writeLogEvent: %v", err)
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -50,11 +56,15 @@ func ProxyRemoteApp(stream net.Conn) {
 	wg.Add(1)
 
 	// Goroutine: capture screenshots → yamux stream.
+	// CaptureLoop receives lw as io.Writer; internally it detects the
+	// lockedWriter to use mutex-guarded frame writes.
 	go func() {
 		defer wg.Done()
-		if err := CaptureLoop(ctx, stream, defaultFPS); err != nil && err != context.Canceled {
+		if err := CaptureLoop(ctx, lw, defaultFPS); err != nil && err != context.Canceled {
 			log.Printf("remoteapp: capture loop: %v", err)
-			_ = WriteLogEvent(stream, "error", fmt.Sprintf("capture loop exited: %v", err))
+			if werr := lw.writeLogEvent("error", fmt.Sprintf("capture loop exited: %v", err)); werr != nil {
+				log.Printf("remoteapp: writeLogEvent: %v", werr)
+			}
 		}
 	}()
 
@@ -69,26 +79,40 @@ func ProxyRemoteApp(stream net.Conn) {
 			var event InputEvent
 			if err := json.Unmarshal(data, &event); err != nil {
 				log.Printf("remoteapp: bad input JSON: %v", err)
-				_ = WriteLogEvent(stream, "warn", fmt.Sprintf("bad input JSON: %v", err))
+				if werr := lw.writeLogEvent("warn", fmt.Sprintf("bad input JSON: %v", err)); werr != nil {
+					log.Printf("remoteapp: writeLogEvent: %v", werr)
+				}
 				continue
 			}
 			if err := DispatchInput(event, screenW, screenH); err != nil {
 				log.Printf("remoteapp: dispatch input: %v", err)
-				_ = WriteLogEvent(stream, "warn", fmt.Sprintf("input dispatch failed: %v", err))
+				if werr := lw.writeLogEvent("warn", fmt.Sprintf("input dispatch failed: %v", err)); werr != nil {
+					log.Printf("remoteapp: writeLogEvent: %v", werr)
+				}
 			} else {
-				_ = WriteLogEvent(stream, "info", fmt.Sprintf("input dispatched: %s", event.Type))
+				// Skip log for mouse_move to avoid flooding at 60Hz.
+				if event.Type != "mouse_move" {
+					if werr := lw.writeLogEvent("info", "input dispatched: "+event.Type); werr != nil {
+						log.Printf("remoteapp: writeLogEvent: %v", werr)
+					}
+				}
 			}
 		default:
 			log.Printf("remoteapp: unexpected frame type: 0x%02x", frameType)
-			_ = WriteLogEvent(stream, "warn", fmt.Sprintf("unexpected frame type: 0x%02x", frameType))
+			if werr := lw.writeLogEvent("warn", fmt.Sprintf("unexpected frame type: 0x%02x", frameType)); werr != nil {
+				log.Printf("remoteapp: writeLogEvent: %v", werr)
+			}
 		}
 	}
 
-	// Stream closed: cancel capture loop and wait.
+	// Stream closed: cancel capture loop and wait for it to fully exit.
 	cancel()
 	ReleaseAllInputs() // Release any held keys/buttons from lost "up" events.
-	stream.Close()
 	wg.Wait()
 	log.Printf("remoteapp: session ended")
-	_ = WriteLogEvent(stream, "info", "session ended")
+	if err := lw.writeLogEvent("info", "session ended"); err != nil {
+		log.Printf("remoteapp: writeLogEvent: %v", err)
+	}
+	lw.close()
+	stream.Close()
 }

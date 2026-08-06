@@ -45,8 +45,10 @@ var headerPool = sync.Pool{
 
 // WriteFrame writes a typed length-prefixed frame: [type][4-byte BE length][data].
 // The header and payload are written in two calls to avoid allocating a
-// combined buffer (~150 KB per screenshot frame). Yamux streams are not
-// shared between writers on the same stream, so two writes are safe.
+// combined buffer (~150 KB per screenshot frame).
+//
+// Callers MUST ensure exclusive access to w for the duration of this call;
+// the two writes are NOT atomic. Use a lockedWriter for concurrent access.
 func WriteFrame(w io.Writer, frameType byte, data []byte) error {
 	if len(data) > maxFrameSize {
 		return fmt.Errorf("%w: %d bytes", ErrFrameTooLarge, len(data))
@@ -147,8 +149,8 @@ type LogEvent struct {
 }
 
 // WriteLogEvent serializes a LogEvent and writes it as a FrameLogEvent frame.
-// It is safe to call from any goroutine; writes to a yamux stream are
-// serialized by the caller's own synchronization.
+// NOT safe for concurrent use on the same writer. For concurrent access,
+// wrap the writer in a lockedWriter and use its writeLogEvent method instead.
 func WriteLogEvent(w io.Writer, severity, message string) error {
 	evt := LogEvent{
 		TS:       time.Now().UTC().Format(time.RFC3339Nano),
@@ -161,4 +163,61 @@ func WriteLogEvent(w io.Writer, severity, message string) error {
 		return err
 	}
 	return WriteFrame(w, FrameLogEvent, data)
+}
+
+// ErrWriterClosed is returned when writing to a closed lockedWriter.
+var ErrWriterClosed = errors.New("writer closed")
+
+// lockedWriter wraps an io.Writer with a mutex to serialize frame writes.
+// It implements io.Writer so it can be passed to functions expecting io.Writer
+// (e.g., CaptureLoop), while also providing atomic frame-level methods.
+type lockedWriter struct {
+	mu     sync.Mutex
+	w      io.Writer
+	closed bool
+}
+
+// Write implements io.Writer with mutex protection.
+// This makes WriteFrame calls from non-aware callers safe.
+func (lw *lockedWriter) Write(p []byte) (int, error) {
+	lw.mu.Lock()
+	defer lw.mu.Unlock()
+	if lw.closed {
+		return 0, ErrWriterClosed
+	}
+	return lw.w.Write(p)
+}
+
+// writeFrame writes a complete typed frame (header + data) under a single
+// lock hold, preventing interleaving with concurrent writes.
+func (lw *lockedWriter) writeFrame(frameType byte, data []byte) error {
+	lw.mu.Lock()
+	defer lw.mu.Unlock()
+	if lw.closed {
+		return ErrWriterClosed
+	}
+	return WriteFrame(lw.w, frameType, data)
+}
+
+// writeLogEvent serializes a LogEvent and writes it as a FrameLogEvent frame
+// under a single lock hold.
+func (lw *lockedWriter) writeLogEvent(severity, message string) error {
+	evt := LogEvent{
+		TS:       time.Now().UTC().Format(time.RFC3339Nano),
+		Severity: severity,
+		Source:   "agent",
+		Message:  message,
+	}
+	data, err := json.Marshal(evt)
+	if err != nil {
+		return err
+	}
+	return lw.writeFrame(FrameLogEvent, data)
+}
+
+// close marks the writer as closed, preventing further writes.
+func (lw *lockedWriter) close() {
+	lw.mu.Lock()
+	defer lw.mu.Unlock()
+	lw.closed = true
 }
