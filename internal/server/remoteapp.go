@@ -206,6 +206,16 @@ func (h *Handler) handleRemoteApp(w http.ResponseWriter, r *http.Request) {
 	h.metrics.RecordSessionStart(agentID)
 	log.Printf("remoteapp: session started agent=%s session=%s user=%d", agentID, id, ownerID)
 
+	// Inject server event: stream opened.
+	if werr := writeSSELogEvent(w, f, "info", "server", "stream opened to agent"); werr != nil {
+		return
+	}
+
+	// Emit "stream closed" on every exit path (normal disconnect, error, etc.).
+	defer func() {
+		_ = writeSSELogEvent(w, f, "info", "server", "stream closed")
+	}()
+
 	// Reusable buffer for reading frames from the agent (avoids per-frame alloc).
 	readBuf := make([]byte, remoteapp.MaxFrameSize())
 
@@ -213,6 +223,7 @@ func (h *Handler) handleRemoteApp(w http.ResponseWriter, r *http.Request) {
 	// The agent sends:
 	//   - FrameScreenshot (0x01): JPEG data → base64 SSE data frame
 	//   - FrameScreenInfo (0x03): JSON screen info → SSE "screeninfo" event
+	//   - FrameLogEvent (0x04): JSON log event → SSE "log" event (observability)
 	for {
 		stream.SetReadDeadline(time.Now().Add(h.heartbeat))
 		frameType, n, err := remoteapp.ReadFrameInto(stream, readBuf)
@@ -223,6 +234,7 @@ func (h *Handler) handleRemoteApp(w http.ResponseWriter, r *http.Request) {
 				if sess != nil {
 					select {
 					case <-sess.Done():
+						_ = writeSSELogEvent(w, f, "info", "server", "agent session died")
 						return
 					default:
 					}
@@ -233,6 +245,7 @@ func (h *Handler) handleRemoteApp(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			log.Printf("remoteapp: SSE loop read error agent=%s session=%s: %v", agentID, id, err)
+			_ = writeSSELogEvent(w, f, "error", "server", fmt.Sprintf("SSE stream read error: %v", err))
 			return // stream closed
 		}
 
@@ -248,6 +261,30 @@ func (h *Handler) handleRemoteApp(w http.ResponseWriter, r *http.Request) {
 			if werr := writeSSENamedFrame(w, f, "screeninfo", readBuf[:n]); werr != nil {
 				return
 			}
+			h.metrics.RecordConnectBytes(agentID, 0, n)
+		case remoteapp.FrameLogEvent:
+			// Validate and sanitize agent log event before forwarding.
+			var logEvt remoteapp.LogEvent
+			if err := json.Unmarshal(readBuf[:n], &logEvt); err != nil {
+				continue // skip malformed log events
+			}
+			logEvt.Source = "agent" // enforce provenance
+			switch logEvt.Severity {
+			case "info", "warn", "error":
+			default:
+				logEvt.Severity = "info"
+			}
+			if len(logEvt.Message) > 1024 {
+				logEvt.Message = logEvt.Message[:1024]
+			}
+			sanitized, err := json.Marshal(logEvt)
+			if err != nil {
+				continue
+			}
+			if werr := writeSSENamedFrame(w, f, "log", sanitized); werr != nil {
+				return
+			}
+			h.metrics.RecordConnectBytes(agentID, 0, n)
 		default:
 			// Unknown frame type from agent; skip.
 		}
@@ -367,4 +404,20 @@ func writeSSEDataFrame(w io.Writer, f http.Flusher, payload []byte) error {
 // writeSSENamedFrame writes a base64-encoded SSE named event frame.
 func writeSSENamedFrame(w io.Writer, f http.Flusher, eventName string, payload []byte) error {
 	return writeSSEBase64(w, f, eventName, payload)
+}
+
+// writeSSELogEvent writes a server-originated log event as an SSE "log" event.
+// The payload is a JSON LogEvent with source="server".
+func writeSSELogEvent(w io.Writer, f http.Flusher, severity, source, message string) error {
+	evt := remoteapp.LogEvent{
+		TS:       time.Now().UTC().Format(time.RFC3339Nano),
+		Severity: severity,
+		Source:   source,
+		Message:  message,
+	}
+	data, err := json.Marshal(evt)
+	if err != nil {
+		return err
+	}
+	return writeSSENamedFrame(w, f, "log", data)
 }

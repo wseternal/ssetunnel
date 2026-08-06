@@ -110,6 +110,13 @@ interface TransportParams {
   compress: boolean;
 }
 
+interface DesktopLogEntry {
+  ts: string;
+  sev: 'info' | 'warn' | 'error';
+  src: 'agent' | 'server';
+  msg: string;
+}
+
 interface TuningDecision {
   timestamp: string;
   agent_id: string;
@@ -231,6 +238,9 @@ export default function App() {
   const desktopContainerRef = useRef<HTMLDivElement | null>(null);
   const desktopMouseMoveRef = useRef<number>(0); // throttle: last mouse_move timestamp
   const [desktopMetrics, setDesktopMetrics] = useState<MetricSnapshot | null>(null);
+  const [desktopLogs, setDesktopLogs] = useState<DesktopLogEntry[]>([]);
+  const desktopLogRef = useRef<HTMLDivElement | null>(null);
+  const MAX_DESKTOP_LOGS = 200;
 
   const authHeaders = (): HeadersInit => sessionToken ? { Authorization: `Bearer ${sessionToken}` } : {};
 
@@ -559,6 +569,7 @@ export default function App() {
     setScreenWidth(0);
     setScreenHeight(0);
     setDesktopMetrics(null);
+    setDesktopLogs([]);
   }, []);
 
   const connectDesktop = useCallback(async (agentID: string) => {
@@ -620,6 +631,14 @@ export default function App() {
               setScreenWidth(info.width);
               setScreenHeight(info.height);
             } catch { /* ignore */ }
+          } else if (eventType === 'log') {
+            try {
+              const entry: DesktopLogEntry = JSON.parse(atob(eventData));
+              setDesktopLogs(prev => {
+                const next = [...prev, entry];
+                return next.length > MAX_DESKTOP_LOGS ? next.slice(-MAX_DESKTOP_LOGS) : next;
+              });
+            } catch (e) { console.warn('failed to parse log event:', e); }
           } else {
             // Screenshot frame: update image src
             if (desktopImgRef.current) {
@@ -636,6 +655,7 @@ export default function App() {
       setDesktopConnected(false);
       setDesktopSessionId('');
       setDesktopMetrics(null);
+      setDesktopLogs([]);
       if (desktopAbortRef.current === abort) desktopAbortRef.current = null;
     }
   }, [sessionToken]);
@@ -744,6 +764,17 @@ export default function App() {
       if (desktopAbortRef.current) desktopAbortRef.current.abort();
     };
   }, []);
+
+  // Auto-scroll desktop log to bottom on new entries.
+  useEffect(() => {
+    if (desktopLogRef.current) {
+      requestAnimationFrame(() => {
+        if (desktopLogRef.current) {
+          desktopLogRef.current.scrollTop = desktopLogRef.current.scrollHeight;
+        }
+      });
+    }
+  }, [desktopLogs]);
 
   // Validate restored token on mount, or detect auth-disabled mode.
   // Always call /me: if auth is disabled (--disable-auth), the server injects
@@ -1231,6 +1262,41 @@ export default function App() {
               </CardContent>
             </Card>
           ))}
+        </Box>
+      )}
+      {desktopLogs.length > 0 && (
+        <Box sx={{ mt: 1.5 }}>
+          <Typography variant="subtitle2" color="text.secondary" sx={{ mb: 0.5 }}>Activity Log</Typography>
+          <Paper
+            ref={desktopLogRef}
+            sx={{
+              bgcolor: '#1e1e2e',
+              p: 1,
+              borderRadius: 1,
+              maxHeight: 200,
+              overflow: 'auto',
+              fontFamily: '"JetBrains Mono", "Fira Code", Menlo, Monaco, monospace',
+              fontSize: '0.75rem',
+              lineHeight: 1.6,
+            }}
+          >
+            {desktopLogs.map((entry, i) => {
+              const sevColor = entry.sev === 'error' ? '#f44336' : entry.sev === 'warn' ? '#ffa726' : '#e0e0e0';
+              const srcColor = entry.src === 'server' ? '#42a5f5' : '#66bb6a';
+              const time = entry.ts ? new Date(entry.ts).toLocaleTimeString() : '';
+              return (
+                <Box key={`${entry.ts}-${i}`} sx={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                  <span style={{ color: '#666' }}>{time}</span>
+                  {' '}
+                  <span style={{ color: sevColor, fontWeight: 600, textTransform: 'uppercase', minWidth: 40, display: 'inline-block' }}>{entry.sev}</span>
+                  {' '}
+                  <span style={{ color: srcColor }}>[{entry.src}]</span>
+                  {' '}
+                  <span style={{ color: '#cdd6f4' }}>{entry.msg}</span>
+                </Box>
+              );
+            })}
+          </Paper>
         </Box>
       )}
     </Box>

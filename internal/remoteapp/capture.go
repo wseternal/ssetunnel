@@ -24,7 +24,12 @@ const maxConsecutiveCaptureFails = 10
 
 // CaptureLoop captures the primary display at fps frames per second and
 // writes JPEG-encoded screenshots as typed frames to w. It runs until
-// ctx is canceled or w returns an error.
+// ctx is canceled or w returns an error. Log events are also written to w
+// for console observability.
+//
+// If w is a *lockedWriter (as used by ProxyRemoteApp), all frame and log
+// writes are mutex-guarded for concurrent safety. Otherwise, writes use
+// the bare WriteFrame/WriteLogEvent functions (caller must serialize).
 func CaptureLoop(ctx context.Context, w io.Writer, fps int) error {
 	if fps <= 0 {
 		fps = 3
@@ -33,22 +38,44 @@ func CaptureLoop(ctx context.Context, w io.Writer, fps int) error {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
+	// Detect lockedWriter for mutex-guarded writes.
+	lw, _ := w.(*lockedWriter)
+
 	// Reuse buffer across frames to avoid ~150 KB/frame allocation.
 	var buf bytes.Buffer
 	consecutiveFails := 0
 
+	writeLog := func(severity, message string) {
+		if lw != nil {
+			_ = lw.writeLogEvent(severity, message)
+		} else {
+			_ = WriteLogEvent(w, severity, message)
+		}
+	}
+	writeScreenshot := func(data []byte) error {
+		if lw != nil {
+			return lw.writeFrame(FrameScreenshot, data)
+		}
+		return WriteFrame(w, FrameScreenshot, data)
+	}
+
+	writeLog("info", fmt.Sprintf("capture started at %d FPS", fps))
+
 	for {
 		select {
 		case <-ctx.Done():
+			writeLog("info", "capture stopped (context canceled)")
 			return ctx.Err()
 		case <-ticker.C:
 			img, err := robotgo.CaptureImg()
 			if err != nil {
 				consecutiveFails++
 				if consecutiveFails >= maxConsecutiveCaptureFails {
+					writeLog("error", fmt.Sprintf("capture circuit breaker: %d consecutive failures: %v", consecutiveFails, err))
 					return fmt.Errorf("capture failed %d consecutive times: %w", consecutiveFails, err)
 				}
 				log.Printf("remoteapp: capture: %v (attempt %d/%d)", err, consecutiveFails, maxConsecutiveCaptureFails)
+				writeLog("warn", fmt.Sprintf("capture failed (attempt %d/%d): %v", consecutiveFails, maxConsecutiveCaptureFails, err))
 				continue
 			}
 			consecutiveFails = 0 // reset on success
@@ -57,12 +84,14 @@ func CaptureLoop(ctx context.Context, w io.Writer, fps int) error {
 			if err := jpeg.Encode(&buf, img, &jpeg.Options{Quality: jpegQuality}); err != nil {
 				consecutiveFails++
 				if consecutiveFails >= maxConsecutiveCaptureFails {
+					writeLog("error", fmt.Sprintf("jpeg encode circuit breaker: %d consecutive failures: %v", consecutiveFails, err))
 					return fmt.Errorf("jpeg encode failed %d consecutive times: %w", consecutiveFails, err)
 				}
 				log.Printf("remoteapp: jpeg encode: %v (attempt %d/%d)", err, consecutiveFails, maxConsecutiveCaptureFails)
+				writeLog("warn", fmt.Sprintf("jpeg encode failed (attempt %d/%d): %v", consecutiveFails, maxConsecutiveCaptureFails, err))
 				continue
 			}
-			if err := WriteFrame(w, FrameScreenshot, buf.Bytes()); err != nil {
+			if err := writeScreenshot(buf.Bytes()); err != nil {
 				return err
 			}
 		}

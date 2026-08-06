@@ -3,10 +3,13 @@ package server
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/binary"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -240,5 +243,50 @@ func TestHandleRemoteAppUp_InvalidInputType(t *testing.T) {
 	h.handleRemoteAppUp(rec, req)
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("got %d, want %d", rec.Code, http.StatusBadRequest)
+	}
+}
+
+func TestWriteSSELogEvent(t *testing.T) {
+	t.Parallel()
+	rec := httptest.NewRecorder()
+	var f http.Flusher = rec
+
+	if err := writeSSELogEvent(rec, f, "warn", "server", "test message"); err != nil {
+		t.Fatalf("writeSSELogEvent: %v", err)
+	}
+
+	output := rec.Body.String()
+	// Verify SSE format: "event: log\ndata: <base64>\n\n"
+	if !strings.HasPrefix(output, "event: log\ndata: ") {
+		t.Fatalf("unexpected SSE format: %q", output)
+	}
+	if !strings.HasSuffix(output, "\n\n") {
+		t.Fatalf("SSE output should end with double newline: %q", output)
+	}
+
+	// Extract and decode base64 payload.
+	dataLine := strings.TrimPrefix(output, "event: log\ndata: ")
+	dataLine = strings.TrimSuffix(dataLine, "\n\n")
+	decoded, err := base64.StdEncoding.DecodeString(dataLine)
+	if err != nil {
+		t.Fatalf("base64 decode: %v", err)
+	}
+
+	// Unmarshal and validate JSON.
+	var evt remoteapp.LogEvent
+	if err := json.Unmarshal(decoded, &evt); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if evt.Severity != "warn" {
+		t.Errorf("severity: got %q, want %q", evt.Severity, "warn")
+	}
+	if evt.Source != "server" {
+		t.Errorf("source: got %q, want %q", evt.Source, "server")
+	}
+	if evt.Message != "test message" {
+		t.Errorf("message: got %q, want %q", evt.Message, "test message")
+	}
+	if evt.TS == "" {
+		t.Error("timestamp should not be empty")
 	}
 }

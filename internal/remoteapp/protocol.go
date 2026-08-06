@@ -7,10 +7,12 @@ package remoteapp
 
 import (
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"sync"
+	"time"
 )
 
 // Frame type identifiers for the yamux stream wire protocol.
@@ -18,6 +20,7 @@ const (
 	FrameScreenshot byte = 0x01 // Agent → Server: JPEG image data
 	FrameInput      byte = 0x02 // Server → Agent: JSON input event
 	FrameScreenInfo byte = 0x03 // Agent → Server: JSON screen dimensions
+	FrameLogEvent   byte = 0x04 // Agent → Server: JSON log event for console observability
 )
 
 // maxFrameSize caps a single frame at 4 MiB. A 1920×1080 JPEG at quality 50
@@ -42,8 +45,10 @@ var headerPool = sync.Pool{
 
 // WriteFrame writes a typed length-prefixed frame: [type][4-byte BE length][data].
 // The header and payload are written in two calls to avoid allocating a
-// combined buffer (~150 KB per screenshot frame). Yamux streams are not
-// shared between writers on the same stream, so two writes are safe.
+// combined buffer (~150 KB per screenshot frame).
+//
+// Callers MUST ensure exclusive access to w for the duration of this call;
+// the two writes are NOT atomic. Use a lockedWriter for concurrent access.
 func WriteFrame(w io.Writer, frameType byte, data []byte) error {
 	if len(data) > maxFrameSize {
 		return fmt.Errorf("%w: %d bytes", ErrFrameTooLarge, len(data))
@@ -132,4 +137,87 @@ type InputEvent struct {
 type ScreenInfo struct {
 	Width  int `json:"width"`
 	Height int `json:"height"`
+}
+
+// LogEvent carries a structured observability event from the agent to the
+// server, which forwards it to the console frontend as an SSE `event: log`.
+type LogEvent struct {
+	TS       string `json:"ts"`   // ISO-8601 timestamp
+	Severity string `json:"sev"`  // info, warn, error
+	Source   string `json:"src"`  // agent or server
+	Message  string `json:"msg"`
+}
+
+// WriteLogEvent serializes a LogEvent and writes it as a FrameLogEvent frame.
+// NOT safe for concurrent use on the same writer. For concurrent access,
+// wrap the writer in a lockedWriter and use its writeLogEvent method instead.
+func WriteLogEvent(w io.Writer, severity, message string) error {
+	evt := LogEvent{
+		TS:       time.Now().UTC().Format(time.RFC3339Nano),
+		Severity: severity,
+		Source:   "agent",
+		Message:  message,
+	}
+	data, err := json.Marshal(evt)
+	if err != nil {
+		return err
+	}
+	return WriteFrame(w, FrameLogEvent, data)
+}
+
+// ErrWriterClosed is returned when writing to a closed lockedWriter.
+var ErrWriterClosed = errors.New("writer closed")
+
+// lockedWriter wraps an io.Writer with a mutex to serialize frame writes.
+// It implements io.Writer so it can be passed to functions expecting io.Writer
+// (e.g., CaptureLoop), while also providing atomic frame-level methods.
+type lockedWriter struct {
+	mu     sync.Mutex
+	w      io.Writer
+	closed bool
+}
+
+// Write implements io.Writer with mutex protection.
+// This makes WriteFrame calls from non-aware callers safe.
+func (lw *lockedWriter) Write(p []byte) (int, error) {
+	lw.mu.Lock()
+	defer lw.mu.Unlock()
+	if lw.closed {
+		return 0, ErrWriterClosed
+	}
+	return lw.w.Write(p)
+}
+
+// writeFrame writes a complete typed frame (header + data) under a single
+// lock hold, preventing interleaving with concurrent writes.
+func (lw *lockedWriter) writeFrame(frameType byte, data []byte) error {
+	lw.mu.Lock()
+	defer lw.mu.Unlock()
+	if lw.closed {
+		return ErrWriterClosed
+	}
+	return WriteFrame(lw.w, frameType, data)
+}
+
+// writeLogEvent serializes a LogEvent and writes it as a FrameLogEvent frame
+// under a single lock hold.
+func (lw *lockedWriter) writeLogEvent(severity, message string) error {
+	evt := LogEvent{
+		TS:       time.Now().UTC().Format(time.RFC3339Nano),
+		Severity: severity,
+		Source:   "agent",
+		Message:  message,
+	}
+	data, err := json.Marshal(evt)
+	if err != nil {
+		return err
+	}
+	return lw.writeFrame(FrameLogEvent, data)
+}
+
+// close marks the writer as closed, preventing further writes.
+func (lw *lockedWriter) close() {
+	lw.mu.Lock()
+	defer lw.mu.Unlock()
+	lw.closed = true
 }
