@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.6.0](https://github.com/wseternal/ssetunnel/compare/v1.5.0...v1.6.0) (2026-08-06)
+
+
+### Features
+
+* **remoteapp:** input ack + deferred capture for live UX feedback ([#39](https://github.com/wseternal/ssetunnel/issues/39)) ([61947ff](https://github.com/wseternal/ssetunnel/commit/61947ff53e8253b1cddcab4c29a710a62248e907))
+
 ## [1.5.0](https://github.com/wseternal/ssetunnel/compare/v1.4.0...v1.5.0) (2026-08-06)
 
 
