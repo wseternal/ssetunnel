@@ -3,6 +3,7 @@ package remoteapp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -92,30 +93,6 @@ func ProxyRemoteApp(stream net.Conn) {
 		}
 	}
 
-	// ackDetail builds a brief human-readable detail string for the InputAck.
-	ackDetail := func(event InputEvent) string {
-		switch event.Type {
-		case "mouse_click":
-			return event.Button
-		case "mouse_scroll":
-			return event.Direction
-		case "key_tap":
-			if len(event.Modifiers) > 0 {
-				return fmt.Sprintf("%s+%s", event.Modifiers[0], event.Key)
-			}
-			return event.Key
-		case "type_text":
-			if len(event.Text) > 10 {
-				return event.Text[:10] + "..."
-			}
-			return event.Text
-		case "mouse_move":
-			return ""
-		default:
-			return ""
-		}
-	}
-
 	// Main goroutine: read frames from yamux stream → dispatch.
 	for {
 		frameType, data, err := ReadFrame(stream)
@@ -133,10 +110,15 @@ func ProxyRemoteApp(stream net.Conn) {
 				continue
 			}
 
-			// Send InputAck for every input event so the console UI
-			// can display live feedback tooltips on the screenshot.
-			if werr := lw.writeInputAck(InputAck{Type: event.Type, Detail: ackDetail(event)}); werr != nil {
-				log.Printf("remoteapp: writeInputAck: %v", werr)
+			// Send InputAck for action events (skip mouse_move —
+			// no tooltip shown and avoids ~30 acks/sec wire flood).
+			if event.Type != "mouse_move" {
+				if werr := lw.writeInputAck(InputAck{Type: event.Type, Detail: ackDetail(event)}); werr != nil {
+					log.Printf("remoteapp: writeInputAck: %v", werr)
+					if errors.Is(werr, ErrWriterClosed) {
+						break // stream is dead, exit read loop
+					}
+				}
 			}
 
 			// Signal deferred capture: every input resets the 3s timer.
@@ -175,4 +157,33 @@ func ProxyRemoteApp(stream net.Conn) {
 	}
 	lw.close()
 	stream.Close()
+}
+
+// ackDetail builds a brief human-readable detail string for the InputAck.
+func ackDetail(event InputEvent) string {
+	switch event.Type {
+	case "mouse_click":
+		return event.Button
+	case "mouse_scroll":
+		return event.Direction
+	case "mouse_drag":
+		return event.Button
+	case "key_tap":
+		if len(event.Modifiers) > 0 {
+			return fmt.Sprintf("%s+%s", event.Modifiers[0], event.Key)
+		}
+		return event.Key
+	case "key_toggle":
+		return fmt.Sprintf("%s (%s)", event.Key, event.State)
+	case "type_text":
+		runes := []rune(event.Text)
+		if len(runes) > 10 {
+			return string(runes[:10]) + "..."
+		}
+		return event.Text
+	case "mouse_move":
+		return ""
+	default:
+		return ""
+	}
 }

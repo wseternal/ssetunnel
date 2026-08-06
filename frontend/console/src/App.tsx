@@ -667,9 +667,11 @@ export default function App() {
             try {
               const ack = JSON.parse(atob(eventData));
               const label = formatInputAckLabel(ack);
-              setDesktopTooltip(label);
-              if (desktopTooltipTimerRef.current) clearTimeout(desktopTooltipTimerRef.current);
-              desktopTooltipTimerRef.current = setTimeout(() => setDesktopTooltip(''), 1500);
+              if (label) {  // skip empty labels (e.g. mouse_move) to avoid unnecessary re-renders
+                setDesktopTooltip(label);
+                if (desktopTooltipTimerRef.current) clearTimeout(desktopTooltipTimerRef.current);
+                desktopTooltipTimerRef.current = setTimeout(() => setDesktopTooltip(''), 1500);
+              }
             } catch { /* ignore */ }
           } else {
             // Screenshot frame: update image src

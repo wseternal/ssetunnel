@@ -93,7 +93,7 @@ func CaptureLoop(ctx context.Context, w io.Writer, inputReceived <-chan struct{}
 		return writeScreenshot(buf.Bytes())
 	}
 
-	writeLog("info", "capture started (deferred, 3s idle)")
+	writeLog("info", fmt.Sprintf("capture started (deferred, %v idle)", deferDelay))
 
 	// Initial capture on startup so the frontend receives the first frame.
 	if err := captureAndSend(); err != nil {
@@ -121,6 +121,7 @@ func CaptureLoop(ctx context.Context, w io.Writer, inputReceived <-chan struct{}
 			deferTimer.Reset(deferDelay)
 		case <-deferTimer.C:
 			// No input for deferDelay: capture now and restart timer.
+			writeLog("info", "deferred capture fired")
 			if err := captureAndSend(); err != nil {
 				return err
 			}

@@ -312,12 +312,18 @@ func (h *Handler) handleRemoteApp(w http.ResponseWriter, r *http.Request) {
 			h.metrics.RecordConnectBytes(agentID, 0, n)
 		case remoteapp.FrameInputAck:
 			// Forward input acknowledgment to frontend for live tooltip.
-			// Validate JSON before forwarding.
-			if _, ok := remoteapp.ParseInputAck(readBuf[:n]); !ok {
-				log.Printf("remoteapp: malformed input ACK agent=%s session=%s", agentID, id)
+			// Validate and sanitize (re-marshal) before forwarding,
+			// matching the LogEvent sanitization pattern.
+			ack, ok := remoteapp.ParseInputAck(readBuf[:n])
+			if !ok {
+				log.Printf("remoteapp: malformed input ACK (%d bytes) agent=%s session=%s", n, agentID, id)
 				continue
 			}
-			if werr := writeSSENamedFrame(w, f, "inputack", readBuf[:n]); werr != nil {
+			sanitized, err := json.Marshal(ack)
+			if err != nil {
+				continue
+			}
+			if werr := writeSSENamedFrame(w, f, "inputack", sanitized); werr != nil {
 				return
 			}
 			h.metrics.RecordConnectBytes(agentID, 0, n)

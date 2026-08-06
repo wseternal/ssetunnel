@@ -156,10 +156,14 @@ func WriteInputAck(w io.Writer, ack InputAck) error {
 }
 
 // ParseInputAck deserializes an InputAck from a FrameInputAck payload.
-// Returns ok=false if the payload is not valid JSON.
+// Returns ok=false if the payload is not valid JSON or the Type is not
+// a recognized input event type.
 func ParseInputAck(data []byte) (InputAck, bool) {
 	var ack InputAck
 	if err := json.Unmarshal(data, &ack); err != nil {
+		return InputAck{}, false
+	}
+	if !ValidateInputEventType(ack.Type) {
 		return InputAck{}, false
 	}
 	return ack, true

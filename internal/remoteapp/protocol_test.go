@@ -442,3 +442,41 @@ func TestLockedWriterWriteInputAck(t *testing.T) {
 		t.Errorf("ack: got %+v", ack)
 	}
 }
+
+func TestAckDetail(t *testing.T) {
+	tests := []struct {
+		name  string
+		event InputEvent
+		want  string
+	}{
+		{"click", InputEvent{Type: "mouse_click", Button: "left"}, "left"},
+		{"right click", InputEvent{Type: "mouse_click", Button: "right"}, "right"},
+		{"scroll", InputEvent{Type: "mouse_scroll", Direction: "up"}, "up"},
+		{"drag", InputEvent{Type: "mouse_drag", Button: "left"}, "left"},
+		{"key_tap with mod", InputEvent{Type: "key_tap", Key: "c", Modifiers: []string{"ctrl"}}, "ctrl+c"},
+		{"key_tap no mod", InputEvent{Type: "key_tap", Key: "a"}, "a"},
+		{"key_toggle", InputEvent{Type: "key_toggle", Key: "shift", State: "down"}, "shift (down)"},
+		{"type_text short", InputEvent{Type: "type_text", Text: "hi"}, "hi"},
+		{"type_text long", InputEvent{Type: "type_text", Text: "1234567890abc"}, "1234567890..."},
+		{"type_text unicode", InputEvent{Type: "type_text", Text: "\u4f60\u597d\u4e16\u754c"}, "\u4f60\u597d\u4e16\u754c"},
+		{"type_text long unicode", InputEvent{Type: "type_text", Text: "\u4f60\u597d\u4e16\u754c\u4f60\u597d\u4e16\u754c\u4f60\u597d\u4e16\u754c"}, "\u4f60\u597d\u4e16\u754c\u4f60\u597d\u4e16\u754c\u4f60\u597d..."},
+		{"mouse_move", InputEvent{Type: "mouse_move"}, ""},
+		{"unknown", InputEvent{Type: "unknown_type"}, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ackDetail(tt.event)
+			if got != tt.want {
+				t.Errorf("ackDetail(%+v) = %q, want %q", tt.event, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestParseInputAckRejectsUnknownType(t *testing.T) {
+	data, _ := json.Marshal(InputAck{Type: "bogus_type", Detail: "x"})
+	_, ok := ParseInputAck(data)
+	if ok {
+		t.Error("expected ok=false for unknown input event type")
+	}
+}
