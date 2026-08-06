@@ -188,3 +188,35 @@ func TestInputEventJSON(t *testing.T) {
 		t.Errorf("unexpected event: %+v", evt)
 	}
 }
+
+func TestWriteLogEventRoundTrip(t *testing.T) {
+	var buf bytes.Buffer
+	if err := WriteLogEvent(&buf, "warn", "capture failed"); err != nil {
+		t.Fatalf("WriteLogEvent: %v", err)
+	}
+
+	frameType, data, err := ReadFrame(&buf)
+	if err != nil {
+		t.Fatalf("ReadFrame: %v", err)
+	}
+	if frameType != FrameLogEvent {
+		t.Errorf("frame type: got 0x%02x, want 0x%02x", frameType, FrameLogEvent)
+	}
+
+	var evt LogEvent
+	if err := json.Unmarshal(data, &evt); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if evt.Severity != "warn" {
+		t.Errorf("severity: got %q, want %q", evt.Severity, "warn")
+	}
+	if evt.Source != "agent" {
+		t.Errorf("source: got %q, want %q", evt.Source, "agent")
+	}
+	if evt.Message != "capture failed" {
+		t.Errorf("message: got %q, want %q", evt.Message, "capture failed")
+	}
+	if evt.TS == "" {
+		t.Error("timestamp should not be empty")
+	}
+}

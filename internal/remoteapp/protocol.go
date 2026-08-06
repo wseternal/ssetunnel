@@ -7,10 +7,12 @@ package remoteapp
 
 import (
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"sync"
+	"time"
 )
 
 // Frame type identifiers for the yamux stream wire protocol.
@@ -18,6 +20,7 @@ const (
 	FrameScreenshot byte = 0x01 // Agent → Server: JPEG image data
 	FrameInput      byte = 0x02 // Server → Agent: JSON input event
 	FrameScreenInfo byte = 0x03 // Agent → Server: JSON screen dimensions
+	FrameLogEvent   byte = 0x04 // Agent → Server: JSON log event for console observability
 )
 
 // maxFrameSize caps a single frame at 4 MiB. A 1920×1080 JPEG at quality 50
@@ -132,4 +135,30 @@ type InputEvent struct {
 type ScreenInfo struct {
 	Width  int `json:"width"`
 	Height int `json:"height"`
+}
+
+// LogEvent carries a structured observability event from the agent to the
+// server, which forwards it to the console frontend as an SSE `event: log`.
+type LogEvent struct {
+	TS       string `json:"ts"`   // ISO-8601 timestamp
+	Severity string `json:"sev"`  // info, warn, error
+	Source   string `json:"src"`  // agent or server
+	Message  string `json:"msg"`
+}
+
+// WriteLogEvent serializes a LogEvent and writes it as a FrameLogEvent frame.
+// It is safe to call from any goroutine; writes to a yamux stream are
+// serialized by the caller's own synchronization.
+func WriteLogEvent(w io.Writer, severity, message string) error {
+	evt := LogEvent{
+		TS:       time.Now().UTC().Format(time.RFC3339Nano),
+		Severity: severity,
+		Source:   "agent",
+		Message:  message,
+	}
+	data, err := json.Marshal(evt)
+	if err != nil {
+		return err
+	}
+	return WriteFrame(w, FrameLogEvent, data)
 }

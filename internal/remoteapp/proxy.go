@@ -3,6 +3,7 @@ package remoteapp
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net"
 	"sync"
@@ -39,6 +40,9 @@ func ProxyRemoteApp(stream net.Conn) {
 		return
 	}
 
+	// Emit observability event: session started.
+	_ = WriteLogEvent(stream, "info", fmt.Sprintf("session started (screen=%dx%d)", screenW, screenH))
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -50,6 +54,7 @@ func ProxyRemoteApp(stream net.Conn) {
 		defer wg.Done()
 		if err := CaptureLoop(ctx, stream, defaultFPS); err != nil && err != context.Canceled {
 			log.Printf("remoteapp: capture loop: %v", err)
+			_ = WriteLogEvent(stream, "error", fmt.Sprintf("capture loop exited: %v", err))
 		}
 	}()
 
@@ -59,17 +64,23 @@ func ProxyRemoteApp(stream net.Conn) {
 		if err != nil {
 			break // stream closed
 		}
-		if frameType != FrameInput {
+		switch frameType {
+		case FrameInput:
+			var event InputEvent
+			if err := json.Unmarshal(data, &event); err != nil {
+				log.Printf("remoteapp: bad input JSON: %v", err)
+				_ = WriteLogEvent(stream, "warn", fmt.Sprintf("bad input JSON: %v", err))
+				continue
+			}
+			if err := DispatchInput(event, screenW, screenH); err != nil {
+				log.Printf("remoteapp: dispatch input: %v", err)
+				_ = WriteLogEvent(stream, "warn", fmt.Sprintf("input dispatch failed: %v", err))
+			} else {
+				_ = WriteLogEvent(stream, "info", fmt.Sprintf("input dispatched: %s", event.Type))
+			}
+		default:
 			log.Printf("remoteapp: unexpected frame type: 0x%02x", frameType)
-			continue
-		}
-		var event InputEvent
-		if err := json.Unmarshal(data, &event); err != nil {
-			log.Printf("remoteapp: bad input JSON: %v", err)
-			continue
-		}
-		if err := DispatchInput(event, screenW, screenH); err != nil {
-			log.Printf("remoteapp: dispatch input: %v", err)
+			_ = WriteLogEvent(stream, "warn", fmt.Sprintf("unexpected frame type: 0x%02x", frameType))
 		}
 	}
 
@@ -79,4 +90,5 @@ func ProxyRemoteApp(stream net.Conn) {
 	stream.Close()
 	wg.Wait()
 	log.Printf("remoteapp: session ended")
+	_ = WriteLogEvent(stream, "info", "session ended")
 }
