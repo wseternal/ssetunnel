@@ -366,3 +366,117 @@ func TestParseScreenshotAckWrongSize(t *testing.T) {
 		t.Error("expected ok=false for nil payload")
 	}
 }
+
+func TestInputAckRoundTrip(t *testing.T) {
+	tests := []struct {
+		name string
+		ack  InputAck
+	}{
+		{"click", InputAck{Type: "mouse_click", Detail: "left"}},
+		{"key_tap with modifier", InputAck{Type: "key_tap", Detail: "ctrl+c"}},
+		{"type_text", InputAck{Type: "type_text", Detail: "hello"}},
+		{"mouse_move no detail", InputAck{Type: "mouse_move"}},
+		{"scroll", InputAck{Type: "mouse_scroll", Detail: "down"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			if err := WriteInputAck(&buf, tt.ack); err != nil {
+				t.Fatalf("WriteInputAck: %v", err)
+			}
+			frameType, data, err := ReadFrame(&buf)
+			if err != nil {
+				t.Fatalf("ReadFrame: %v", err)
+			}
+			if frameType != FrameInputAck {
+				t.Errorf("frame type: got 0x%02x, want 0x%02x", frameType, FrameInputAck)
+			}
+			got, ok := ParseInputAck(data)
+			if !ok {
+				t.Fatal("ParseInputAck: ok=false")
+			}
+			if got.Type != tt.ack.Type {
+				t.Errorf("type: got %q, want %q", got.Type, tt.ack.Type)
+			}
+			if got.Detail != tt.ack.Detail {
+				t.Errorf("detail: got %q, want %q", got.Detail, tt.ack.Detail)
+			}
+		})
+	}
+}
+
+func TestParseInputAckMalformed(t *testing.T) {
+	_, ok := ParseInputAck([]byte("not-json"))
+	if ok {
+		t.Error("expected ok=false for non-JSON payload")
+	}
+	_, ok = ParseInputAck(nil)
+	if ok {
+		t.Error("expected ok=false for nil payload")
+	}
+}
+
+func TestLockedWriterWriteInputAck(t *testing.T) {
+	var buf bytes.Buffer
+	lw := &lockedWriter{w: &buf}
+	if err := lw.writeInputAck(InputAck{Type: "mouse_click", Detail: "right"}); err != nil {
+		t.Fatalf("writeInputAck: %v", err)
+	}
+	lw.close()
+	if err := lw.writeInputAck(InputAck{Type: "mouse_click"}); err != ErrWriterClosed {
+		t.Errorf("writeInputAck after close: got %v, want %v", err, ErrWriterClosed)
+	}
+	// Verify the written frame is parseable.
+	ft, data, err := ReadFrame(bytes.NewReader(buf.Bytes()))
+	if err != nil {
+		t.Fatalf("ReadFrame: %v", err)
+	}
+	if ft != FrameInputAck {
+		t.Errorf("frame type: got 0x%02x, want 0x%02x", ft, FrameInputAck)
+	}
+	ack, ok := ParseInputAck(data)
+	if !ok {
+		t.Fatal("ParseInputAck: ok=false")
+	}
+	if ack.Type != "mouse_click" || ack.Detail != "right" {
+		t.Errorf("ack: got %+v", ack)
+	}
+}
+
+func TestAckDetail(t *testing.T) {
+	tests := []struct {
+		name  string
+		event InputEvent
+		want  string
+	}{
+		{"click", InputEvent{Type: "mouse_click", Button: "left"}, "left"},
+		{"right click", InputEvent{Type: "mouse_click", Button: "right"}, "right"},
+		{"scroll", InputEvent{Type: "mouse_scroll", Direction: "up"}, "up"},
+		{"drag", InputEvent{Type: "mouse_drag", Button: "left"}, "left"},
+		{"key_tap with mod", InputEvent{Type: "key_tap", Key: "c", Modifiers: []string{"ctrl"}}, "ctrl+c"},
+		{"key_tap no mod", InputEvent{Type: "key_tap", Key: "a"}, "a"},
+		{"key_toggle", InputEvent{Type: "key_toggle", Key: "shift", State: "down"}, "shift (down)"},
+		{"type_text short", InputEvent{Type: "type_text", Text: "hi"}, "hi"},
+		{"type_text long", InputEvent{Type: "type_text", Text: "1234567890abc"}, "1234567890..."},
+		{"type_text unicode", InputEvent{Type: "type_text", Text: "\u4f60\u597d\u4e16\u754c"}, "\u4f60\u597d\u4e16\u754c"},
+		{"type_text long unicode", InputEvent{Type: "type_text", Text: "\u4f60\u597d\u4e16\u754c\u4f60\u597d\u4e16\u754c\u4f60\u597d\u4e16\u754c"}, "\u4f60\u597d\u4e16\u754c\u4f60\u597d\u4e16\u754c\u4f60\u597d..."},
+		{"mouse_move", InputEvent{Type: "mouse_move"}, ""},
+		{"unknown", InputEvent{Type: "unknown_type"}, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ackDetail(tt.event)
+			if got != tt.want {
+				t.Errorf("ackDetail(%+v) = %q, want %q", tt.event, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestParseInputAckRejectsUnknownType(t *testing.T) {
+	data, _ := json.Marshal(InputAck{Type: "bogus_type", Detail: "x"})
+	_, ok := ParseInputAck(data)
+	if ok {
+		t.Error("expected ok=false for unknown input event type")
+	}
+}

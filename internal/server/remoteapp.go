@@ -230,6 +230,7 @@ func (h *Handler) handleRemoteApp(w http.ResponseWriter, r *http.Request) {
 	//   - FrameScreenshot (0x01): [8-byte BE timestamp][JPEG] → base64 SSE data frame + ACK
 	//   - FrameScreenInfo (0x03): JSON screen info → SSE "screeninfo" event
 	//   - FrameLogEvent (0x04): JSON log event → SSE "log" event (observability)
+	//   - FrameInputAck (0x06): JSON input ack → SSE "inputack" event (UI tooltip)
 	for {
 		stream.SetReadDeadline(time.Now().Add(h.heartbeat))
 		frameType, n, err := remoteapp.ReadFrameInto(stream, readBuf)
@@ -306,6 +307,23 @@ func (h *Handler) handleRemoteApp(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			if werr := writeSSENamedFrame(w, f, "log", sanitized); werr != nil {
+				return
+			}
+			h.metrics.RecordConnectBytes(agentID, 0, n)
+		case remoteapp.FrameInputAck:
+			// Forward input acknowledgment to frontend for live tooltip.
+			// Validate and sanitize (re-marshal) before forwarding,
+			// matching the LogEvent sanitization pattern.
+			ack, ok := remoteapp.ParseInputAck(readBuf[:n])
+			if !ok {
+				log.Printf("remoteapp: malformed input ACK (%d bytes) agent=%s session=%s", n, agentID, id)
+				continue
+			}
+			sanitized, err := json.Marshal(ack)
+			if err != nil {
+				continue
+			}
+			if werr := writeSSENamedFrame(w, f, "inputack", sanitized); werr != nil {
 				return
 			}
 			h.metrics.RecordConnectBytes(agentID, 0, n)

@@ -3,6 +3,7 @@ package remoteapp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -15,10 +16,13 @@ import (
 // in one goroutine while reading frames from the stream in the main
 // goroutine. A lockedWriter serializes all writes to the stream.
 //
-// The capture loop is signal-driven: it captures immediately when an
-// "action" input event (click, key tap, scroll, etc.) arrives via the
-// captureNow channel, and falls back to a 15-second idle timer when no
-// actions are received. Mouse-move events do NOT trigger captures.
+// The capture loop uses deferred capture: every input event signals the
+// inputReceived channel, resetting a 3-second deferral timer. A screenshot
+// is taken only after the input stream has been quiet for 3 seconds. This
+// avoids uploading screenshots that will be immediately stale.
+//
+// For every input event received, the proxy sends a FrameInputAck back to
+// the server so the console UI can display live feedback tooltips.
 //
 // The server sends FrameScreenshotAck frames to acknowledge receipt of
 // screenshots. The proxy tracks the latest ACK timestamp for observability.
@@ -57,10 +61,10 @@ func ProxyRemoteApp(stream net.Conn) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// captureNow signals the capture loop to take an immediate screenshot.
-	// Buffered 1 so the proxy never blocks on send; extra signals are
-	// coalesced (the capture loop drains on each receive).
-	captureNow := make(chan struct{}, 1)
+	// inputReceived signals the capture loop that an input event arrived,
+	// resetting its 3-second deferral timer. Buffered 1 so the proxy never
+	// blocks on send; extra signals are coalesced.
+	inputReceived := make(chan struct{}, 1)
 
 	// lastAckUnixMilli tracks the latest server-ACK'd screenshot timestamp
 	// for observability. Loaded at session teardown for the final log line.
@@ -72,7 +76,7 @@ func ProxyRemoteApp(stream net.Conn) {
 	// Goroutine: capture screenshots → yamux stream.
 	go func() {
 		defer wg.Done()
-		if err := CaptureLoop(ctx, lw, captureNow); err != nil && err != context.Canceled {
+		if err := CaptureLoop(ctx, lw, inputReceived); err != nil && err != context.Canceled {
 			log.Printf("remoteapp: capture loop: %v", err)
 			if werr := lw.writeLogEvent("error", fmt.Sprintf("capture loop exited: %v", err)); werr != nil {
 				log.Printf("remoteapp: writeLogEvent: %v", werr)
@@ -80,10 +84,11 @@ func ProxyRemoteApp(stream net.Conn) {
 		}
 	}()
 
-	// signalCapture sends a non-blocking signal to the capture loop.
-	signalCapture := func() {
+	// signalInput notifies the capture loop that an input event arrived,
+	// resetting its deferral timer. Non-blocking; extra signals coalesce.
+	signalInput := func() {
 		select {
-		case captureNow <- struct{}{}:
+		case inputReceived <- struct{}{}:
 		default: // already pending; coalesce
 		}
 	}
@@ -104,20 +109,26 @@ func ProxyRemoteApp(stream net.Conn) {
 				}
 				continue
 			}
+
+			// Send InputAck for action events (skip mouse_move —
+			// no tooltip shown and avoids ~30 acks/sec wire flood).
+			if event.Type != "mouse_move" {
+				if werr := lw.writeInputAck(InputAck{Type: event.Type, Detail: ackDetail(event)}); werr != nil {
+					log.Printf("remoteapp: writeInputAck: %v", werr)
+					if errors.Is(werr, ErrWriterClosed) {
+						break // stream is dead, exit read loop
+					}
+				}
+			}
+
+			// Signal deferred capture: every input resets the 3s timer.
+			signalInput()
+
 			if err := DispatchInput(event, screenW, screenH); err != nil {
 				log.Printf("remoteapp: dispatch input: %v", err)
 				if werr := lw.writeLogEvent("warn", fmt.Sprintf("input dispatch failed: %v", err)); werr != nil {
 					log.Printf("remoteapp: writeLogEvent: %v", werr)
 				}
-			} else {
-				// Signal capture on action events (everything except mouse_move).
-				if event.Type != "mouse_move" {
-					signalCapture()
-					if werr := lw.writeLogEvent("info", "input dispatched: "+event.Type); werr != nil {
-						log.Printf("remoteapp: writeLogEvent: %v", werr)
-					}
-				}
-				// mouse_move: dispatch silently, no capture signal.
 			}
 		case FrameScreenshotAck:
 			if ts, ok := ParseScreenshotAck(data); ok {
@@ -146,4 +157,33 @@ func ProxyRemoteApp(stream net.Conn) {
 	}
 	lw.close()
 	stream.Close()
+}
+
+// ackDetail builds a brief human-readable detail string for the InputAck.
+func ackDetail(event InputEvent) string {
+	switch event.Type {
+	case "mouse_click":
+		return event.Button
+	case "mouse_scroll":
+		return event.Direction
+	case "mouse_drag":
+		return event.Button
+	case "key_tap":
+		if len(event.Modifiers) > 0 {
+			return fmt.Sprintf("%s+%s", event.Modifiers[0], event.Key)
+		}
+		return event.Key
+	case "key_toggle":
+		return fmt.Sprintf("%s (%s)", event.Key, event.State)
+	case "type_text":
+		runes := []rune(event.Text)
+		if len(runes) > 10 {
+			return string(runes[:10]) + "..."
+		}
+		return event.Text
+	case "mouse_move":
+		return ""
+	default:
+		return ""
+	}
 }

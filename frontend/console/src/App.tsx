@@ -241,8 +241,27 @@ export default function App() {
   const [desktopLogs, setDesktopLogs] = useState<DesktopLogEntry[]>([]);
   const desktopLogRef = useRef<HTMLDivElement | null>(null);
   const MAX_DESKTOP_LOGS = 200;
+  // Input ack tooltip: shows live feedback when the agent receives input events.
+  const [desktopTooltip, setDesktopTooltip] = useState<string>('');
+  const desktopTooltipTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const authHeaders = (): HeadersInit => sessionToken ? { Authorization: `Bearer ${sessionToken}` } : {};
+
+  // Format an InputAck into a brief human-readable tooltip label.
+  const formatInputAckLabel = (ack: { type?: string; detail?: string }): string => {
+    const t = ack.type ?? '';
+    const d = ack.detail ?? '';
+    switch (t) {
+      case 'mouse_click': return d ? `Click ${d}` : 'Click';
+      case 'mouse_scroll': return d ? `Scroll ${d}` : 'Scroll';
+      case 'mouse_move': return '';
+      case 'key_tap': return d ? `Key ${d}` : 'Key tap';
+      case 'key_toggle': return d ? `Toggle ${d}` : 'Toggle';
+      case 'type_text': return d ? `Type "${d}"` : 'Type';
+      case 'mouse_drag': return d ? `Drag ${d}` : 'Drag';
+      default: return t;
+    }
+  };
 
   // Check for 401 responses on authenticated requests and trigger logout.
   const checkAuth = (res: Response): boolean => {
@@ -570,6 +589,11 @@ export default function App() {
     setScreenHeight(0);
     setDesktopMetrics(null);
     setDesktopLogs([]);
+    setDesktopTooltip('');
+    if (desktopTooltipTimerRef.current) {
+      clearTimeout(desktopTooltipTimerRef.current);
+      desktopTooltipTimerRef.current = null;
+    }
   }, []);
 
   const connectDesktop = useCallback(async (agentID: string) => {
@@ -639,6 +663,16 @@ export default function App() {
                 return next.length > MAX_DESKTOP_LOGS ? next.slice(-MAX_DESKTOP_LOGS) : next;
               });
             } catch (e) { console.warn('failed to parse log event:', e); }
+          } else if (eventType === 'inputack') {
+            try {
+              const ack = JSON.parse(atob(eventData));
+              const label = formatInputAckLabel(ack);
+              if (label) {  // skip empty labels (e.g. mouse_move) to avoid unnecessary re-renders
+                setDesktopTooltip(label);
+                if (desktopTooltipTimerRef.current) clearTimeout(desktopTooltipTimerRef.current);
+                desktopTooltipTimerRef.current = setTimeout(() => setDesktopTooltip(''), 1500);
+              }
+            } catch { /* ignore */ }
           } else {
             // Screenshot frame: update image src
             if (desktopImgRef.current) {
@@ -656,6 +690,11 @@ export default function App() {
       setDesktopSessionId('');
       setDesktopMetrics(null);
       setDesktopLogs([]);
+      setDesktopTooltip('');
+      if (desktopTooltipTimerRef.current) {
+        clearTimeout(desktopTooltipTimerRef.current);
+        desktopTooltipTimerRef.current = null;
+      }
       if (desktopAbortRef.current === abort) desktopAbortRef.current = null;
     }
   }, [sessionToken]);
@@ -1221,6 +1260,27 @@ export default function App() {
         onWheel={(e) => desktopConnected && desktopAbortRef.current && handleDesktopMouse(e as unknown as React.MouseEvent<HTMLDivElement>, desktopSessionId, desktopAbortRef.current.signal)}
         onMouseMove={(e) => desktopConnected && desktopAbortRef.current && handleDesktopMouse(e, desktopSessionId, desktopAbortRef.current.signal)}
       >
+        {desktopTooltip && (
+          <Chip
+            label={desktopTooltip}
+            size="small"
+            sx={{
+              position: 'absolute',
+              top: 8,
+              right: 8,
+              zIndex: 10,
+              bgcolor: 'rgba(0, 0, 0, 0.7)',
+              color: '#fff',
+              fontFamily: 'monospace',
+              fontSize: '0.75rem',
+              animation: 'fadeIn 0.15s ease-in',
+              '@keyframes fadeIn': {
+                from: { opacity: 0 },
+                to: { opacity: 1 },
+              },
+            }}
+          />
+        )}
         {!desktopConnected && !desktopAgent && (
           <Typography variant="body1" color="text.secondary">
             Select an agent and click Connect to start remote desktop

@@ -22,6 +22,7 @@ const (
 	FrameScreenInfo    byte = 0x03 // Agent → Server: JSON screen dimensions
 	FrameLogEvent      byte = 0x04 // Agent → Server: JSON log event for console observability
 	FrameScreenshotAck byte = 0x05 // Server → Agent: 8-byte BE UnixMilli (ACK for received screenshot)
+	FrameInputAck      byte = 0x06 // Agent → Server: JSON ack for received input event
 )
 
 // ScreenshotTimestampSize is the byte length of the Unix-millisecond timestamp
@@ -135,6 +136,37 @@ type InputEvent struct {
 	Modifiers []string `json:"modifiers,omitempty"` // modifier keys: ctrl, shift, alt, cmd/super
 	Text      string   `json:"text,omitempty"`      // text for type_text
 	State     string   `json:"state,omitempty"`     // down, up (for key_toggle, mouse_drag)
+}
+
+// InputAck is sent from the agent to the server to acknowledge receipt
+// of an input event. The server forwards it as an SSE "inputack" event
+// so the console UI can display live feedback on the screenshot.
+type InputAck struct {
+	Type   string `json:"type"`             // echoed input event type (mouse_click, key_tap, ...)
+	Detail string `json:"detail,omitempty"` // brief human-readable detail (button, key name, ...)
+}
+
+// WriteInputAck serializes an InputAck and writes it as a FrameInputAck frame.
+func WriteInputAck(w io.Writer, ack InputAck) error {
+	data, err := json.Marshal(ack)
+	if err != nil {
+		return err
+	}
+	return WriteFrame(w, FrameInputAck, data)
+}
+
+// ParseInputAck deserializes an InputAck from a FrameInputAck payload.
+// Returns ok=false if the payload is not valid JSON or the Type is not
+// a recognized input event type.
+func ParseInputAck(data []byte) (InputAck, bool) {
+	var ack InputAck
+	if err := json.Unmarshal(data, &ack); err != nil {
+		return InputAck{}, false
+	}
+	if !ValidateInputEventType(ack.Type) {
+		return InputAck{}, false
+	}
+	return ack, true
 }
 
 // ScreenInfo carries the agent's screen dimensions, sent as the first
@@ -288,6 +320,16 @@ func (lw *lockedWriter) writeScreenshotWithTimestamp(jpegData []byte, ts time.Ti
 		return ErrWriterClosed
 	}
 	return WriteScreenshotWithTimestamp(lw.w, jpegData, ts)
+}
+
+// writeInputAck writes a FrameInputAck under a single lock hold.
+func (lw *lockedWriter) writeInputAck(ack InputAck) error {
+	lw.mu.Lock()
+	defer lw.mu.Unlock()
+	if lw.closed {
+		return ErrWriterClosed
+	}
+	return WriteInputAck(lw.w, ack)
 }
 
 // close marks the writer as closed, preventing further writes.
