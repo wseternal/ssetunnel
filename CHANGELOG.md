@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.5.0](https://github.com/wseternal/ssetunnel/compare/v1.4.0...v1.5.0) (2026-08-06)
+
+
+### Features
+
+* **remoteapp:** smart screenshot capture with signal-driven model ([#37](https://github.com/wseternal/ssetunnel/issues/37)) ([a9ea99b](https://github.com/wseternal/ssetunnel/commit/a9ea99ba3ff6cc94d94a627a9d7a8ed2af99ee23))
+
 ## [1.4.0](https://github.com/wseternal/ssetunnel/compare/v1.3.1...v1.4.0) (2026-08-06)
 
 
