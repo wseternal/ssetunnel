@@ -366,3 +366,79 @@ func TestParseScreenshotAckWrongSize(t *testing.T) {
 		t.Error("expected ok=false for nil payload")
 	}
 }
+
+func TestInputAckRoundTrip(t *testing.T) {
+	tests := []struct {
+		name string
+		ack  InputAck
+	}{
+		{"click", InputAck{Type: "mouse_click", Detail: "left"}},
+		{"key_tap with modifier", InputAck{Type: "key_tap", Detail: "ctrl+c"}},
+		{"type_text", InputAck{Type: "type_text", Detail: "hello"}},
+		{"mouse_move no detail", InputAck{Type: "mouse_move"}},
+		{"scroll", InputAck{Type: "mouse_scroll", Detail: "down"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			if err := WriteInputAck(&buf, tt.ack); err != nil {
+				t.Fatalf("WriteInputAck: %v", err)
+			}
+			frameType, data, err := ReadFrame(&buf)
+			if err != nil {
+				t.Fatalf("ReadFrame: %v", err)
+			}
+			if frameType != FrameInputAck {
+				t.Errorf("frame type: got 0x%02x, want 0x%02x", frameType, FrameInputAck)
+			}
+			got, ok := ParseInputAck(data)
+			if !ok {
+				t.Fatal("ParseInputAck: ok=false")
+			}
+			if got.Type != tt.ack.Type {
+				t.Errorf("type: got %q, want %q", got.Type, tt.ack.Type)
+			}
+			if got.Detail != tt.ack.Detail {
+				t.Errorf("detail: got %q, want %q", got.Detail, tt.ack.Detail)
+			}
+		})
+	}
+}
+
+func TestParseInputAckMalformed(t *testing.T) {
+	_, ok := ParseInputAck([]byte("not-json"))
+	if ok {
+		t.Error("expected ok=false for non-JSON payload")
+	}
+	_, ok = ParseInputAck(nil)
+	if ok {
+		t.Error("expected ok=false for nil payload")
+	}
+}
+
+func TestLockedWriterWriteInputAck(t *testing.T) {
+	var buf bytes.Buffer
+	lw := &lockedWriter{w: &buf}
+	if err := lw.writeInputAck(InputAck{Type: "mouse_click", Detail: "right"}); err != nil {
+		t.Fatalf("writeInputAck: %v", err)
+	}
+	lw.close()
+	if err := lw.writeInputAck(InputAck{Type: "mouse_click"}); err != ErrWriterClosed {
+		t.Errorf("writeInputAck after close: got %v, want %v", err, ErrWriterClosed)
+	}
+	// Verify the written frame is parseable.
+	ft, data, err := ReadFrame(bytes.NewReader(buf.Bytes()))
+	if err != nil {
+		t.Fatalf("ReadFrame: %v", err)
+	}
+	if ft != FrameInputAck {
+		t.Errorf("frame type: got 0x%02x, want 0x%02x", ft, FrameInputAck)
+	}
+	ack, ok := ParseInputAck(data)
+	if !ok {
+		t.Fatal("ParseInputAck: ok=false")
+	}
+	if ack.Type != "mouse_click" || ack.Detail != "right" {
+		t.Errorf("ack: got %+v", ack)
+	}
+}

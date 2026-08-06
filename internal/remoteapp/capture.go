@@ -22,27 +22,28 @@ const jpegQuality = 50
 // before the loop gives up and returns an error (circuit breaker).
 const maxConsecutiveCaptureFails = 10
 
-// idleTimeout is the fallback capture interval when no action events are
-// received. If only mouse_move events arrive (which don't change the screen),
-// the capture loop suppresses action-driven captures. This timer ensures at
-// least one screenshot is sent every idleTimeout to keep the frontend updated.
-const idleTimeout = 15 * time.Second
+// deferDelay is the minimum idle period before capturing. While input events
+// are flowing, each one resets this timer; capture only fires after the
+// stream has been quiet for deferDelay. This avoids uploading screenshots
+// that will be immediately stale because more input is in flight.
+const deferDelay = 3 * time.Second
 
 // CaptureLoop captures the primary display and writes JPEG-encoded
 // screenshots as typed frames to w. It runs until ctx is canceled or w
 // returns an error. Log events are also written to w for observability.
 //
-// Capture is triggered by two signals:
-//   - captureNow channel: immediate capture on action events (clicks, keys)
-//   - 15-second idle timer: fallback when no action events are received
+// Capture uses a deferred-capture strategy: every input event signals the
+// inputReceived channel, which resets a deferDelay timer. A screenshot is
+// taken only after the timer expires (i.e., no input for deferDelay). This
+// avoids uploading screenshots that will be immediately stale while the
+// user is actively interacting.
 //
-// Mouse-move events do NOT trigger captures (they don't change the screen).
-// When a captureNow signal fires, the idle timer is reset so captures don't
-// double-fire.
+// An initial capture is performed on startup so the frontend receives the
+// first frame immediately.
 //
 // If w is a *lockedWriter (as used by ProxyRemoteApp), all frame and log
 // writes are mutex-guarded for concurrent safety.
-func CaptureLoop(ctx context.Context, w io.Writer, captureNow <-chan struct{}) error {
+func CaptureLoop(ctx context.Context, w io.Writer, inputReceived <-chan struct{}) error {
 	// Detect lockedWriter for mutex-guarded writes.
 	lw, _ := w.(*lockedWriter)
 
@@ -92,36 +93,38 @@ func CaptureLoop(ctx context.Context, w io.Writer, captureNow <-chan struct{}) e
 		return writeScreenshot(buf.Bytes())
 	}
 
-	writeLog("info", "capture started (signal-driven, 15s idle fallback)")
+	writeLog("info", "capture started (deferred, 3s idle)")
 
-	// Initial capture on startup.
+	// Initial capture on startup so the frontend receives the first frame.
 	if err := captureAndSend(); err != nil {
 		return err
 	}
 
-	idleTimer := time.NewTimer(idleTimeout)
-	defer idleTimer.Stop()
+	deferTimer := time.NewTimer(deferDelay)
+	defer deferTimer.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
 			writeLog("info", "capture stopped (context canceled)")
 			return ctx.Err()
-		case <-captureNow:
-			// Immediate capture on action event: capture now,
-			// then reset idle timer. Go 1.23+ Reset is safe
-			// on expired timers.
+		case <-inputReceived:
+			// Input event received: defer capture. Stop the running
+			// timer and restart it. Capture will fire only after the
+			// input stream has been quiet for deferDelay.
+			if !deferTimer.Stop() {
+				select {
+				case <-deferTimer.C:
+				default:
+				}
+			}
+			deferTimer.Reset(deferDelay)
+		case <-deferTimer.C:
+			// No input for deferDelay: capture now and restart timer.
 			if err := captureAndSend(); err != nil {
 				return err
 			}
-			idleTimer.Reset(idleTimeout)
-		case <-idleTimer.C:
-			// Idle fallback: capture to keep frontend updated when
-			// no action events have been received for idleTimeout.
-			if err := captureAndSend(); err != nil {
-				return err
-			}
-			idleTimer.Reset(idleTimeout)
+			deferTimer.Reset(deferDelay)
 		}
 	}
 }

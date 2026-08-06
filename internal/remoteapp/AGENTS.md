@@ -25,8 +25,9 @@ Typed length-prefixed frames: `[type][4-byte BE length][data]`.
 | `FrameScreenInfo` | 0x03 | Agent → Server | JSON `ScreenInfo{width,height}` |
 | `FrameLogEvent` | 0x04 | Agent → Server | JSON `LogEvent{ts,sev,src,msg}` |
 | `FrameScreenshotAck` | 0x05 | Server → Agent | 8-byte BE UnixMilli (ACK for received screenshot) |
+| `FrameInputAck` | 0x06 | Agent → Server | JSON `InputAck{type,detail}` |
 
-> **Breaking change:** `FrameScreenshot` payload now includes an 8-byte timestamp prefix. Agent and server must run the same version — mismatched versions will produce corrupt screenshots during a rolling deployment.
+> **Breaking change:** `FrameScreenshot` payload includes an 8-byte timestamp prefix. `FrameInputAck` (0x06) is a new frame type. Agent and server must run the same version — mismatched versions will produce corrupt screenshots or unknown frame types during a rolling deployment.
 
 Max frame size: 4 MiB (`maxFrameSize`). `WriteFrame` constructs the header and payload in two separate writes to avoid allocating a combined ~150 KB buffer. Callers MUST ensure exclusive access to the writer for the duration of a `WriteFrame` call; the two writes are NOT atomic. Use `lockedWriter` for concurrent access. `ReadFrame` reads header then payload with `io.ReadFull`.
 
@@ -39,12 +40,11 @@ Max frame size: 4 MiB (`maxFrameSize`). `WriteFrame` constructs the header and p
 
 ## Capture Loop
 
-`CaptureLoop(ctx, w, captureNow <-chan struct{})` captures the primary display and writes timestamped JPEG screenshots as typed frames. It is signal-driven:
+`CaptureLoop(ctx, w, inputReceived <-chan struct{})` captures the primary display and writes timestamped JPEG screenshots as typed frames. It uses a **deferred-capture strategy**:
 
-- **`captureNow` channel**: Immediate capture on action events (clicks, keys, scrolls). Buffered 1 for coalescing.
-- **15-second idle timer**: Fallback capture when no action events are received, keeping the frontend updated.
-- **Mouse-move suppression**: Mouse-move events do NOT trigger captures (they don't change the screen).
-- **Initial capture**: One screenshot on startup before entering the select loop.
+- **`inputReceived` channel**: Every input event signals this channel, resetting a 3-second deferral timer. Buffered 1 for coalescing.
+- **3-second deferral timer (`deferDelay`)**: Capture only fires after no input events have been received for 3 seconds. While the user is actively interacting, screenshots are suppressed to avoid uploading immediately-stale frames.
+- **Initial capture**: One screenshot on startup before entering the select loop, so the frontend receives the first frame immediately.
 - **Buffer reuse**: Single `bytes.Buffer` reused across frames (~150 KB/frame savings).
 - **Circuit breaker**: After `maxConsecutiveCaptureFails` (10) consecutive failures, returns an error.
 - **JPEG quality**: 50 balances bandwidth (~50–150 KB per 1080p frame) and clarity.
@@ -86,8 +86,8 @@ Typed error types: `InvalidKeyError`, `InvalidModifierError`, `TextTooLongError`
 `ProxyRemoteApp(stream net.Conn)` orchestrates:
 1. Wrap stream in a `lockedWriter` for concurrent-safe frame writes
 2. Send `FrameScreenInfo` with initial screen dimensions
-3. Create `captureNow` channel (buffered 1) and start `CaptureLoop` goroutine
-4. Main loop: `ReadFrame` → dispatch input events; signal `captureNow` on action events (all except `mouse_move`); handle `FrameScreenshotAck` from server
+3. Create `inputReceived` channel (buffered 1) and start `CaptureLoop` goroutine
+4. Main loop: `ReadFrame` → dispatch input events; for every `FrameInput`, send `FrameInputAck` back with event type and detail; signal `inputReceived` on all input events (deferring capture); handle `FrameScreenshotAck` from server
 5. On stream close: cancel capture, `ReleaseAllInputs`, wait for capture goroutine, emit "session ended" log event, close `lockedWriter`, close stream
 
 ## Concurrency Model
@@ -98,6 +98,7 @@ The agent→server direction has concurrent writers: the capture goroutine (scre
 - `writeFrame(frameType, data)` — mutex held across header+data `WriteFrame` (atomic frame construction)
 - `writeLogEvent(severity, message)` — build `LogEvent` JSON + `writeFrame` under mutex
 - `writeScreenshotWithTimestamp(jpegData, ts)` — build timestamped payload + `writeFrame` under mutex
+- `writeInputAck(ack InputAck)` — marshal `InputAck` JSON + `writeFrame` under mutex
 - `close()` — set `closed=true` under mutex, preventing further writes
 
 `CaptureLoop` detects `*lockedWriter` via type assertion to use mutex-guarded methods; otherwise falls back to bare `WriteFrame`/`WriteLogEvent` (caller must serialize).
@@ -106,11 +107,15 @@ The agent→server direction has concurrent writers: the capture goroutine (scre
 
 Agent-side `lockedWriter.writeLogEvent` and server-side `writeSSELogEvent` produce `LogEvent` JSON frames:
 
-1. Agent emits log events for: session start/stop, capture start/stop, input dispatch (except `mouse_move`), errors
+1. Agent emits log events for: session start/stop, capture start/stop, errors
 2. Server validates agent log events: enforce `src=agent`, validate `sev` ∈ {info, warn, error}, cap `msg` at 1024 chars
 3. Server injects its own events: stream opened, stream closed, agent session died
 4. Server forwards validated events as SSE `event: log` frames to the console frontend
 5. Frontend renders log entries with severity-based coloring and auto-scroll
+
+## Input Acknowledgment Flow
+
+When the agent receives a `FrameInput` from the server, it sends a `FrameInputAck` back containing the event type and a brief detail string. The server forwards this as an SSE `event: inputack` named event to the console frontend, which displays a live tooltip overlay on the current screenshot. This provides immediate visual feedback that the agent received the user's input, even before the next screenshot arrives (which is deferred by 3 seconds while input is flowing).
 
 ## Rules
 * **lockedWriter for concurrent writes**: All agent→server frame writes go through a `lockedWriter` that serializes access with a mutex. The capture goroutine and main goroutine share the same `lockedWriter`.

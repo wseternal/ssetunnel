@@ -296,6 +296,64 @@ func TestScreenshotTimestampStripAndAckRoundTrip(t *testing.T) {
 	}
 }
 
+func TestWriteSSEInputAckEvent(t *testing.T) {
+	t.Parallel()
+	rec := httptest.NewRecorder()
+	var f http.Flusher = rec
+
+	// Build a valid InputAck JSON payload.
+	ack := remoteapp.InputAck{Type: "mouse_click", Detail: "left"}
+	ackData, err := json.Marshal(ack)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if err := writeSSENamedFrame(rec, f, "inputack", ackData); err != nil {
+		t.Fatalf("writeSSENamedFrame: %v", err)
+	}
+
+	output := rec.Body.String()
+	if !strings.HasPrefix(output, "event: inputack\ndata: ") {
+		t.Fatalf("unexpected SSE format: %q", output)
+	}
+	if !strings.HasSuffix(output, "\n\n") {
+		t.Fatalf("SSE output should end with double newline: %q", output)
+	}
+
+	// Extract and decode base64 payload.
+	dataLine := strings.TrimPrefix(output, "event: inputack\ndata: ")
+	dataLine = strings.TrimSuffix(dataLine, "\n\n")
+	decoded, err := base64.StdEncoding.DecodeString(dataLine)
+	if err != nil {
+		t.Fatalf("base64 decode: %v", err)
+	}
+
+	var got remoteapp.InputAck
+	if err := json.Unmarshal(decoded, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.Type != "mouse_click" {
+		t.Errorf("type: got %q, want %q", got.Type, "mouse_click")
+	}
+	if got.Detail != "left" {
+		t.Errorf("detail: got %q, want %q", got.Detail, "left")
+	}
+}
+
+func TestInputAckParseValidation(t *testing.T) {
+	t.Parallel()
+	// Valid InputAck should parse.
+	valid, _ := json.Marshal(remoteapp.InputAck{Type: "key_tap", Detail: "ctrl+c"})
+	_, ok := remoteapp.ParseInputAck(valid)
+	if !ok {
+		t.Error("expected ok=true for valid InputAck")
+	}
+	// Malformed payload should fail.
+	_, ok = remoteapp.ParseInputAck([]byte("not-json"))
+	if ok {
+		t.Error("expected ok=false for malformed payload")
+	}
+}
+
 func TestWriteSSELogEvent(t *testing.T) {
 	t.Parallel()
 	rec := httptest.NewRecorder()
