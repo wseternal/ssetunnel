@@ -135,7 +135,7 @@ tasks:
       SIGN_BIN: '{{.SIGN_BIN | default (printf "%s/%s-%s-%s" .DIST .BIN OS ARCH)}}'
     cmds:
       - codesign --force --deep --sign "{{.SIGN_IDENTITY}}" "{{.SIGN_BIN}}"
-      - codesign --verify --verbose "{{.SIGN_BIN}}"
+      - codesign -d -vv "{{.SIGN_BIN}}"
 
   # ── Frontend ────────────────────────────────────────────────────────
 

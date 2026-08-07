@@ -42,6 +42,8 @@ import SecurityIcon from '@mui/icons-material/Security';
 import ContentCopyIcon from '@mui/icons-material/ContentCopy';
 import TerminalIcon from '@mui/icons-material/Terminal';
 import DesktopWindowsIcon from '@mui/icons-material/DesktopWindows';
+import FullscreenIcon from '@mui/icons-material/Fullscreen';
+import FullscreenExitIcon from '@mui/icons-material/FullscreenExit';
 import { Terminal, type IDisposable } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
@@ -233,6 +235,9 @@ export default function App() {
   const [desktopSessionId, setDesktopSessionId] = useState<string>('');
   const [screenWidth, setScreenWidth] = useState<number>(0);
   const [screenHeight, setScreenHeight] = useState<number>(0);
+  const screenWidthRef = useRef<number>(0);
+  const screenHeightRef = useRef<number>(0);
+  const [isFullscreen, setIsFullscreen] = useState(false);
   const desktopAbortRef = useRef<AbortController | null>(null);
   const desktopImgRef = useRef<HTMLImageElement | null>(null);
   const desktopContainerRef = useRef<HTMLDivElement | null>(null);
@@ -587,6 +592,8 @@ export default function App() {
     setDesktopSessionId('');
     setScreenWidth(0);
     setScreenHeight(0);
+    screenWidthRef.current = 0;
+    screenHeightRef.current = 0;
     setDesktopMetrics(null);
     setDesktopLogs([]);
     setDesktopTooltip('');
@@ -654,6 +661,8 @@ export default function App() {
               const info = JSON.parse(atob(eventData));
               setScreenWidth(info.width);
               setScreenHeight(info.height);
+              screenWidthRef.current = info.width;
+              screenHeightRef.current = info.height;
             } catch { /* ignore */ }
           } else if (eventType === 'log') {
             try {
@@ -688,6 +697,8 @@ export default function App() {
     } finally {
       setDesktopConnected(false);
       setDesktopSessionId('');
+      screenWidthRef.current = 0;
+      screenHeightRef.current = 0;
       setDesktopMetrics(null);
       setDesktopLogs([]);
       setDesktopTooltip('');
@@ -699,17 +710,21 @@ export default function App() {
     }
   }, [sessionToken]);
 
-  // Desktop mouse handler: translate browser coords to agent screen coords
+  // Desktop mouse handler: translate browser coords to agent screen coords.
+  // Uses refs for screen dimensions to avoid stale-closure issues when the
+  // screeninfo SSE event arrives after the handler was created.
   const handleDesktopMouse = useCallback((e: React.MouseEvent<HTMLDivElement>, sid: string, signal: AbortSignal) => {
     const container = desktopContainerRef.current;
     const img = desktopImgRef.current;
-    if (!container || !img || !screenWidth || !screenHeight) return;
+    const sw = screenWidthRef.current;
+    const sh = screenHeightRef.current;
+    if (!container || !img || !sw || !sh) return;
 
     const rect = img.getBoundingClientRect();
-    const scaleX = screenWidth / rect.width;
-    const scaleY = screenHeight / rect.height;
-    const x = Math.max(0, Math.min(screenWidth - 1, Math.round((e.clientX - rect.left) * scaleX)));
-    const y = Math.max(0, Math.min(screenHeight - 1, Math.round((e.clientY - rect.top) * scaleY)));
+    const scaleX = sw / rect.width;
+    const scaleY = sh / rect.height;
+    const x = Math.max(0, Math.min(sw - 1, Math.round((e.clientX - rect.left) * scaleX)));
+    const y = Math.max(0, Math.min(sh - 1, Math.round((e.clientY - rect.top) * scaleY)));
 
     if (e.type === 'click') {
       sendDesktopInput(sid, { type: 'mouse_click', x, y, button: 'left' }, signal);
@@ -726,7 +741,7 @@ export default function App() {
       desktopMouseMoveRef.current = now;
       sendDesktopInput(sid, { type: 'mouse_move', x, y }, signal);
     }
-  }, [screenWidth, screenHeight, sendDesktopInput]);
+  }, [sendDesktopInput]);
 
   // Desktop keyboard handler
   const handleDesktopKey = useCallback((e: KeyboardEvent, sid: string, signal: AbortSignal) => {
@@ -774,6 +789,21 @@ export default function App() {
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
   }, [desktopConnected, desktopSessionId, handleDesktopKey]);
+
+  // Sync isFullscreen state with the browser Fullscreen API.
+  useEffect(() => {
+    const handler = () => setIsFullscreen(!!document.fullscreenElement);
+    document.addEventListener('fullscreenchange', handler);
+    return () => document.removeEventListener('fullscreenchange', handler);
+  }, []);
+
+  const toggleFullscreen = useCallback(() => {
+    if (document.fullscreenElement) {
+      document.exitFullscreen();
+    } else {
+      desktopContainerRef.current?.requestFullscreen();
+    }
+  }, []);
 
   // Poll per-agent metrics while desktop is connected.
   useEffect(() => {
@@ -1281,6 +1311,25 @@ export default function App() {
             }}
           />
         )}
+        {desktopConnected && (
+          <Tooltip title={isFullscreen ? 'Exit fullscreen' : 'Fullscreen'}>
+            <IconButton
+              size="small"
+              onClick={(e) => { e.stopPropagation(); toggleFullscreen(); }}
+              sx={{
+                position: 'absolute',
+                top: 8,
+                right: desktopTooltip ? 140 : 8,
+                zIndex: 11,
+                bgcolor: 'rgba(0, 0, 0, 0.5)',
+                color: '#fff',
+                '&:hover': { bgcolor: 'rgba(0, 0, 0, 0.7)' },
+              }}
+            >
+              {isFullscreen ? <FullscreenExitIcon fontSize="small" /> : <FullscreenIcon fontSize="small" />}
+            </IconButton>
+          </Tooltip>
+        )}
         {!desktopConnected && !desktopAgent && (
           <Typography variant="body1" color="text.secondary">
             Select an agent and click Connect to start remote desktop
@@ -1291,7 +1340,7 @@ export default function App() {
           alt="Remote Desktop"
           style={{
             maxWidth: '100%',
-            maxHeight: '80vh',
+            maxHeight: isFullscreen ? '100vh' : '80vh',
             display: desktopConnected ? 'block' : 'none',
             userSelect: 'none',
             pointerEvents: 'none',
