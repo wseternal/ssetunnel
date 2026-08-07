@@ -166,6 +166,9 @@ const SESSION_COLUMNS: AdminTableColumn<Session>[] = [
   { key: 'status', label: 'Status', render: () => <StatusPill tone="success" label="Active" /> },
 ];
 
+const MAGNIFIER_ZOOM = 3;
+const MAGNIFIER_SIZE = 180;
+
 export default function App() {
   const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [sessionToken, setSessionToken] = useState(() => localStorage.getItem('sessionToken') || '');
@@ -247,13 +250,12 @@ export default function App() {
 
   // Magnifier lens state
   const [magnifierOn, setMagnifierOn] = useState(false);
-  const magnifierPosRef = useRef<{ x: number; y: number; imgSrc: string }>({ x: 0, y: 0, imgSrc: '' });
+  const magnifierPosRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
   const magnifierRafRef = useRef<number>(0);
+  const magnifierLensRef = useRef<HTMLDivElement | null>(null);
   const [desktopLogs, setDesktopLogs] = useState<DesktopLogEntry[]>([]);
   const desktopLogRef = useRef<HTMLDivElement | null>(null);
   const MAX_DESKTOP_LOGS = 200;
-  const MAGNIFIER_ZOOM = 3;
-  const MAGNIFIER_SIZE = 180;
   // Input ack tooltip: shows live feedback when the agent receives input events.
   const [desktopTooltip, setDesktopTooltip] = useState<string>('');
   const desktopTooltipTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -605,7 +607,9 @@ export default function App() {
     setDesktopMetrics(null);
     setDesktopLogs([]);
     setDesktopTooltip('');
+    // Reset magnifier on disconnect.
     setMagnifierOn(false);
+    magnifierPosRef.current = { x: 0, y: 0 };
     if (magnifierRafRef.current) {
       cancelAnimationFrame(magnifierRafRef.current);
       magnifierRafRef.current = 0;
@@ -717,7 +721,9 @@ export default function App() {
       setDesktopMetrics(null);
       setDesktopLogs([]);
       setDesktopTooltip('');
+      // Reset magnifier on disconnect.
       setMagnifierOn(false);
+      magnifierPosRef.current = { x: 0, y: 0 };
       if (magnifierRafRef.current) {
         cancelAnimationFrame(magnifierRafRef.current);
         magnifierRafRef.current = 0;
@@ -831,22 +837,37 @@ export default function App() {
     if (!magnifierOn) return;
     const img = desktopImgRef.current;
     if (!img) return;
+    // Only store cursor coords; rect and imgSrc are read fresh inside rAF.
     const rect = img.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const y = e.clientY - rect.top;
-    magnifierPosRef.current = { x, y, imgSrc: img.src };
+    magnifierPosRef.current.x = e.clientX - rect.left;
+    magnifierPosRef.current.y = e.clientY - rect.top;
     if (!magnifierRafRef.current) {
       magnifierRafRef.current = requestAnimationFrame(() => {
         magnifierRafRef.current = 0;
-        const el = document.getElementById('desktop-magnifier-lens');
-        if (!el) return;
-        const pos = magnifierPosRef.current;
-        el.style.left = `${pos.x}px`;
-        el.style.top = `${pos.y}px`;
-        el.style.backgroundImage = pos.imgSrc ? `url(${pos.imgSrc})` : 'none';
-        el.style.backgroundPosition = `${-pos.x * MAGNIFIER_ZOOM + MAGNIFIER_SIZE / 2}px ${-pos.y * MAGNIFIER_ZOOM + MAGNIFIER_SIZE / 2}px`;
-        el.style.backgroundSize = `${rect.width * MAGNIFIER_ZOOM}px ${rect.height * MAGNIFIER_ZOOM}px`;
-        el.style.display = (pos.x >= 0 && pos.x <= rect.width && pos.y >= 0 && pos.y <= rect.height) ? 'block' : 'none';
+        try {
+          const el = magnifierLensRef.current;
+          if (!el) return;
+          const currentImg = desktopImgRef.current;
+          if (!currentImg) return;
+          // Re-read rect inside rAF to avoid stale geometry after resize.
+          const currentRect = currentImg.getBoundingClientRect();
+          const pos = magnifierPosRef.current;
+          // Account for image offset within the flex container (C1 fix).
+          const container = desktopContainerRef.current;
+          const containerRect = container?.getBoundingClientRect();
+          const imgOffsetX = currentRect.left - (containerRect?.left ?? 0);
+          const imgOffsetY = currentRect.top - (containerRect?.top ?? 0);
+          el.style.left = `${pos.x + imgOffsetX}px`;
+          el.style.top = `${pos.y + imgOffsetY}px`;
+          // Dirty-check: only reassign backgroundImage when src actually changed.
+          const newBg = currentImg.src ? `url("${currentImg.src}")` : 'none';
+          if (el.style.backgroundImage !== newBg) el.style.backgroundImage = newBg;
+          el.style.backgroundPosition = `${-pos.x * MAGNIFIER_ZOOM + MAGNIFIER_SIZE / 2}px ${-pos.y * MAGNIFIER_ZOOM + MAGNIFIER_SIZE / 2}px`;
+          el.style.backgroundSize = `${currentRect.width * MAGNIFIER_ZOOM}px ${currentRect.height * MAGNIFIER_ZOOM}px`;
+          el.style.display = (pos.x >= 0 && pos.x <= currentRect.width && pos.y >= 0 && pos.y <= currentRect.height) ? 'block' : 'none';
+        } catch (err) {
+          console.warn('[magnifier] rAF update failed:', err);
+        }
       });
     }
   }, [magnifierOn]);
@@ -854,6 +875,8 @@ export default function App() {
   // Clean up magnifier rAF on unmount.
   useEffect(() => {
     return () => {
+      setMagnifierOn(false);
+      magnifierPosRef.current = { x: 0, y: 0 };
       if (magnifierRafRef.current) cancelAnimationFrame(magnifierRafRef.current);
     };
   }, []);
@@ -1383,7 +1406,13 @@ export default function App() {
                 size="small"
                 onClick={(e) => {
                   e.stopPropagation();
-                  setMagnifierOn(prev => !prev);
+                  setMagnifierOn(prev => {
+                    if (prev) {
+                      // Reset position when toggling off to avoid stale coords on re-toggle.
+                      magnifierPosRef.current = { x: 0, y: 0 };
+                    }
+                    return !prev;
+                  });
                 }}
                 sx={{
                   bgcolor: magnifierOn ? 'rgba(0, 0, 0, 0.8)' : 'rgba(0, 0, 0, 0.5)',
@@ -1417,13 +1446,14 @@ export default function App() {
         {/* Magnifier lens overlay */}
         {magnifierOn && desktopConnected && (
           <div
-            id="desktop-magnifier-lens"
+            ref={magnifierLensRef}
             style={{
               position: 'absolute',
               width: MAGNIFIER_SIZE,
               height: MAGNIFIER_SIZE,
               borderRadius: '50%',
               border: '2px solid rgba(255, 255, 255, 0.6)',
+              outline: '1px solid rgba(0, 0, 0, 0.3)',
               boxShadow: '0 2px 12px rgba(0, 0, 0, 0.5)',
               pointerEvents: 'none',
               zIndex: 15,
@@ -1431,6 +1461,7 @@ export default function App() {
               transform: 'translate(-50%, -50%)',
               backgroundRepeat: 'no-repeat',
               overflow: 'hidden',
+              willChange: 'transform',
             }}
           />
         )}
