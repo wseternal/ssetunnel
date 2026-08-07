@@ -44,7 +44,7 @@ type Agent struct {
 
 **Dynamic target mode**: When `Target` is empty, the agent reads the target address from the yamux stream header (first `\n`-terminated line) and connects to that address for each stream. The `readerConn` wrapper preserves any bytes buffered beyond the header line for the subsequent `io.Copy`.
 
-**Shell target**: When the stream header is `__shell__`, the agent spawns a local shell (`$SHELL` or `/bin/sh`) with a PTY via `proxyShell`. PTY resize messages are NUL-prefixed JSON parsed from the stream.
+**Shell target**: When the stream header is `__shell__`, the agent spawns a local shell (`$SHELL` or `/bin/sh`) as a **login shell** (argv[0] prefixed with `-`) with a PTY via `proxyShell`. This sources login startup files (`.zprofile`, `.profile`, `/etc/profile`) in addition to interactive startup files (`.zshrc`, `.bashrc`), matching `sshd` behavior. PTY resize messages are NUL-prefixed JSON parsed from the stream.
 
 ## Reconnect Strategy
 
