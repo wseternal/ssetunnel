@@ -697,6 +697,8 @@ export default function App() {
     } finally {
       setDesktopConnected(false);
       setDesktopSessionId('');
+      setScreenWidth(0);
+      setScreenHeight(0);
       screenWidthRef.current = 0;
       screenHeightRef.current = 0;
       setDesktopMetrics(null);
@@ -801,7 +803,7 @@ export default function App() {
     if (document.fullscreenElement) {
       document.exitFullscreen();
     } else {
-      desktopContainerRef.current?.requestFullscreen();
+      desktopContainerRef.current?.requestFullscreen().catch(() => {});
     }
   }, []);
 
