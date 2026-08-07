@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.6.1](https://github.com/wseternal/ssetunnel/compare/v1.6.0...v1.6.1) (2026-08-07)
+
+
+### Bug Fixes
+
+* add code signing tasks to Taskfile.yml ([f1fdb23](https://github.com/wseternal/ssetunnel/commit/f1fdb23665129ee649c61315415e3d5e4e6183e8))
+* address multi-agent-review findings for remoteapp UX ([dbc1098](https://github.com/wseternal/ssetunnel/commit/dbc109881c0629dd77e0e1ce3e8ca03a1e94d639))
+* magnifier and handle display-off gracefully ([#42](https://github.com/wseternal/ssetunnel/issues/42)) ([3800793](https://github.com/wseternal/ssetunnel/commit/38007939fd884c1b5a5aa28e664c2a65572b314f))
+* remoteapp fullscreen button event propagation + tooltip overlap ([3565f07](https://github.com/wseternal/ssetunnel/commit/3565f07cef326aa3e0c44e20b71919a7943b5d41))
+* remoteapp UX — fullscreen toggle + mouse coord accuracy ([3565f07](https://github.com/wseternal/ssetunnel/commit/3565f07cef326aa3e0c44e20b71919a7943b5d41))
+* **remoteapp:** exclude robotgo-dependent files from purego builds ([#43](https://github.com/wseternal/ssetunnel/issues/43)) ([f0c0c25](https://github.com/wseternal/ssetunnel/commit/f0c0c251d1054cec6c7ce186aef089442024c0a1))
+
 ## [1.6.0](https://github.com/wseternal/ssetunnel/compare/v1.5.0...v1.6.0) (2026-08-06)
 
 
