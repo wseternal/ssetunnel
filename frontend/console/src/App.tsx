@@ -1368,7 +1368,16 @@ export default function App() {
           />
         )}
         {desktopConnected && (
-          <>
+          <Box
+            sx={{
+              position: 'absolute',
+              top: 8,
+              right: desktopTooltip ? 140 : 8,
+              zIndex: 11,
+              display: 'flex',
+              gap: 0.5,
+            }}
+          >
             <Tooltip title={magnifierOn ? 'Disable magnifier' : 'Magnifier'}>
               <IconButton
                 size="small"
@@ -1382,14 +1391,9 @@ export default function App() {
                   }
                 }}
                 sx={{
-                  position: 'absolute',
-                  top: 8,
-                  right: desktopTooltip ? 140 : 8,
-                  zIndex: 12,
                   bgcolor: magnifierOn ? 'rgba(0, 0, 0, 0.8)' : 'rgba(0, 0, 0, 0.5)',
                   color: magnifierOn ? 'primary.main' : '#fff',
                   '&:hover': { bgcolor: 'rgba(0, 0, 0, 0.7)' },
-                  transform: 'translateX(-36px)',
                 }}
               >
                 <ZoomInIcon fontSize="small" />
@@ -1400,10 +1404,6 @@ export default function App() {
                 size="small"
                 onClick={(e) => { e.stopPropagation(); toggleFullscreen(); }}
                 sx={{
-                  position: 'absolute',
-                  top: 8,
-                  right: desktopTooltip ? 140 : 8,
-                  zIndex: 11,
                   bgcolor: 'rgba(0, 0, 0, 0.5)',
                   color: '#fff',
                   '&:hover': { bgcolor: 'rgba(0, 0, 0, 0.7)' },
@@ -1412,7 +1412,7 @@ export default function App() {
                 {isFullscreen ? <FullscreenExitIcon fontSize="small" /> : <FullscreenIcon fontSize="small" />}
               </IconButton>
             </Tooltip>
-          </>
+          </Box>
         )}
         {!desktopConnected && !desktopAgent && (
           <Typography variant="body1" color="text.secondary">
