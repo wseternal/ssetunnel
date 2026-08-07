@@ -44,6 +44,7 @@ import TerminalIcon from '@mui/icons-material/Terminal';
 import DesktopWindowsIcon from '@mui/icons-material/DesktopWindows';
 import FullscreenIcon from '@mui/icons-material/Fullscreen';
 import FullscreenExitIcon from '@mui/icons-material/FullscreenExit';
+import ZoomInIcon from '@mui/icons-material/ZoomIn';
 import { Terminal, type IDisposable } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
@@ -165,6 +166,9 @@ const SESSION_COLUMNS: AdminTableColumn<Session>[] = [
   { key: 'status', label: 'Status', render: () => <StatusPill tone="success" label="Active" /> },
 ];
 
+const MAGNIFIER_ZOOM = 3;
+const MAGNIFIER_SIZE = 180;
+
 export default function App() {
   const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [sessionToken, setSessionToken] = useState(() => localStorage.getItem('sessionToken') || '');
@@ -243,6 +247,13 @@ export default function App() {
   const desktopContainerRef = useRef<HTMLDivElement | null>(null);
   const desktopMouseMoveRef = useRef<number>(0); // throttle: last mouse_move timestamp
   const [desktopMetrics, setDesktopMetrics] = useState<MetricSnapshot | null>(null);
+
+  // Magnifier lens state
+  const [magnifierOn, setMagnifierOn] = useState(false);
+  const magnifierPosRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
+  const magnifierRafRef = useRef<number>(0);
+  const magnifierLensRef = useRef<HTMLDivElement | null>(null);
+  const magnifierLastSrcRef = useRef<string>('');
   const [desktopLogs, setDesktopLogs] = useState<DesktopLogEntry[]>([]);
   const desktopLogRef = useRef<HTMLDivElement | null>(null);
   const MAX_DESKTOP_LOGS = 200;
@@ -583,11 +594,10 @@ export default function App() {
     }
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const disconnectDesktop = useCallback(() => {
-    if (desktopAbortRef.current) {
-      desktopAbortRef.current.abort();
-      desktopAbortRef.current = null;
-    }
+  // resetDesktopState clears all desktop session state (magnifier, tooltip,
+  // metrics, connection). Called by both disconnectDesktop and the finally
+  // block of connectDesktop to avoid duplicated cleanup.
+  const resetDesktopState = useCallback(() => {
     setDesktopConnected(false);
     setDesktopSessionId('');
     setScreenWidth(0);
@@ -597,11 +607,26 @@ export default function App() {
     setDesktopMetrics(null);
     setDesktopLogs([]);
     setDesktopTooltip('');
+    setMagnifierOn(false);
+    magnifierPosRef.current = { x: 0, y: 0 };
+    magnifierLastSrcRef.current = '';
+    if (magnifierRafRef.current) {
+      cancelAnimationFrame(magnifierRafRef.current);
+      magnifierRafRef.current = 0;
+    }
     if (desktopTooltipTimerRef.current) {
       clearTimeout(desktopTooltipTimerRef.current);
       desktopTooltipTimerRef.current = null;
     }
   }, []);
+
+  const disconnectDesktop = useCallback(() => {
+    if (desktopAbortRef.current) {
+      desktopAbortRef.current.abort();
+      desktopAbortRef.current = null;
+    }
+    resetDesktopState();
+  }, [resetDesktopState]);
 
   const connectDesktop = useCallback(async (agentID: string) => {
     if (!agentID || !sessionToken) return;
@@ -695,22 +720,10 @@ export default function App() {
         setError(`Remote desktop connection error: ${e}`);
       }
     } finally {
-      setDesktopConnected(false);
-      setDesktopSessionId('');
-      setScreenWidth(0);
-      setScreenHeight(0);
-      screenWidthRef.current = 0;
-      screenHeightRef.current = 0;
-      setDesktopMetrics(null);
-      setDesktopLogs([]);
-      setDesktopTooltip('');
-      if (desktopTooltipTimerRef.current) {
-        clearTimeout(desktopTooltipTimerRef.current);
-        desktopTooltipTimerRef.current = null;
-      }
+      resetDesktopState();
       if (desktopAbortRef.current === abort) desktopAbortRef.current = null;
     }
-  }, [sessionToken]);
+  }, [sessionToken, resetDesktopState]);
 
   // Desktop mouse handler: translate browser coords to agent screen coords.
   // Uses refs for screen dimensions to avoid stale-closure issues when the
@@ -805,6 +818,57 @@ export default function App() {
     } else {
       desktopContainerRef.current?.requestFullscreen().catch(() => {});
     }
+  }, []);
+
+  // Magnifier: track cursor position over the screenshot and update the
+  // lens overlay via requestAnimationFrame (no React re-renders).
+  const handleDesktopMouseMoveForMagnifier = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+    if (!magnifierOn) return;
+    const img = desktopImgRef.current;
+    if (!img) return;
+    // Only store cursor coords; rect and imgSrc are read fresh inside rAF.
+    const rect = img.getBoundingClientRect();
+    magnifierPosRef.current.x = e.clientX - rect.left;
+    magnifierPosRef.current.y = e.clientY - rect.top;
+    if (!magnifierRafRef.current) {
+      magnifierRafRef.current = requestAnimationFrame(() => {
+        magnifierRafRef.current = 0;
+        try {
+          const el = magnifierLensRef.current;
+          if (!el) return;
+          const currentImg = desktopImgRef.current;
+          if (!currentImg) return;
+          // Re-read rect inside rAF to avoid stale geometry after resize.
+          const currentRect = currentImg.getBoundingClientRect();
+          const pos = magnifierPosRef.current;
+          // Account for image offset within the flex container (C1 fix).
+          const container = desktopContainerRef.current;
+          const containerRect = container?.getBoundingClientRect();
+          const imgOffsetX = currentRect.left - (containerRect?.left ?? 0);
+          const imgOffsetY = currentRect.top - (containerRect?.top ?? 0);
+          el.style.left = `${pos.x + imgOffsetX}px`;
+          el.style.top = `${pos.y + imgOffsetY}px`;
+          // Dirty-check: only reassign backgroundImage when src actually changed.
+          if (currentImg.src !== magnifierLastSrcRef.current) {
+            el.style.backgroundImage = currentImg.src ? `url("${currentImg.src}")` : 'none';
+            magnifierLastSrcRef.current = currentImg.src;
+          }
+          el.style.backgroundPosition = `${-pos.x * MAGNIFIER_ZOOM + MAGNIFIER_SIZE / 2}px ${-pos.y * MAGNIFIER_ZOOM + MAGNIFIER_SIZE / 2}px`;
+          el.style.backgroundSize = `${currentRect.width * MAGNIFIER_ZOOM}px ${currentRect.height * MAGNIFIER_ZOOM}px`;
+          el.style.display = (pos.x >= 0 && pos.x <= currentRect.width && pos.y >= 0 && pos.y <= currentRect.height) ? 'block' : 'none';
+        } catch (err) {
+          console.warn('[magnifier] rAF update failed:', err);
+        }
+      });
+    }
+  }, [magnifierOn]);
+
+  // Clean up magnifier rAF on unmount.
+  useEffect(() => {
+    return () => {
+      magnifierPosRef.current = { x: 0, y: 0 };
+      if (magnifierRafRef.current) cancelAnimationFrame(magnifierRafRef.current);
+    };
   }, []);
 
   // Poll per-agent metrics while desktop is connected.
@@ -1290,7 +1354,10 @@ export default function App() {
         onClick={(e) => desktopConnected && desktopAbortRef.current && handleDesktopMouse(e, desktopSessionId, desktopAbortRef.current.signal)}
         onContextMenu={(e) => desktopConnected && desktopAbortRef.current && handleDesktopMouse(e, desktopSessionId, desktopAbortRef.current.signal)}
         onWheel={(e) => desktopConnected && desktopAbortRef.current && handleDesktopMouse(e as unknown as React.MouseEvent<HTMLDivElement>, desktopSessionId, desktopAbortRef.current.signal)}
-        onMouseMove={(e) => desktopConnected && desktopAbortRef.current && handleDesktopMouse(e, desktopSessionId, desktopAbortRef.current.signal)}
+        onMouseMove={(e) => {
+          if (desktopConnected && desktopAbortRef.current) handleDesktopMouse(e, desktopSessionId, desktopAbortRef.current.signal);
+          handleDesktopMouseMoveForMagnifier(e);
+        }}
       >
         {desktopTooltip && (
           <Chip
@@ -1314,28 +1381,84 @@ export default function App() {
           />
         )}
         {desktopConnected && (
-          <Tooltip title={isFullscreen ? 'Exit fullscreen' : 'Fullscreen'}>
-            <IconButton
-              size="small"
-              onClick={(e) => { e.stopPropagation(); toggleFullscreen(); }}
-              sx={{
-                position: 'absolute',
-                top: 8,
-                right: desktopTooltip ? 140 : 8,
-                zIndex: 11,
-                bgcolor: 'rgba(0, 0, 0, 0.5)',
-                color: '#fff',
-                '&:hover': { bgcolor: 'rgba(0, 0, 0, 0.7)' },
-              }}
-            >
-              {isFullscreen ? <FullscreenExitIcon fontSize="small" /> : <FullscreenIcon fontSize="small" />}
-            </IconButton>
-          </Tooltip>
+          <Box
+            sx={{
+              position: 'absolute',
+              top: 8,
+              right: desktopTooltip ? 140 : 8,
+              zIndex: 11,
+              display: 'flex',
+              gap: 0.5,
+            }}
+          >
+            <Tooltip title={magnifierOn ? 'Disable magnifier' : 'Magnifier'}>
+              <IconButton
+                size="small"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setMagnifierOn(prev => {
+                    if (prev) {
+                      // Reset position and cancel pending rAF when toggling off.
+                      magnifierPosRef.current = { x: 0, y: 0 };
+                      magnifierLastSrcRef.current = '';
+                      if (magnifierRafRef.current) {
+                        cancelAnimationFrame(magnifierRafRef.current);
+                        magnifierRafRef.current = 0;
+                      }
+                    }
+                    return !prev;
+                  });
+                }}
+                sx={{
+                  bgcolor: magnifierOn ? 'rgba(0, 0, 0, 0.8)' : 'rgba(0, 0, 0, 0.5)',
+                  color: magnifierOn ? 'primary.main' : '#fff',
+                  '&:hover': { bgcolor: 'rgba(0, 0, 0, 0.7)' },
+                }}
+              >
+                <ZoomInIcon fontSize="small" />
+              </IconButton>
+            </Tooltip>
+            <Tooltip title={isFullscreen ? 'Exit fullscreen' : 'Fullscreen'}>
+              <IconButton
+                size="small"
+                onClick={(e) => { e.stopPropagation(); toggleFullscreen(); }}
+                sx={{
+                  bgcolor: 'rgba(0, 0, 0, 0.5)',
+                  color: '#fff',
+                  '&:hover': { bgcolor: 'rgba(0, 0, 0, 0.7)' },
+                }}
+              >
+                {isFullscreen ? <FullscreenExitIcon fontSize="small" /> : <FullscreenIcon fontSize="small" />}
+              </IconButton>
+            </Tooltip>
+          </Box>
         )}
         {!desktopConnected && !desktopAgent && (
           <Typography variant="body1" color="text.secondary">
             Select an agent and click Connect to start remote desktop
           </Typography>
+        )}
+        {/* Magnifier lens overlay */}
+        {magnifierOn && desktopConnected && (
+          <div
+            ref={magnifierLensRef}
+            style={{
+              position: 'absolute',
+              width: MAGNIFIER_SIZE,
+              height: MAGNIFIER_SIZE,
+              borderRadius: '50%',
+              border: '2px solid rgba(255, 255, 255, 0.6)',
+              outline: '1px solid rgba(0, 0, 0, 0.3)',
+              boxShadow: '0 2px 12px rgba(0, 0, 0, 0.5)',
+              pointerEvents: 'none',
+              zIndex: 15,
+              display: 'none',
+              transform: 'translate(-50%, -50%)',
+              backgroundRepeat: 'no-repeat',
+              overflow: 'hidden',
+              willChange: 'transform',
+            }}
+          />
         )}
         <img
           ref={desktopImgRef}
