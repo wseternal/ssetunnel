@@ -44,6 +44,7 @@ import TerminalIcon from '@mui/icons-material/Terminal';
 import DesktopWindowsIcon from '@mui/icons-material/DesktopWindows';
 import FullscreenIcon from '@mui/icons-material/Fullscreen';
 import FullscreenExitIcon from '@mui/icons-material/FullscreenExit';
+import ZoomInIcon from '@mui/icons-material/ZoomIn';
 import { Terminal, type IDisposable } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
@@ -243,9 +244,16 @@ export default function App() {
   const desktopContainerRef = useRef<HTMLDivElement | null>(null);
   const desktopMouseMoveRef = useRef<number>(0); // throttle: last mouse_move timestamp
   const [desktopMetrics, setDesktopMetrics] = useState<MetricSnapshot | null>(null);
+
+  // Magnifier lens state
+  const [magnifierOn, setMagnifierOn] = useState(false);
+  const magnifierPosRef = useRef<{ x: number; y: number; imgSrc: string }>({ x: 0, y: 0, imgSrc: '' });
+  const magnifierRafRef = useRef<number>(0);
   const [desktopLogs, setDesktopLogs] = useState<DesktopLogEntry[]>([]);
   const desktopLogRef = useRef<HTMLDivElement | null>(null);
   const MAX_DESKTOP_LOGS = 200;
+  const MAGNIFIER_ZOOM = 3;
+  const MAGNIFIER_SIZE = 180;
   // Input ack tooltip: shows live feedback when the agent receives input events.
   const [desktopTooltip, setDesktopTooltip] = useState<string>('');
   const desktopTooltipTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -597,6 +605,11 @@ export default function App() {
     setDesktopMetrics(null);
     setDesktopLogs([]);
     setDesktopTooltip('');
+    setMagnifierOn(false);
+    if (magnifierRafRef.current) {
+      cancelAnimationFrame(magnifierRafRef.current);
+      magnifierRafRef.current = 0;
+    }
     if (desktopTooltipTimerRef.current) {
       clearTimeout(desktopTooltipTimerRef.current);
       desktopTooltipTimerRef.current = null;
@@ -704,6 +717,11 @@ export default function App() {
       setDesktopMetrics(null);
       setDesktopLogs([]);
       setDesktopTooltip('');
+      setMagnifierOn(false);
+      if (magnifierRafRef.current) {
+        cancelAnimationFrame(magnifierRafRef.current);
+        magnifierRafRef.current = 0;
+      }
       if (desktopTooltipTimerRef.current) {
         clearTimeout(desktopTooltipTimerRef.current);
         desktopTooltipTimerRef.current = null;
@@ -805,6 +823,39 @@ export default function App() {
     } else {
       desktopContainerRef.current?.requestFullscreen().catch(() => {});
     }
+  }, []);
+
+  // Magnifier: track cursor position over the screenshot and update the
+  // lens overlay via requestAnimationFrame (no React re-renders).
+  const handleDesktopMouseMoveForMagnifier = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+    if (!magnifierOn) return;
+    const img = desktopImgRef.current;
+    if (!img) return;
+    const rect = img.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    magnifierPosRef.current = { x, y, imgSrc: img.src };
+    if (!magnifierRafRef.current) {
+      magnifierRafRef.current = requestAnimationFrame(() => {
+        magnifierRafRef.current = 0;
+        const el = document.getElementById('desktop-magnifier-lens');
+        if (!el) return;
+        const pos = magnifierPosRef.current;
+        el.style.left = `${pos.x}px`;
+        el.style.top = `${pos.y}px`;
+        el.style.backgroundImage = pos.imgSrc ? `url(${pos.imgSrc})` : 'none';
+        el.style.backgroundPosition = `${-pos.x * MAGNIFIER_ZOOM + MAGNIFIER_SIZE / 2}px ${-pos.y * MAGNIFIER_ZOOM + MAGNIFIER_SIZE / 2}px`;
+        el.style.backgroundSize = `${rect.width * MAGNIFIER_ZOOM}px ${rect.height * MAGNIFIER_ZOOM}px`;
+        el.style.display = (pos.x >= 0 && pos.x <= rect.width && pos.y >= 0 && pos.y <= rect.height) ? 'block' : 'none';
+      });
+    }
+  }, [magnifierOn]);
+
+  // Clean up magnifier rAF on unmount.
+  useEffect(() => {
+    return () => {
+      if (magnifierRafRef.current) cancelAnimationFrame(magnifierRafRef.current);
+    };
   }, []);
 
   // Poll per-agent metrics while desktop is connected.
@@ -1290,7 +1341,10 @@ export default function App() {
         onClick={(e) => desktopConnected && desktopAbortRef.current && handleDesktopMouse(e, desktopSessionId, desktopAbortRef.current.signal)}
         onContextMenu={(e) => desktopConnected && desktopAbortRef.current && handleDesktopMouse(e, desktopSessionId, desktopAbortRef.current.signal)}
         onWheel={(e) => desktopConnected && desktopAbortRef.current && handleDesktopMouse(e as unknown as React.MouseEvent<HTMLDivElement>, desktopSessionId, desktopAbortRef.current.signal)}
-        onMouseMove={(e) => desktopConnected && desktopAbortRef.current && handleDesktopMouse(e, desktopSessionId, desktopAbortRef.current.signal)}
+        onMouseMove={(e) => {
+          if (desktopConnected && desktopAbortRef.current) handleDesktopMouse(e, desktopSessionId, desktopAbortRef.current.signal);
+          handleDesktopMouseMoveForMagnifier(e);
+        }}
       >
         {desktopTooltip && (
           <Chip
@@ -1314,28 +1368,76 @@ export default function App() {
           />
         )}
         {desktopConnected && (
-          <Tooltip title={isFullscreen ? 'Exit fullscreen' : 'Fullscreen'}>
-            <IconButton
-              size="small"
-              onClick={(e) => { e.stopPropagation(); toggleFullscreen(); }}
-              sx={{
-                position: 'absolute',
-                top: 8,
-                right: desktopTooltip ? 140 : 8,
-                zIndex: 11,
-                bgcolor: 'rgba(0, 0, 0, 0.5)',
-                color: '#fff',
-                '&:hover': { bgcolor: 'rgba(0, 0, 0, 0.7)' },
-              }}
-            >
-              {isFullscreen ? <FullscreenExitIcon fontSize="small" /> : <FullscreenIcon fontSize="small" />}
-            </IconButton>
-          </Tooltip>
+          <>
+            <Tooltip title={magnifierOn ? 'Disable magnifier' : 'Magnifier'}>
+              <IconButton
+                size="small"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setMagnifierOn(prev => !prev);
+                  // Hide lens immediately when toggling off.
+                  if (magnifierOn) {
+                    const el = document.getElementById('desktop-magnifier-lens');
+                    if (el) el.style.display = 'none';
+                  }
+                }}
+                sx={{
+                  position: 'absolute',
+                  top: 8,
+                  right: desktopTooltip ? 140 : 8,
+                  zIndex: 12,
+                  bgcolor: magnifierOn ? 'rgba(0, 0, 0, 0.8)' : 'rgba(0, 0, 0, 0.5)',
+                  color: magnifierOn ? 'primary.main' : '#fff',
+                  '&:hover': { bgcolor: 'rgba(0, 0, 0, 0.7)' },
+                  transform: 'translateX(-36px)',
+                }}
+              >
+                <ZoomInIcon fontSize="small" />
+              </IconButton>
+            </Tooltip>
+            <Tooltip title={isFullscreen ? 'Exit fullscreen' : 'Fullscreen'}>
+              <IconButton
+                size="small"
+                onClick={(e) => { e.stopPropagation(); toggleFullscreen(); }}
+                sx={{
+                  position: 'absolute',
+                  top: 8,
+                  right: desktopTooltip ? 140 : 8,
+                  zIndex: 11,
+                  bgcolor: 'rgba(0, 0, 0, 0.5)',
+                  color: '#fff',
+                  '&:hover': { bgcolor: 'rgba(0, 0, 0, 0.7)' },
+                }}
+              >
+                {isFullscreen ? <FullscreenExitIcon fontSize="small" /> : <FullscreenIcon fontSize="small" />}
+              </IconButton>
+            </Tooltip>
+          </>
         )}
         {!desktopConnected && !desktopAgent && (
           <Typography variant="body1" color="text.secondary">
             Select an agent and click Connect to start remote desktop
           </Typography>
+        )}
+        {/* Magnifier lens overlay */}
+        {magnifierOn && desktopConnected && (
+          <div
+            id="desktop-magnifier-lens"
+            style={{
+              position: 'absolute',
+              width: MAGNIFIER_SIZE,
+              height: MAGNIFIER_SIZE,
+              borderRadius: '50%',
+              border: '2px solid rgba(255, 255, 255, 0.6)',
+              boxShadow: '0 2px 12px rgba(0, 0, 0, 0.5)',
+              pointerEvents: 'none',
+              zIndex: 15,
+              display: 'none',
+              transform: 'translate(-50%, -50%)',
+              backgroundRepeat: 'no-repeat',
+              overflow: 'hidden',
+            }}
+          />
         )}
         <img
           ref={desktopImgRef}
