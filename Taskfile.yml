@@ -91,6 +91,12 @@ tasks:
       - task: go:release
       - task: sign
 
+  go:release-linux:
+    desc: cross compile for linux amd64 binary with purego
+    cmds:
+      - mkdir -p {{.DIST}}
+      - CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -tags purego -trimpath -ldflags "{{.RELEASE_LDFLAGS}}" -o {{.DIST}}/{{.BIN}}-linux-amd64 ./cmd/ssetunnel
+
   go:clean:
     desc: Clean Go build artifacts
     cmds:

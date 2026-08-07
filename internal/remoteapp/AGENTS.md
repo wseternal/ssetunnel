@@ -33,7 +33,7 @@ Max frame size: 4 MiB (`maxFrameSize`). `WriteFrame` constructs the header and p
 
 ## Build Constraints
 
-- **Supported OS** (`darwin || windows || linux`): Includes robotgo-backed `capture.go` and `input.go`. Build with `-tags purego` for CGo-free compilation (see [robotgo CGo-free builds](https://github.com/go-vgo/robotgo#cgo-free-builds)). On darwin, `capture_darwin.go` (CGO, CoreGraphics) is used by default; with `-tags purego`, `capture_darwin_purego.go` (error-string matching) is used instead.
+- **Supported OS** (`darwin || windows || linux`): Includes robotgo-backed `capture.go` and `input.go`. With `-tags purego` (or `CGO_ENABLED=0`), the robotgo-dependent files are excluded and stubs (`capture_stub.go`, `input_stub.go`) are used instead — `Enabled()` returns false, `CaptureLoop` returns `ErrNotSupported`. On darwin without purego, `capture_darwin.go` (CGO, CoreGraphics) provides more reliable display-state detection; on non-darwin without purego, `capture_other.go` (error-string matching) is used. With `-tags purego` on any platform, `capture_purego.go` (error-string matching) provides the same function.
 - **Unsupported OS** (e.g. freebsd, solaris): `capture_stub.go` and `input_stub.go` return `ErrNotSupported`. `Enabled()` returns false.
 
 `input_validation.go` has no build constraint — pure validation logic testable without robotgo.
