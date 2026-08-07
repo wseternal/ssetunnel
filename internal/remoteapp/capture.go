@@ -81,6 +81,7 @@ func CaptureLoop(ctx context.Context, w io.Writer, inputReceived <-chan struct{}
 		img, err := robotgo.CaptureImg()
 		if err != nil {
 			if isDisplayUnavailable(err) {
+				consecutiveFails = 0 // display-off invalidates prior fail history
 				log.Printf("remoteapp: capture: display unavailable: %v", err)
 				writeLog("warn", fmt.Sprintf("display unavailable (will retry): %v", err))
 				return true, nil
@@ -123,19 +124,31 @@ func CaptureLoop(ctx context.Context, w io.Writer, inputReceived <-chan struct{}
 
 	writeLog("info", fmt.Sprintf("capture started (deferred, %v idle)", deferDelay))
 
+	// backoffDeadline tracks the earliest time the next retry is allowed
+	// when the display is unavailable. Zero value means no active backoff.
+	var backoffDeadline time.Time
+
 	// Initial capture on startup so the frontend receives the first frame.
 	if transient, err := captureAndSend(); err != nil {
 		return err
 	} else if transient {
 		writeLog("info", "display unavailable at startup, will retry with backoff")
+		backoffDeadline = time.Now().Add(displayOffBackoff)
 	}
 
-	// backoffDeadline tracks the earliest time the next retry is allowed
-	// when the display is unavailable. Zero value means no active backoff.
-	var backoffDeadline time.Time
-
-	deferTimer := time.NewTimer(deferDelay)
-	defer deferTimer.Stop()
+	initialDelay := deferDelay
+	if !backoffDeadline.IsZero() {
+		initialDelay = displayOffBackoff
+	}
+	deferTimer := time.NewTimer(initialDelay)
+	defer func() {
+		if !deferTimer.Stop() {
+			select {
+			case <-deferTimer.C:
+			default:
+			}
+		}
+	}()
 
 	for {
 		select {

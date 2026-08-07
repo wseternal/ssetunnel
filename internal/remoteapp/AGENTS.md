@@ -33,7 +33,7 @@ Max frame size: 4 MiB (`maxFrameSize`). `WriteFrame` constructs the header and p
 
 ## Build Constraints
 
-- **Supported OS** (`darwin || windows || linux`): Includes robotgo-backed `capture.go` and `input.go`. Build with `-tags purego` for CGo-free compilation (see [robotgo CGo-free builds](https://github.com/go-vgo/robotgo#cgo-free-builds)).
+- **Supported OS** (`darwin || windows || linux`): Includes robotgo-backed `capture.go` and `input.go`. Build with `-tags purego` for CGo-free compilation (see [robotgo CGo-free builds](https://github.com/go-vgo/robotgo#cgo-free-builds)). On darwin, `capture_darwin.go` (CGO, CoreGraphics) is used by default; with `-tags purego`, `capture_darwin_purego.go` (error-string matching) is used instead.
 - **Unsupported OS** (e.g. freebsd, solaris): `capture_stub.go` and `input_stub.go` return `ErrNotSupported`. `Enabled()` returns false.
 
 `input_validation.go` has no build constraint — pure validation logic testable without robotgo.
@@ -46,7 +46,8 @@ Max frame size: 4 MiB (`maxFrameSize`). `WriteFrame` constructs the header and p
 - **3-second deferral timer (`deferDelay`)**: Capture only fires after no input events have been received for 3 seconds. While the user is actively interacting, screenshots are suppressed to avoid uploading immediately-stale frames.
 - **Initial capture**: One screenshot on startup before entering the select loop, so the frontend receives the first frame immediately.
 - **Buffer reuse**: Single `bytes.Buffer` reused across frames (~150 KB/frame savings).
-- **Circuit breaker**: After `maxConsecutiveCaptureFails` (10) consecutive failures, returns an error.
+- **Circuit breaker**: After `maxConsecutiveCaptureFails` (10) consecutive non-transient failures, returns an error.
+- **Display-unavailable backoff**: When `isDisplayUnavailable()` returns true (monitor off/sleeping), the loop retries every 30 s (`displayOffBackoff`) instead of the 3 s deferral, resets `consecutiveFails`, and does NOT trip the circuit breaker. On macOS (CGO) this queries CoreGraphics `CGDisplayIsActive`; on other platforms (or darwin with `-tags purego`) it matches the robotgo error string (`robotgoCaptureErrSubstr`). Input events cancel active backoff.
 - **JPEG quality**: 50 balances bandwidth (~50–150 KB per 1080p frame) and clarity.
 
 Each screenshot payload is prefixed with an 8-byte big-endian Unix-millisecond timestamp (`ScreenshotTimestampSize = 8`). The server parses and strips this prefix before forwarding JPEG to the frontend, and sends a `FrameScreenshotAck` back to the agent.

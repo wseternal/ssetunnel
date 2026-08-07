@@ -253,6 +253,7 @@ export default function App() {
   const magnifierPosRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
   const magnifierRafRef = useRef<number>(0);
   const magnifierLensRef = useRef<HTMLDivElement | null>(null);
+  const magnifierLastSrcRef = useRef<string>('');
   const [desktopLogs, setDesktopLogs] = useState<DesktopLogEntry[]>([]);
   const desktopLogRef = useRef<HTMLDivElement | null>(null);
   const MAX_DESKTOP_LOGS = 200;
@@ -593,11 +594,10 @@ export default function App() {
     }
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const disconnectDesktop = useCallback(() => {
-    if (desktopAbortRef.current) {
-      desktopAbortRef.current.abort();
-      desktopAbortRef.current = null;
-    }
+  // resetDesktopState clears all desktop session state (magnifier, tooltip,
+  // metrics, connection). Called by both disconnectDesktop and the finally
+  // block of connectDesktop to avoid duplicated cleanup.
+  const resetDesktopState = useCallback(() => {
     setDesktopConnected(false);
     setDesktopSessionId('');
     setScreenWidth(0);
@@ -607,9 +607,9 @@ export default function App() {
     setDesktopMetrics(null);
     setDesktopLogs([]);
     setDesktopTooltip('');
-    // Reset magnifier on disconnect.
     setMagnifierOn(false);
     magnifierPosRef.current = { x: 0, y: 0 };
+    magnifierLastSrcRef.current = '';
     if (magnifierRafRef.current) {
       cancelAnimationFrame(magnifierRafRef.current);
       magnifierRafRef.current = 0;
@@ -619,6 +619,14 @@ export default function App() {
       desktopTooltipTimerRef.current = null;
     }
   }, []);
+
+  const disconnectDesktop = useCallback(() => {
+    if (desktopAbortRef.current) {
+      desktopAbortRef.current.abort();
+      desktopAbortRef.current = null;
+    }
+    resetDesktopState();
+  }, [resetDesktopState]);
 
   const connectDesktop = useCallback(async (agentID: string) => {
     if (!agentID || !sessionToken) return;
@@ -712,29 +720,10 @@ export default function App() {
         setError(`Remote desktop connection error: ${e}`);
       }
     } finally {
-      setDesktopConnected(false);
-      setDesktopSessionId('');
-      setScreenWidth(0);
-      setScreenHeight(0);
-      screenWidthRef.current = 0;
-      screenHeightRef.current = 0;
-      setDesktopMetrics(null);
-      setDesktopLogs([]);
-      setDesktopTooltip('');
-      // Reset magnifier on disconnect.
-      setMagnifierOn(false);
-      magnifierPosRef.current = { x: 0, y: 0 };
-      if (magnifierRafRef.current) {
-        cancelAnimationFrame(magnifierRafRef.current);
-        magnifierRafRef.current = 0;
-      }
-      if (desktopTooltipTimerRef.current) {
-        clearTimeout(desktopTooltipTimerRef.current);
-        desktopTooltipTimerRef.current = null;
-      }
+      resetDesktopState();
       if (desktopAbortRef.current === abort) desktopAbortRef.current = null;
     }
-  }, [sessionToken]);
+  }, [sessionToken, resetDesktopState]);
 
   // Desktop mouse handler: translate browser coords to agent screen coords.
   // Uses refs for screen dimensions to avoid stale-closure issues when the
@@ -860,8 +849,10 @@ export default function App() {
           el.style.left = `${pos.x + imgOffsetX}px`;
           el.style.top = `${pos.y + imgOffsetY}px`;
           // Dirty-check: only reassign backgroundImage when src actually changed.
-          const newBg = currentImg.src ? `url("${currentImg.src}")` : 'none';
-          if (el.style.backgroundImage !== newBg) el.style.backgroundImage = newBg;
+          if (currentImg.src !== magnifierLastSrcRef.current) {
+            el.style.backgroundImage = currentImg.src ? `url("${currentImg.src}")` : 'none';
+            magnifierLastSrcRef.current = currentImg.src;
+          }
           el.style.backgroundPosition = `${-pos.x * MAGNIFIER_ZOOM + MAGNIFIER_SIZE / 2}px ${-pos.y * MAGNIFIER_ZOOM + MAGNIFIER_SIZE / 2}px`;
           el.style.backgroundSize = `${currentRect.width * MAGNIFIER_ZOOM}px ${currentRect.height * MAGNIFIER_ZOOM}px`;
           el.style.display = (pos.x >= 0 && pos.x <= currentRect.width && pos.y >= 0 && pos.y <= currentRect.height) ? 'block' : 'none';
@@ -875,7 +866,6 @@ export default function App() {
   // Clean up magnifier rAF on unmount.
   useEffect(() => {
     return () => {
-      setMagnifierOn(false);
       magnifierPosRef.current = { x: 0, y: 0 };
       if (magnifierRafRef.current) cancelAnimationFrame(magnifierRafRef.current);
     };
@@ -1408,8 +1398,13 @@ export default function App() {
                   e.stopPropagation();
                   setMagnifierOn(prev => {
                     if (prev) {
-                      // Reset position when toggling off to avoid stale coords on re-toggle.
+                      // Reset position and cancel pending rAF when toggling off.
                       magnifierPosRef.current = { x: 0, y: 0 };
+                      magnifierLastSrcRef.current = '';
+                      if (magnifierRafRef.current) {
+                        cancelAnimationFrame(magnifierRafRef.current);
+                        magnifierRafRef.current = 0;
+                      }
                     }
                     return !prev;
                   });
