@@ -1,4 +1,4 @@
-//go:build darwin && purego
+//go:build purego
 
 package remoteapp
 
@@ -11,8 +11,9 @@ const robotgoCaptureErrSubstr = "Capture image not found"
 
 // isDisplayUnavailable returns true when the error indicates the display is
 // not available for screen capture (e.g. monitor off, no active session).
-// On darwin with -tags purego (no CGO), it relies on error-string matching
-// since CGDisplayIsActive is unavailable without CoreGraphics CGO.
+// With -tags purego (no CGO), it relies on error-string matching since
+// platform-specific display query APIs (e.g. CoreGraphics on darwin) are
+// unavailable.
 func isDisplayUnavailable(err error) bool {
 	return err != nil && strings.Contains(err.Error(), robotgoCaptureErrSubstr)
 }
