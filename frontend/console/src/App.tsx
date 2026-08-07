@@ -1384,11 +1384,6 @@ export default function App() {
                 onClick={(e) => {
                   e.stopPropagation();
                   setMagnifierOn(prev => !prev);
-                  // Hide lens immediately when toggling off.
-                  if (magnifierOn) {
-                    const el = document.getElementById('desktop-magnifier-lens');
-                    if (el) el.style.display = 'none';
-                  }
                 }}
                 sx={{
                   bgcolor: magnifierOn ? 'rgba(0, 0, 0, 0.8)' : 'rgba(0, 0, 0, 0.5)',
