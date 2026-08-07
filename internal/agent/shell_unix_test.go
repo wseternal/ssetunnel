@@ -4,7 +4,10 @@ package agent
 
 import (
 	"bytes"
+	"fmt"
 	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -162,6 +165,70 @@ func TestProxy_ShellTarget_DynamicMode(t *testing.T) {
 	output := readMarker(t, cTest, marker, 5*time.Second)
 	if !strings.Contains(output, marker) {
 		t.Errorf("shell output missing marker; got: %q", output)
+	}
+
+	cTest.Close()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("proxy did not return after stream close")
+	}
+}
+
+// TestProxy_ShellTarget_LoginShell verifies that the spawned shell is
+// invoked as a login shell (argv[0] prefixed with '-'), which causes
+// zsh/bash to source profile files (.zprofile, .profile, etc.) in
+// addition to the interactive startup files (.zshrc, .bashrc).
+func TestProxy_ShellTarget_LoginShell(t *testing.T) {
+	// Create a temp HOME with a .profile that sets a marker env var.
+	// Using bash because .profile is universally sourced by bash login
+	// shells (bash checks .bash_profile, .bash_login, .profile in order).
+	tmpHome := t.TempDir()
+	profilePath := filepath.Join(tmpHome, ".profile")
+	if err := os.WriteFile(profilePath, []byte("export CLOUD_SHELL_LOGIN=yes\n"), 0644); err != nil {
+		t.Fatalf("write .profile: %v", err)
+	}
+	// File that the shell will write with the env var value.
+	probePath := filepath.Join(tmpHome, "login_probe")
+
+	t.Setenv("SHELL", "/bin/bash")
+	t.Setenv("HOME", tmpHome)
+
+	a := &Agent{Target: TargetShell}
+	cAgent, cTest := newTCPpair(t)
+	defer cTest.Close()
+	defer cAgent.Close()
+
+	done := make(chan struct{})
+	go func() {
+		a.proxy(cAgent)
+		close(done)
+	}()
+
+	time.Sleep(500 * time.Millisecond)
+
+	// Write the env var value to a file, then read it from Go.
+	// This avoids matching on the echoed command text.
+	cmd := fmt.Sprintf("echo $CLOUD_SHELL_LOGIN > %s\n", probePath)
+	if _, err := cTest.Write([]byte(cmd)); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	// Wait for the file to appear and contain content.
+	var content string
+	for i := 0; i < 20; i++ {
+		time.Sleep(250 * time.Millisecond)
+		data, err := os.ReadFile(probePath)
+		if err == nil {
+			content = strings.TrimSpace(string(data))
+			if content != "" {
+				break
+			}
+		}
+	}
+
+	if content != "yes" {
+		t.Errorf("login shell marker: got %q, want %q (.profile was not sourced)", content, "yes")
 	}
 
 	cTest.Close()

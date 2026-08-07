@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -26,6 +27,12 @@ func proxyShell(stream net.Conn) {
 	}
 
 	cmd := exec.Command(shell)
+	// Prefix argv[0] with '-' to invoke a login shell. This causes
+	// zsh/bash to source /etc/profile, ~/.zprofile (or ~/.profile),
+	// matching the behavior of sshd and login(1). Without the '-'
+	// prefix, only interactive startup files (.zshrc/.bashrc) are
+	// sourced, so PATH additions from .zprofile are missing.
+	cmd.Args[0] = "-" + filepath.Base(shell)
 	// Build a clean environment with an explicit TERM=xterm-256color.
 	// pty.Start appends TERM=xterm, but if os.Environ() already contains
 	// a TERM entry (e.g. from the agent's parent process), the duplicate
