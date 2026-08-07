@@ -28,6 +28,12 @@ const maxConsecutiveCaptureFails = 10
 // that will be immediately stale because more input is in flight.
 const deferDelay = 3 * time.Second
 
+// displayOffBackoff is the retry interval when capture repeatedly fails due
+// to the display being unavailable (e.g. monitor off or sleeping). This is
+// longer than deferDelay to reduce log noise while remaining responsive
+// when the display comes back.
+const displayOffBackoff = 30 * time.Second
+
 // CaptureLoop captures the primary display and writes JPEG-encoded
 // screenshots as typed frames to w. It runs until ctx is canceled or w
 // returns an error. Log events are also written to w for observability.
@@ -65,17 +71,28 @@ func CaptureLoop(ctx context.Context, w io.Writer, inputReceived <-chan struct{}
 		return WriteScreenshotWithTimestamp(w, jpegData, time.Now())
 	}
 
-	captureAndSend := func() error {
+	// captureAndSend captures a screenshot and writes it as a JPEG frame.
+	// Returns (isTransient=true, err=nil) when capture fails due to the
+	// display being unavailable (monitor off/sleeping) — the caller should
+	// back off and retry without tripping the circuit breaker.
+	// Returns (false, err) when the circuit breaker trips or a non-transient
+	// write/encode error occurs.
+	captureAndSend := func() (bool, error) {
 		img, err := robotgo.CaptureImg()
 		if err != nil {
+			if isDisplayUnavailable(err) {
+				log.Printf("remoteapp: capture: display unavailable: %v", err)
+				writeLog("warn", fmt.Sprintf("display unavailable (will retry): %v", err))
+				return true, nil
+			}
 			consecutiveFails++
 			if consecutiveFails >= maxConsecutiveCaptureFails {
 				writeLog("error", fmt.Sprintf("capture circuit breaker: %d consecutive failures: %v", consecutiveFails, err))
-				return fmt.Errorf("capture failed %d consecutive times: %w", consecutiveFails, err)
+				return false, fmt.Errorf("capture failed %d consecutive times: %w", consecutiveFails, err)
 			}
 			log.Printf("remoteapp: capture: %v (attempt %d/%d)", err, consecutiveFails, maxConsecutiveCaptureFails)
 			writeLog("warn", fmt.Sprintf("capture failed (attempt %d/%d): %v", consecutiveFails, maxConsecutiveCaptureFails, err))
-			return nil // non-fatal
+			return false, nil // non-fatal
 		}
 		consecutiveFails = 0 // reset on success
 
@@ -84,21 +101,38 @@ func CaptureLoop(ctx context.Context, w io.Writer, inputReceived <-chan struct{}
 			consecutiveFails++
 			if consecutiveFails >= maxConsecutiveCaptureFails {
 				writeLog("error", fmt.Sprintf("jpeg encode circuit breaker: %d consecutive failures: %v", consecutiveFails, err))
-				return fmt.Errorf("jpeg encode failed %d consecutive times: %w", consecutiveFails, err)
+				return false, fmt.Errorf("jpeg encode failed %d consecutive times: %w", consecutiveFails, err)
 			}
 			log.Printf("remoteapp: jpeg encode: %v (attempt %d/%d)", err, consecutiveFails, maxConsecutiveCaptureFails)
 			writeLog("warn", fmt.Sprintf("jpeg encode failed (attempt %d/%d): %v", consecutiveFails, maxConsecutiveCaptureFails, err))
-			return nil // non-fatal
+			return false, nil // non-fatal
 		}
-		return writeScreenshot(buf.Bytes())
+		return false, writeScreenshot(buf.Bytes())
+	}
+
+	// drainTimer stops the timer and drains its channel if it already fired.
+	// Safe to call regardless of timer state.
+	drainTimer := func(t *time.Timer) {
+		if !t.Stop() {
+			select {
+			case <-t.C:
+			default:
+			}
+		}
 	}
 
 	writeLog("info", fmt.Sprintf("capture started (deferred, %v idle)", deferDelay))
 
 	// Initial capture on startup so the frontend receives the first frame.
-	if err := captureAndSend(); err != nil {
+	if transient, err := captureAndSend(); err != nil {
 		return err
+	} else if transient {
+		writeLog("info", "display unavailable at startup, will retry with backoff")
 	}
+
+	// backoffDeadline tracks the earliest time the next retry is allowed
+	// when the display is unavailable. Zero value means no active backoff.
+	var backoffDeadline time.Time
 
 	deferTimer := time.NewTimer(deferDelay)
 	defer deferTimer.Stop()
@@ -112,20 +146,32 @@ func CaptureLoop(ctx context.Context, w io.Writer, inputReceived <-chan struct{}
 			// Input event received: defer capture. Stop the running
 			// timer and restart it. Capture will fire only after the
 			// input stream has been quiet for deferDelay.
-			if !deferTimer.Stop() {
-				select {
-				case <-deferTimer.C:
-				default:
-				}
-			}
+			drainTimer(deferTimer)
+			backoffDeadline = time.Time{} // cancel any active backoff
 			deferTimer.Reset(deferDelay)
 		case <-deferTimer.C:
-			// No input for deferDelay: capture now and restart timer.
-			writeLog("info", "deferred capture fired")
-			if err := captureAndSend(); err != nil {
-				return err
+			// Timer fired: check whether we should capture now or
+			// wait longer due to display-unavailable backoff.
+			if !time.Now().Before(backoffDeadline) {
+				writeLog("info", "deferred capture fired")
+				transient, err := captureAndSend()
+				if err != nil {
+					return err
+				}
+				if transient {
+					// Display unavailable: schedule retry with backoff
+					// instead of the normal short deferral.
+					backoffDeadline = time.Now().Add(displayOffBackoff)
+					deferTimer.Reset(displayOffBackoff)
+				} else {
+					backoffDeadline = time.Time{}
+					deferTimer.Reset(deferDelay)
+				}
+			} else {
+				// Still in backoff: re-arm timer for remaining wait.
+				remaining := time.Until(backoffDeadline)
+				deferTimer.Reset(remaining)
 			}
-			deferTimer.Reset(deferDelay)
 		}
 	}
 }

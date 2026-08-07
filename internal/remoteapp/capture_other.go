@@ -1,0 +1,13 @@
+//go:build !darwin && (windows || linux)
+
+package remoteapp
+
+import "strings"
+
+// isDisplayUnavailable returns true when the error indicates the display is
+// not available for screen capture (e.g. monitor off, no active session).
+// On non-Darwin platforms, it relies on error-string matching since there is
+// no portable API to query display state without a full capture attempt.
+func isDisplayUnavailable(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "Capture image not found")
+}
