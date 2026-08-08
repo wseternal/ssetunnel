@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.6.2](https://github.com/wseternal/ssetunnel/compare/v1.6.1...v1.6.2) (2026-08-08)
+
+
+### Bug Fixes
+
+* **agent:** invoke cloud shell as login shell to source .zprofile/.profile ([e16b792](https://github.com/wseternal/ssetunnel/commit/e16b7924f09e7c7b3bc94f0cbb735b2e9c1e36f0))
+
 ## [1.6.1](https://github.com/wseternal/ssetunnel/compare/v1.6.0...v1.6.1) (2026-08-07)
 
 
