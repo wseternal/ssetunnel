@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.6.3](https://github.com/wseternal/ssetunnel/compare/v1.6.2...v1.6.3) (2026-08-10)
+
+
+### Bug Fixes
+
+* **console:** minor fixes to session id and remote desktop screenshot cache ([#45](https://github.com/wseternal/ssetunnel/issues/45)) ([683c985](https://github.com/wseternal/ssetunnel/commit/683c985aea397f2a8abece17e49a748bfae0cd45))
+
 ## [1.6.2](https://github.com/wseternal/ssetunnel/compare/v1.6.1...v1.6.2) (2026-08-08)
 
 
