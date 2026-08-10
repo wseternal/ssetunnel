@@ -611,6 +611,9 @@ export default function App() {
     setMagnifierOn(false);
     magnifierPosRef.current = { x: 0, y: 0 };
     magnifierLastSrcRef.current = '';
+    if (desktopImgRef.current) {
+      desktopImgRef.current.src = '';
+    }
     if (magnifierRafRef.current) {
       cancelAnimationFrame(magnifierRafRef.current);
       magnifierRafRef.current = 0;
