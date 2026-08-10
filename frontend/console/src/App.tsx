@@ -64,6 +64,7 @@ import { theme } from './theme/theme';
 
 interface Session {
   id: string;
+  agent_id: string;
   bytes_sent: number;
   bytes_received: number;
   created_at: string;
@@ -154,8 +155,8 @@ interface MetricSample {
 }
 
 const SESSION_COLUMNS: AdminTableColumn<Session>[] = [
-  { key: 'id', label: 'Session ID', render: (r) => (
-    <Typography sx={{ fontFamily: 'monospace', fontSize: '0.8125rem' }}>{r.id}</Typography>
+  { key: 'agent_id', label: 'Agent ID', render: (r) => (
+    <Typography sx={{ fontFamily: 'monospace', fontSize: '0.8125rem' }}>{r.agent_id || r.id}</Typography>
   )},
   { key: 'up', label: 'Bytes Received (Up)', render: (r) => `${(r.bytes_received / 1024).toFixed(1)} KB` },
   { key: 'down', label: 'Bytes Sent (Down)', render: (r) => `${(r.bytes_sent / 1024).toFixed(1)} KB` },
