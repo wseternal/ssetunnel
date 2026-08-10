@@ -155,6 +155,7 @@ func (a *API) handleLogout(w http.ResponseWriter, r *http.Request) {
 
 type SessionInfo struct {
 	ID            string    `json:"id"`
+	AgentID       string    `json:"agent_id,omitempty"`
 	BytesSent     uint64    `json:"bytes_sent"`
 	BytesReceived uint64    `json:"bytes_received"`
 	CreatedAt     time.Time `json:"created_at"`
@@ -178,6 +179,7 @@ func (a *API) handleSessions(w http.ResponseWriter, r *http.Request) {
 			sent, rec, created := s.Stats()
 			sessions = append(sessions, SessionInfo{
 				ID:            s.ID(),
+				AgentID:       s.AgentID(),
 				BytesSent:     sent,
 				BytesReceived: rec,
 				CreatedAt:     created,
