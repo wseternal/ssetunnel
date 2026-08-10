@@ -64,7 +64,7 @@ import { theme } from './theme/theme';
 
 interface Session {
   id: string;
-  agent_id: string;
+  agent_id?: string;
   bytes_sent: number;
   bytes_received: number;
   created_at: string;
