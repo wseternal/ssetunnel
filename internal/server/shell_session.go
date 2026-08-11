@@ -264,10 +264,14 @@ func (ss *ShellSession) outputConsumer(heartbeat time.Duration) {
 				// Attached: write SSE frame outside the lock.
 				if werr := transport.WriteFrame(w, f, data); werr != nil {
 					// Client write failed — re-acquire lock to detach and buffer.
+					// Guard: only clear if the current writer is still the one
+					// that failed (a new client may have attached in the meantime).
 					ss.mu.Lock()
-					ss.sseWriter = nil
-					ss.flusher = nil
-					ss.lastActivity = time.Now()
+					if ss.sseWriter == w {
+						ss.sseWriter = nil
+						ss.flusher = nil
+						ss.lastActivity = time.Now()
+					}
 					ss.ring.Write(data)
 					ss.mu.Unlock()
 				} else {
@@ -300,7 +304,15 @@ func (ss *ShellSession) outputConsumer(heartbeat time.Duration) {
 
 			if w != nil {
 				if werr := transport.WriteHeartbeat(w, f); werr != nil {
-					ss.Detach()
+					// Guard: only detach if the current writer is still the one
+					// that failed (a new client may have attached in the meantime).
+					ss.mu.Lock()
+					if ss.sseWriter == w {
+						ss.sseWriter = nil
+						ss.flusher = nil
+						ss.lastActivity = time.Now()
+					}
+					ss.mu.Unlock()
 				}
 			}
 
