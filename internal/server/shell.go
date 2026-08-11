@@ -116,7 +116,7 @@ func (h *Handler) shellReattach(w http.ResponseWriter, r *http.Request, ss *Shel
 		agentID: ss.AgentID(),
 		userID:  ss.UserID(),
 		up:      ss.UpPipe(),
-		resize:  make(chan windowSize, 1),
+		resize:  ss.resizeCh, // share ShellSession's resize channel
 		cancel:  func() {},
 	}
 	h.connectSessions.Store(connectID, cs)
@@ -192,7 +192,7 @@ func (h *Handler) shellCreate(w http.ResponseWriter, r *http.Request, agentID, c
 	}
 
 	// Create the persistent shell session.
-	ss := NewShellSession(connectID, agentID, sessInfo.UserID, stream)
+	ss := NewShellSession(connectID, agentID, sessInfo.UserID, stream, h.metrics)
 	h.shellSessions.Store(ss)
 	ss.Start(h.heartbeat)
 
@@ -202,7 +202,7 @@ func (h *Handler) shellCreate(w http.ResponseWriter, r *http.Request, agentID, c
 		agentID: agentID,
 		userID:  sessInfo.UserID,
 		up:      ss.UpPipe(),
-		resize:  make(chan windowSize, 1),
+		resize:  ss.resizeCh, // share ShellSession's resize channel
 		cancel:  func() {},
 	}
 	h.connectSessions.Store(connectID, cs)

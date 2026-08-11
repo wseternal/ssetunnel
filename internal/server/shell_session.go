@@ -1,6 +1,7 @@
 package server
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/hashicorp/yamux"
+	"github.com/wseternal/ssetunnel/internal/metrics"
 	"github.com/wseternal/ssetunnel/internal/transport"
 )
 
@@ -40,6 +42,13 @@ type ShellSession struct {
 	stream *yamux.Stream   // yamux stream to agent (shell PTY)
 	upPipe *transport.Pipe // POST bodies → yamux stream (input)
 
+	// writeMu serializes all writes to the yamux stream (from inputForwarder
+	// and resizeForwarder). It is separate from mu to avoid holding the SSE
+	// writer lock during blocking stream writes.
+	writeMu  sync.Mutex
+	resizeCh chan windowSize // PTY resize events drained by resizeForwarder
+	metrics  *metrics.MetricsCollector // nil when metrics disabled
+
 	// mu protects sseWriter, flusher, and closed. The consumer goroutine
 	// acquires this lock after each stream read to check whether a client
 	// is attached and to write SSE frames. The Attach/Detach/Close methods
@@ -62,7 +71,7 @@ type ShellSession struct {
 
 // NewShellSession creates a persistent shell session wrapping the given
 // yamux stream. The caller must call Start to begin the background goroutines.
-func NewShellSession(id, agentID string, userID int64, stream *yamux.Stream) *ShellSession {
+func NewShellSession(id, agentID string, userID int64, stream *yamux.Stream, mc *metrics.MetricsCollector) *ShellSession {
 	now := time.Now()
 	return &ShellSession{
 		id:           id,
@@ -70,6 +79,8 @@ func NewShellSession(id, agentID string, userID int64, stream *yamux.Stream) *Sh
 		userID:       userID,
 		stream:       stream,
 		upPipe:       transport.NewPipe(connectUpPipeCap),
+		resizeCh:     make(chan windowSize, 1),
+		metrics:      mc,
 		ring:         NewRingBuffer(shellRingCap),
 		wakeup:       make(chan struct{}, 1),
 		done:         make(chan struct{}),
@@ -113,6 +124,7 @@ func (ss *ShellSession) UpPipe() *transport.Pipe { return ss.upPipe }
 func (ss *ShellSession) Start(heartbeat time.Duration) {
 	go ss.outputConsumer(heartbeat)
 	go ss.inputForwarder()
+	go ss.resizeForwarder()
 }
 
 // Attach connects a client to this session. It atomically drains the
@@ -210,11 +222,13 @@ func (ss *ShellSession) LastActivity() time.Time {
 func (ss *ShellSession) outputConsumer(heartbeat time.Duration) {
 	defer ss.Close()
 
-	buf := make([]byte, 32<<10)
+	buf := bufferPool.Get().(*[]byte)
+	defer bufferPool.Put(buf)
+
 	for {
 		// Read from yamux stream with heartbeat deadline.
 		ss.stream.SetReadDeadline(time.Now().Add(heartbeat))
-		n, err := ss.stream.Read(buf)
+		n, err := ss.stream.Read(*buf)
 
 		if n > 0 {
 			ss.mu.Lock()
@@ -229,19 +243,20 @@ func (ss *ShellSession) outputConsumer(heartbeat time.Duration) {
 
 			if w != nil {
 				// Attached: write SSE frame directly to client.
-				if werr := transport.WriteFrame(w, f, buf[:n]); werr != nil {
+				if werr := transport.WriteFrame(w, f, (*buf)[:n]); werr != nil {
 					// Client write failed — detach and buffer.
 					ss.sseWriter = nil
 					ss.flusher = nil
 					ss.lastActivity = time.Now()
-					ss.ring.Write(buf[:n])
+					ss.ring.Write((*buf)[:n])
 					ss.mu.Unlock()
 				} else {
+					ss.metrics.RecordConnectBytes(ss.agentID, 0, n)
 					ss.mu.Unlock()
 				}
 			} else {
 				// Detached: buffer raw bytes.
-				ss.ring.Write(buf[:n])
+				ss.ring.Write((*buf)[:n])
 				ss.mu.Unlock()
 			}
 		}
@@ -296,7 +311,10 @@ func (ss *ShellSession) inputForwarder() {
 		ss.upPipe.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
 		n, err := ss.upPipe.Read(*buf)
 		if n > 0 {
-			if _, werr := ss.stream.Write((*buf)[:n]); werr != nil {
+			ss.writeMu.Lock()
+			_, werr := ss.stream.Write((*buf)[:n])
+			ss.writeMu.Unlock()
+			if werr != nil {
 				return // stream broken
 			}
 		}
@@ -306,6 +324,28 @@ func (ss *ShellSession) inputForwarder() {
 				continue // timeout: retry
 			}
 			return // pipe closed
+		}
+	}
+}
+
+// resizeForwarder drains PTY resize events from resizeCh and writes
+// NUL-prefixed JSON resize messages to the yamux stream. It exits when
+// the session is closed.
+func (ss *ShellSession) resizeForwarder() {
+	for {
+		select {
+		case ws := <-ss.resizeCh:
+			msg, _ := json.Marshal(ws)
+			resizeMsg := append([]byte{0}, msg...)
+			resizeMsg = append(resizeMsg, '\n')
+			ss.writeMu.Lock()
+			_, err := ss.stream.Write(resizeMsg)
+			ss.writeMu.Unlock()
+			if err != nil {
+				return
+			}
+		case <-ss.done:
+			return
 		}
 	}
 }
