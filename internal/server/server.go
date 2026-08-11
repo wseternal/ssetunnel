@@ -57,13 +57,22 @@ func NewServerWithRegistryAndBase(reg *Registry, heartbeat time.Duration, basePa
 	return s
 }
 
+// recreateHandler builds a new Handler with the given auth store and metrics
+// collector, preserving state (callbacks, persistent shell sessions) from the
+// previous handler. All handler recreation goes through this single method
+// to avoid silently dropping state.
+func (s *Server) recreateHandler(store *auth.Store, mc *metrics.MetricsCollector) {
+	prev := s.handler
+	s.handler = NewHandlerWithMetrics(s.Reg, prev.heartbeat, store, mc, s.basePath)
+	s.handler.OnSession = s.attach
+	s.handler.OnUpPush = prev.OnUpPush
+	s.handler.shellSessions = prev.shellSessions // preserve persistent shell sessions
+}
+
 // SetAuthStore attaches an authentication store for token validation.
 func (s *Server) SetAuthStore(store *auth.Store) {
 	s.store = store
-	prev := s.handler
-	s.handler = NewHandlerWithMetrics(s.Reg, s.handler.heartbeat, store, s.metrics, s.basePath)
-	s.handler.OnSession = s.attach
-	s.handler.OnUpPush = prev.OnUpPush
+	s.recreateHandler(store, s.metrics)
 }
 
 // SetMetricsCollector attaches a metrics collector for transport monitoring
@@ -71,10 +80,7 @@ func (s *Server) SetAuthStore(store *auth.Store) {
 // to pick up the collector.
 func (s *Server) SetMetricsCollector(mc *metrics.MetricsCollector) {
 	s.metrics = mc
-	prev := s.handler
-	s.handler = NewHandlerWithMetrics(s.Reg, s.handler.heartbeat, s.store, mc, s.basePath)
-	s.handler.OnSession = s.attach
-	s.handler.OnUpPush = prev.OnUpPush
+	s.recreateHandler(s.store, mc)
 }
 
 // MetricsCollector returns the attached metrics collector (may be nil).
@@ -132,6 +138,17 @@ func (s *Server) HTTPHandler() http.Handler { return s.handler }
 // Used by the console server to proxy shell connect requests through the
 // existing /connect and /connect-up endpoints.
 func (s *Server) TunnelHandler() *Handler { return s.handler }
+
+// StartShellCleanup starts the background goroutine that periodically
+// cleans up idle persistent shell sessions. It stops when done is closed.
+func (s *Server) StartShellCleanup(done <-chan struct{}) {
+	s.handler.shellSessions.StartCleanupLoop(30*time.Second, shellIdleTimeout, done)
+}
+
+// CloseShellSessions closes all persistent shell sessions.
+func (s *Server) CloseShellSessions() {
+	s.handler.shellSessions.CloseAll()
+}
 
 // NewHTTPServer builds the production HTTP server.
 func (s *Server) NewHTTPServer(addr string) *http.Server {

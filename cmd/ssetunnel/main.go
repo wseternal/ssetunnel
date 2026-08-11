@@ -250,9 +250,14 @@ func runServer(ctx context.Context, args []string) error {
 	}
 
 	httpSrv := srv.NewHTTPServer(*listen)
+	// Start persistent shell session cleanup loop.
+	shellCleanupDone := make(chan struct{})
+	srv.StartShellCleanup(shellCleanupDone)
 	go func() {
 		<-ctx.Done()
+		close(shellCleanupDone)
 		// Force-close all active agent sessions before draining HTTP.
+		srv.CloseShellSessions()
 		srv.Reg.CloseAll()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()

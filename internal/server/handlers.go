@@ -60,6 +60,10 @@ type Handler struct {
 	// bridging the connect client's HTTP transport to the agent's yamux stream.
 	connectSessions sync.Map
 
+	// shellSessions tracks persistent cloud shell sessions that survive
+	// client disconnect. Separate from connectSessions (ephemeral).
+	shellSessions *ShellSessionRegistry
+
 	// OnSession, if set, is called after each session registers. Set it
 	// before serving; the server uses it to attach yamux (step 7).
 	OnSession func(*Session)
@@ -86,7 +90,7 @@ func NewHandlerWithAuth(reg *Registry, heartbeat time.Duration, store *auth.Stor
 // NewHandlerWithMetrics builds the tunnel handler with optional auth and metrics.
 func NewHandlerWithMetrics(reg *Registry, heartbeat time.Duration, store *auth.Store, mc *metrics.MetricsCollector, basePath string) *Handler {
 	basePath = strings.TrimRight(basePath, "/")
-	h := &Handler{reg: reg, heartbeat: heartbeat, store: store, metrics: mc, basePath: basePath, mux: http.NewServeMux()}
+	h := &Handler{reg: reg, heartbeat: heartbeat, store: store, metrics: mc, basePath: basePath, mux: http.NewServeMux(), shellSessions: NewShellSessionRegistry()}
 	agentAuth := AgentAuthMiddleware(store)
 	connectAuth := ConnectAuthMiddleware(store)
 	h.mux.Handle(basePath+"/events", agentAuth(http.HandlerFunc(h.handleEvents)))
@@ -692,6 +696,16 @@ func (h *Handler) handleConnectResize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cs := v.(*connectSession)
+	// Verify session ownership: non-admin users can only resize their own sessions.
+	sessInfo := UserSessionFromContext(r)
+	if sessInfo == nil && cs.userID != 0 {
+		http.Error(w, "Unauthorized: user session required", http.StatusUnauthorized)
+		return
+	}
+	if sessInfo != nil && !isAdmin(sessInfo) && cs.userID != 0 && sessInfo.UserID != cs.userID {
+		http.Error(w, "access denied", http.StatusForbidden)
+		return
+	}
 	// Drain any stale resize before sending the latest dimensions, so the
 	// newest resize always wins (channel buffer is 1).
 	select {
@@ -739,4 +753,9 @@ func (h *Handler) findYamuxByAgentID(agentID string) (*yamux.Session, *Session) 
 		return true
 	})
 	return ms, found
+}
+
+// ShellSessionRegistry returns the persistent shell session registry.
+func (h *Handler) ShellSessionRegistry() *ShellSessionRegistry {
+	return h.shellSessions
 }
