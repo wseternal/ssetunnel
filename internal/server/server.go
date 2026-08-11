@@ -64,6 +64,7 @@ func (s *Server) SetAuthStore(store *auth.Store) {
 	s.handler = NewHandlerWithMetrics(s.Reg, s.handler.heartbeat, store, s.metrics, s.basePath)
 	s.handler.OnSession = s.attach
 	s.handler.OnUpPush = prev.OnUpPush
+	s.handler.shellSessions = prev.shellSessions // preserve persistent shell sessions
 }
 
 // SetMetricsCollector attaches a metrics collector for transport monitoring
@@ -75,6 +76,7 @@ func (s *Server) SetMetricsCollector(mc *metrics.MetricsCollector) {
 	s.handler = NewHandlerWithMetrics(s.Reg, s.handler.heartbeat, s.store, mc, s.basePath)
 	s.handler.OnSession = s.attach
 	s.handler.OnUpPush = prev.OnUpPush
+	s.handler.shellSessions = prev.shellSessions // preserve persistent shell sessions
 }
 
 // MetricsCollector returns the attached metrics collector (may be nil).
@@ -132,6 +134,17 @@ func (s *Server) HTTPHandler() http.Handler { return s.handler }
 // Used by the console server to proxy shell connect requests through the
 // existing /connect and /connect-up endpoints.
 func (s *Server) TunnelHandler() *Handler { return s.handler }
+
+// StartShellCleanup starts the background goroutine that periodically
+// cleans up idle persistent shell sessions. It stops when done is closed.
+func (s *Server) StartShellCleanup(done <-chan struct{}) {
+	s.handler.shellSessions.StartCleanupLoop(30*time.Second, shellIdleTimeout, done)
+}
+
+// CloseShellSessions closes all persistent shell sessions.
+func (s *Server) CloseShellSessions() {
+	s.handler.shellSessions.CloseAll()
+}
 
 // NewHTTPServer builds the production HTTP server.
 func (s *Server) NewHTTPServer(addr string) *http.Server {

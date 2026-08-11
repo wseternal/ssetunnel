@@ -227,6 +227,9 @@ export default function App() {
   const [shellAgent, setShellAgent] = useState<string>('');
   const [shellConnected, setShellConnected] = useState(false);
   const [shellSessionId, setShellSessionId] = useState<string>('');
+  const [shellPersistentId, setShellPersistentId] = useState<string>('');
+  const [shellReattached, setShellReattached] = useState(false);
+  const [activeShellSessions, setActiveShellSessions] = useState<{ id: string; agent_id: string; attached: boolean; buffered_bytes: number }[]>([]);
   const termRef = useRef<HTMLDivElement>(null);
   const xtermRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
@@ -331,6 +334,21 @@ export default function App() {
     }
   };
 
+  const fetchShellSessions = useCallback(async () => {
+    if (!sessionToken) return;
+    try {
+      const res = await fetch('/console/api/v1/shell/sessions', { headers: authHeaders() });
+      if (checkAuth(res) && res.ok) {
+        const sessions = await res.json();
+        setActiveShellSessions(sessions || []);
+        return sessions || [];
+      }
+    } catch (e) {
+      console.error(e);
+    }
+    return [];
+  }, [sessionToken]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const fetchMetricsOverview = async () => {
     try {
       const res = await fetch('/console/api/v1/metrics/overview', { headers: authHeaders() });
@@ -398,6 +416,15 @@ export default function App() {
   }, []);
 
   const disconnectShell = useCallback(() => {
+    // Explicitly terminate the persistent shell session on the server.
+    const persistentId = shellPersistentId;
+    if (persistentId) {
+      fetch('/console/api/v1/shell/sessions/delete', {
+        method: 'POST',
+        headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: persistentId }),
+      }).catch(() => {});
+    }
     if (shellAbortRef.current) {
       shellAbortRef.current.abort();
       shellAbortRef.current = null;
@@ -415,9 +442,12 @@ export default function App() {
     }
     setShellConnected(false);
     setShellSessionId('');
-  }, []);
+    setShellPersistentId('');
+    setShellReattached(false);
+    fetchShellSessions();
+  }, [shellPersistentId, fetchShellSessions]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const connectShell = useCallback(async (agentID: string) => {
+  const connectShell = useCallback(async (agentID: string, reattachId?: string) => {
     if (!agentID || !sessionToken) return;
 
     // Disconnect any existing shell first.
@@ -452,8 +482,30 @@ export default function App() {
     }
 
     const term = xtermRef.current!;
-    term.clear();
-    term.writeln('\x1b[36m[Connecting to ' + agentID + '...]\x1b[0m');
+
+    // If no explicit reattachId, check for existing sessions for this agent.
+    let effectiveReattachId = reattachId;
+    if (!effectiveReattachId) {
+      const sessions = await fetchShellSessions();
+      if (sessions) {
+        const existing = (sessions as { id: string; agent_id: string }[]).find(
+          (s: { agent_id: string }) => s.agent_id === agentID
+        );
+        if (existing) {
+          effectiveReattachId = existing.id;
+        }
+      }
+    }
+
+    if (effectiveReattachId) {
+      term.clear();
+      term.writeln('\x1b[36m[Reattaching to existing session...]\x1b[0m');
+      setShellReattached(true);
+    } else {
+      term.clear();
+      term.writeln('\x1b[36m[Connecting to ' + agentID + '...]\x1b[0m');
+      setShellReattached(false);
+    }
 
     const abort = new AbortController();
     shellAbortRef.current = abort;
@@ -464,7 +516,10 @@ export default function App() {
     setShellSessionId(sid);
 
     // Build SSE URL — auth via Authorization header (not query param).
-    const sseURL = `/console/api/v1/shell/connect?id=${encodeURIComponent(sid)}&agent=${encodeURIComponent(agentID)}`;
+    let sseURL = `/console/api/v1/shell/connect?id=${encodeURIComponent(sid)}&agent=${encodeURIComponent(agentID)}`;
+    if (effectiveReattachId) {
+      sseURL += `&reattach=${encodeURIComponent(effectiveReattachId)}`;
+    }
 
     // Set up input handler: send keystrokes via POST.
     const sendInput = async (data: string) => {
@@ -504,8 +559,16 @@ export default function App() {
         return;
       }
 
+      // Read the persistent session ID from the response header.
+      const persistentId = resp.headers.get('X-SSET-Shell-Session') || '';
+      setShellPersistentId(persistentId);
+
       setShellConnected(true);
-      term.writeln('\x1b[32m[Connected]\x1b[0m\r\n');
+      if (effectiveReattachId) {
+        term.writeln('\x1b[32m[Reattached — scrollback restored]\x1b[0m\r\n');
+      } else {
+        term.writeln('\x1b[32m[Connected]\x1b[0m\r\n');
+      }
 
       // Set up resize handler: forward xterm.js dimensions to the PTY.
       if (resizeDisposableRef.current) {
@@ -576,9 +639,11 @@ export default function App() {
       }
       setShellConnected(false);
       setShellSessionId('');
+      setShellPersistentId('');
       if (shellAbortRef.current === abort) shellAbortRef.current = null;
+      fetchShellSessions();
     }
-  }, [sessionToken, parseSSEFrames]);
+  }, [sessionToken, parseSSEFrames, fetchShellSessions]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // --- Remote Desktop ---
 
@@ -1903,7 +1968,7 @@ export default function App() {
                     </Paper>
                     {shellConnected && (
                       <Typography variant="caption" color="text.secondary" sx={{ mt: 1, display: 'block' }}>
-                        Session: {shellSessionId} | Agent: {shellAgent}
+                        Session: {shellSessionId} | Agent: {shellAgent}{shellReattached ? ' (reattached)' : ''}
                       </Typography>
                     )}
                   </Box>
@@ -2118,7 +2183,7 @@ export default function App() {
                     </Paper>
                     {shellConnected && (
                       <Typography variant="caption" color="text.secondary" sx={{ mt: 1, display: 'block' }}>
-                        Session: {shellSessionId} | Agent: {shellAgent}
+                        Session: {shellSessionId} | Agent: {shellAgent}{shellReattached ? ' (reattached)' : ''}
                       </Typography>
                     )}
                   </Box>

@@ -38,6 +38,8 @@ func NewConsoleHandler(ctx context.Context, pool *pgxpool.Pool, store *auth.Stor
 		r.Handle("/console/api/v1/shell/connect", userAuth(th.ShellConnectHandler())).Methods("GET")
 		r.Handle("/console/api/v1/shell/connect-up", userAuth(th.ShellConnectUpHandler())).Methods("POST")
 		r.Handle("/console/api/v1/shell/resize", userAuth(th.ShellConnectResizeHandler())).Methods("POST")
+		r.Handle("/console/api/v1/shell/sessions", userAuth(th.ShellSessionListHandler())).Methods("GET")
+		r.Handle("/console/api/v1/shell/sessions/delete", userAuth(th.ShellSessionDeleteHandler())).Methods("POST", "DELETE")
 
 		// Remote desktop: proxy to the tunnel handler's /connect and
 		// /connect-up endpoints with forced target=__remote_app__.
