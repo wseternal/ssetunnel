@@ -260,12 +260,12 @@ func (ss *ShellSession) outputConsumer(heartbeat time.Duration) {
 			// replay scrollback history (not just the bytes captured
 			// while detached).
 			ss.ring.Write((*buf)[:n])
-			ss.lastActivity = time.Now()
 
 			// Snapshot writer state under lock, then release before
 			// the potentially-blocking WriteFrame call so that
 			// Detach/Close are not starved by TCP backpressure.
 			ss.mu.Lock()
+			ss.lastActivity = time.Now()
 			closed := ss.closed.Load()
 			w := ss.sseWriter
 			f := ss.flusher
