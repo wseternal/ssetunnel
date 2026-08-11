@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"time"
 
@@ -139,8 +140,10 @@ func (h *Handler) shellReattach(w http.ResponseWriter, r *http.Request, ss *Shel
 	f.Flush()
 
 	// Attach: atomically drains ring buffer as SSE + sets live writer.
+	// Headers are already flushed — if Attach fails, we cannot change the
+	// HTTP status. Log the error and return; the client sees the stream close.
 	if err := ss.Attach(w, f); err != nil {
-		http.Error(w, fmt.Sprintf("attach: %v", err), http.StatusConflict)
+		log.Printf("shell: attach failed after headers sent (session=%s): %v", ss.ID(), err)
 		return
 	}
 
@@ -236,11 +239,12 @@ func (h *Handler) shellCreate(w http.ResponseWriter, r *http.Request, agentID, c
 	f.Flush()
 
 	// Attach: drains buffer (empty for new session) + sets live writer.
+	// Headers are already flushed — if Attach fails, clean up and return.
 	if err := ss.Attach(w, f); err != nil {
 		h.connectSessions.Delete(connectID)
 		ss.Close()
 		h.shellSessions.Delete(shellID)
-		http.Error(w, fmt.Sprintf("attach: %v", err), http.StatusConflict)
+		log.Printf("shell: attach failed after headers sent (session=%s): %v", shellID, err)
 		return
 	}
 

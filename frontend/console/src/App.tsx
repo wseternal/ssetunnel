@@ -488,9 +488,8 @@ export default function App() {
     const term = xtermRef.current!;
 
     // If no explicit reattachId, check for existing sessions for this agent.
-    // Skip auto-detect when reattachId is explicitly '' (404 fallback retry).
     let effectiveReattachId = reattachId;
-    if (!effectiveReattachId && reattachId !== '') {
+    if (!effectiveReattachId) {
       const sessions = await fetchShellSessions();
       if (sessions) {
         const existing = (sessions as { id: string; agent_id: string }[]).find(
@@ -552,18 +551,25 @@ export default function App() {
 
     // Start SSE stream using fetch (ReadableStream) for full header control.
     try {
-      const resp = await fetch(sseURL, {
+      let resp = await fetch(sseURL, {
         headers: { Authorization: `Bearer ${sessionToken}` },
         signal: abort.signal,
       });
+
+      // 404 reattach fallback: session expired between listing and connect.
+      // Clear reattach ID, rebuild URL, and retry once as a fresh connection.
+      if (!resp.ok && resp.status === 404 && effectiveReattachId) {
+        term.writeln('\x1b[33m[Previous session expired, creating new session...]\x1b[0m');
+        effectiveReattachId = '';
+        setShellReattached(false);
+        sseURL = `/console/api/v1/shell/connect?id=${encodeURIComponent(sid)}&agent=${encodeURIComponent(agentID)}`;
+        resp = await fetch(sseURL, {
+          headers: { Authorization: `Bearer ${sessionToken}` },
+          signal: abort.signal,
+        });
+      }
+
       if (!resp.ok) {
-        if (resp.status === 404 && effectiveReattachId) {
-          // Session expired between listing and connect — fall back to new session.
-          term.writeln('\x1b[33m[Previous session expired, creating new session...]\x1b[0m');
-          inputDisposable.dispose();
-          connectShell(agentID, ''); // retry without reattach (skips auto-detect)
-          return;
-        }
         const errText = await resp.text();
         term.writeln(`\x1b[31m[Error: ${resp.status} ${errText}]\x1b[0m`);
         setShellConnected(false);
