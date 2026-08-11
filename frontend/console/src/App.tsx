@@ -229,7 +229,6 @@ export default function App() {
   const [shellSessionId, setShellSessionId] = useState<string>('');
   const [shellPersistentId, setShellPersistentId] = useState<string>('');
   const [shellReattached, setShellReattached] = useState(false);
-  const [activeShellSessions, setActiveShellSessions] = useState<{ id: string; agent_id: string; attached: boolean; buffered_bytes: number }[]>([]);
   const termRef = useRef<HTMLDivElement>(null);
   const xtermRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
@@ -340,7 +339,6 @@ export default function App() {
       const res = await fetch('/console/api/v1/shell/sessions', { headers: authHeaders() });
       if (checkAuth(res) && res.ok) {
         const sessions = await res.json();
-        setActiveShellSessions(sessions || []);
         return sessions || [];
       }
     } catch (e) {

@@ -57,14 +57,22 @@ func NewServerWithRegistryAndBase(reg *Registry, heartbeat time.Duration, basePa
 	return s
 }
 
-// SetAuthStore attaches an authentication store for token validation.
-func (s *Server) SetAuthStore(store *auth.Store) {
-	s.store = store
+// recreateHandler builds a new Handler with the given auth store and metrics
+// collector, preserving state (callbacks, persistent shell sessions) from the
+// previous handler. All handler recreation goes through this single method
+// to avoid silently dropping state.
+func (s *Server) recreateHandler(store *auth.Store, mc *metrics.MetricsCollector) {
 	prev := s.handler
-	s.handler = NewHandlerWithMetrics(s.Reg, s.handler.heartbeat, store, s.metrics, s.basePath)
+	s.handler = NewHandlerWithMetrics(s.Reg, prev.heartbeat, store, mc, s.basePath)
 	s.handler.OnSession = s.attach
 	s.handler.OnUpPush = prev.OnUpPush
 	s.handler.shellSessions = prev.shellSessions // preserve persistent shell sessions
+}
+
+// SetAuthStore attaches an authentication store for token validation.
+func (s *Server) SetAuthStore(store *auth.Store) {
+	s.store = store
+	s.recreateHandler(store, s.metrics)
 }
 
 // SetMetricsCollector attaches a metrics collector for transport monitoring
@@ -72,11 +80,7 @@ func (s *Server) SetAuthStore(store *auth.Store) {
 // to pick up the collector.
 func (s *Server) SetMetricsCollector(mc *metrics.MetricsCollector) {
 	s.metrics = mc
-	prev := s.handler
-	s.handler = NewHandlerWithMetrics(s.Reg, s.handler.heartbeat, s.store, mc, s.basePath)
-	s.handler.OnSession = s.attach
-	s.handler.OnUpPush = prev.OnUpPush
-	s.handler.shellSessions = prev.shellSessions // preserve persistent shell sessions
+	s.recreateHandler(s.store, mc)
 }
 
 // MetricsCollector returns the attached metrics collector (may be nil).

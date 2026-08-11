@@ -696,6 +696,16 @@ func (h *Handler) handleConnectResize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cs := v.(*connectSession)
+	// Verify session ownership: non-admin users can only resize their own sessions.
+	sessInfo := UserSessionFromContext(r)
+	if sessInfo == nil && cs.userID != 0 {
+		http.Error(w, "Unauthorized: user session required", http.StatusUnauthorized)
+		return
+	}
+	if sessInfo != nil && !isAdmin(sessInfo) && cs.userID != 0 && sessInfo.UserID != cs.userID {
+		http.Error(w, "access denied", http.StatusForbidden)
+		return
+	}
 	// Drain any stale resize before sending the latest dimensions, so the
 	// newest resize always wins (channel buffer is 1).
 	select {

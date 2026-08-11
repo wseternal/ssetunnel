@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/hashicorp/yamux"
@@ -50,16 +51,16 @@ type ShellSession struct {
 	resizeCh chan windowSize // PTY resize events drained by resizeForwarder
 	metrics  *metrics.MetricsCollector // nil when metrics disabled
 
-	// mu protects sseWriter, flusher, and closed. The consumer goroutine
-	// acquires this lock after each stream read to check whether a client
-	// is attached and to write SSE frames. The Attach/Detach/Close methods
-	// hold this lock while swapping the writer. This ensures that data
-	// written to the ring buffer during the detach→attach gap is drained
-	// atomically with the writer swap (no data loss or duplication).
+	// mu protects sseWriter and flusher. The consumer goroutine acquires
+	// this lock after each stream read to check whether a client is
+	// attached and to write SSE frames. The Attach/Detach/Close methods
+	// hold this lock while swapping the writer. The closed flag is an
+	// atomic.Bool so IsDead() can be read lock-free (avoids nested lock
+	// acquisition in FindByUserAgent and CleanupIdle).
 	mu        sync.Mutex
 	sseWriter io.Writer    // non-nil when a client is attached
 	flusher   http.Flusher // flusher for the attached SSE writer
-	closed    bool
+	closed    atomic.Bool
 
 	ring *RingBuffer // output ring buffer (always written to when detached)
 
@@ -128,17 +129,17 @@ func (ss *ShellSession) Start(heartbeat time.Duration) {
 	go ss.resizeForwarder()
 }
 
-// Attach connects a client to this session. It atomically drains the
-// ring buffer as SSE frames and sets the SSE writer for live streaming.
-// The caller must hold no locks and must block until the client
-// disconnects, then call Detach.
+// Attach connects a client to this session. It drains the ring buffer
+// as SSE frames and sets the SSE writer for live streaming. The caller
+// must hold no locks and must block until the client disconnects, then
+// call Detach.
 //
-// The drain and writer swap happen under the same lock as the consumer's
-// post-read check, guaranteeing no data loss or duplication during the
-// transition from detached to attached.
+// The drain and writer swap use a lock-release-reacquire pattern to
+// avoid holding ss.mu during the potentially-blocking WriteFrame call,
+// which would starve Detach/Close under TCP backpressure.
 func (ss *ShellSession) Attach(w io.Writer, f http.Flusher) error {
 	ss.mu.Lock()
-	if ss.closed {
+	if ss.closed.Load() {
 		ss.mu.Unlock()
 		return fmt.Errorf("session closed")
 	}
@@ -147,23 +148,32 @@ func (ss *ShellSession) Attach(w io.Writer, f http.Flusher) error {
 		return fmt.Errorf("already attached")
 	}
 
-	// Drain ring buffer as SSE frames while holding the lock. The
-	// consumer cannot read from the stream and write to the buffer
-	// concurrently because it also needs this lock to check the writer.
+	// Drain ring buffer under lock. Release before the potentially-blocking
+	// WriteFrame to avoid starving Detach/Close under TCP backpressure.
 	data := ss.ring.ReadAll()
+	ss.mu.Unlock()
+
 	if len(data) > 0 {
 		if err := transport.WriteFrame(w, f, data); err != nil {
-			ss.mu.Unlock()
 			return fmt.Errorf("replay buffer: %w", err)
 		}
 	}
 
-	// Set the live SSE writer. From now on, the consumer will write
-	// SSE frames directly to w instead of buffering.
+	// Re-acquire lock to set the live SSE writer. Between drain and this
+	// point, the consumer writes to the ring buffer (sseWriter is nil);
+	// any bytes arriving in that window are safe — they go to the ring
+	// buffer which will be drained on next reattach if needed.
+	ss.mu.Lock()
+	if ss.closed.Load() {
+		ss.mu.Unlock()
+		return fmt.Errorf("session closed")
+	}
 	ss.sseWriter = w
 	ss.flusher = f
 	ss.lastActivity = time.Now()
 	ss.mu.Unlock()
+
+	log.Printf("shell: attached client to session %s (agent=%s)", ss.id, ss.agentID)
 
 	// Signal consumer to wake up (in case it was waiting).
 	select {
@@ -181,17 +191,17 @@ func (ss *ShellSession) Detach() {
 	ss.flusher = nil
 	ss.lastActivity = time.Now()
 	ss.mu.Unlock()
+	log.Printf("shell: detached session %s (agent=%s)", ss.id, ss.agentID)
 }
 
 // Close permanently destroys the session: closes the yamux stream,
 // pipes, and signals all goroutines to exit.
 func (ss *ShellSession) Close() error {
-	ss.mu.Lock()
-	if ss.closed {
-		ss.mu.Unlock()
-		return nil
+	if !ss.closed.CompareAndSwap(false, true) {
+		return nil // already closed
 	}
-	ss.closed = true
+
+	ss.mu.Lock()
 	ss.sseWriter = nil
 	ss.flusher = nil
 	ss.mu.Unlock()
@@ -207,10 +217,10 @@ func (ss *ShellSession) Close() error {
 }
 
 // IsDead reports whether the session has been closed.
+// Lock-free via atomic read so callers (e.g., FindByUserAgent) can check
+// without acquiring ss.mu (avoids nested lock under registry lock).
 func (ss *ShellSession) IsDead() bool {
-	ss.mu.Lock()
-	defer ss.mu.Unlock()
-	return ss.closed
+	return ss.closed.Load()
 }
 
 // LastActivity returns the time of the last client activity.
@@ -224,9 +234,10 @@ func (ss *ShellSession) LastActivity() time.Time {
 // state under a single lock acquisition. Used by CleanupIdle to avoid
 // three separate lock round-trips per session.
 func (ss *ShellSession) snapshotState() (dead, attached bool, lastAct time.Time) {
+	dead = ss.closed.Load() // atomic, no lock needed
 	ss.mu.Lock()
 	defer ss.mu.Unlock()
-	return ss.closed, ss.sseWriter != nil, ss.lastActivity
+	return dead, ss.sseWriter != nil, ss.lastActivity
 }
 
 // outputConsumer reads from the yamux stream and either writes SSE
@@ -249,11 +260,9 @@ func (ss *ShellSession) outputConsumer(heartbeat time.Duration) {
 			// the potentially-blocking WriteFrame call so that
 			// Detach/Close are not starved by TCP backpressure.
 			ss.mu.Lock()
-			closed := ss.closed
+			closed := ss.closed.Load()
 			w := ss.sseWriter
 			f := ss.flusher
-			data := make([]byte, n)
-			copy(data, (*buf)[:n])
 			ss.mu.Unlock()
 
 			if closed {
@@ -261,8 +270,8 @@ func (ss *ShellSession) outputConsumer(heartbeat time.Duration) {
 			}
 
 			if w != nil {
-				// Attached: write SSE frame outside the lock.
-				if werr := transport.WriteFrame(w, f, data); werr != nil {
+				// Attached: write SSE frame outside the lock using pooled buffer.
+				if werr := transport.WriteFrame(w, f, (*buf)[:n]); werr != nil {
 					// Client write failed — re-acquire lock to detach and buffer.
 					// Guard: only clear if the current writer is still the one
 					// that failed (a new client may have attached in the meantime).
@@ -272,16 +281,23 @@ func (ss *ShellSession) outputConsumer(heartbeat time.Duration) {
 						ss.flusher = nil
 						ss.lastActivity = time.Now()
 					}
-					ss.ring.Write(data)
+					ss.ring.Write((*buf)[:n])
 					ss.mu.Unlock()
 				} else {
+					// Successful write: check if writer changed during WriteFrame.
+					// If so, data went to a stale (disconnected) writer — buffer
+					// it so the reattaching client recovers via ring replay.
+					ss.mu.Lock()
+					if ss.sseWriter != w {
+						ss.ring.Write((*buf)[:n])
+					}
+					ss.mu.Unlock()
 					ss.metrics.RecordConnectBytes(ss.agentID, 0, n)
 				}
 			} else {
-				// Detached: buffer raw bytes.
-				ss.mu.Lock()
-				ss.ring.Write(data)
-				ss.mu.Unlock()
+				// Detached: buffer raw bytes and record metrics.
+				ss.ring.Write((*buf)[:n])
+				ss.metrics.RecordConnectBytes(ss.agentID, 0, n)
 			}
 		}
 
@@ -295,7 +311,7 @@ func (ss *ShellSession) outputConsumer(heartbeat time.Duration) {
 			ss.mu.Lock()
 			w := ss.sseWriter
 			f := ss.flusher
-			closed := ss.closed
+			closed := ss.closed.Load()
 			ss.mu.Unlock()
 
 			if closed {
@@ -327,6 +343,9 @@ func (ss *ShellSession) outputConsumer(heartbeat time.Duration) {
 		}
 
 		// Stream closed (agent disconnect or error).
+		if !errors.Is(err, io.EOF) {
+			log.Printf("shell: stream closed (session=%s, agent=%s): %v", ss.id, ss.agentID, err)
+		}
 		return
 	}
 }
@@ -340,6 +359,11 @@ func (ss *ShellSession) inputForwarder() {
 	defer bufferPool.Put(buf)
 
 	for {
+		select {
+		case <-ss.done:
+			return
+		default:
+		}
 		ss.upPipe.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
 		n, err := ss.upPipe.Read(*buf)
 		if n > 0 {
@@ -425,7 +449,7 @@ func (r *ShellSessionRegistry) FindByUserAgent(userID int64, agentID string) *Sh
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for _, ss := range r.sessions {
-		if ss.agentID == agentID && (userID < 0 || ss.userID == userID) && !ss.IsDead() {
+		if ss.agentID == agentID && (userID < 0 || ss.userID == userID) && !ss.closed.Load() {
 			return ss
 		}
 	}
@@ -459,11 +483,12 @@ func (r *ShellSessionRegistry) CleanupIdle(timeout time.Duration) {
 	for id, ss := range r.sessions {
 		dead, attached, lastAct := ss.snapshotState()
 		if dead {
+			log.Printf("shell: reaping dead session %s (agent=%s)", id, ss.agentID)
 			delete(r.sessions, id)
 			continue
 		}
 		if !attached && now.Sub(lastAct) > timeout {
-			log.Printf("shell: cleaning up idle session %s (agent=%s, idle=%v)", ss.id, ss.agentID, now.Sub(lastAct))
+			log.Printf("shell: cleaning up idle session %s (agent=%s, user=%d, idle=%v)", ss.id, ss.agentID, ss.userID, now.Sub(lastAct))
 			toClose = append(toClose, ss)
 			delete(r.sessions, id)
 		}
@@ -502,6 +527,7 @@ func (r *ShellSessionRegistry) CloseAll() {
 	r.sessions = make(map[string]*ShellSession)
 	r.mu.Unlock()
 
+	log.Printf("shell: closing %d sessions on shutdown", len(sessions))
 	for _, ss := range sessions {
 		ss.Close()
 	}

@@ -25,7 +25,9 @@ var forcedTargetKey = forcedTargetKeyType{}
 // shell session ID, decoupled from the ephemeral connect session ID.
 func generateShellID() string {
 	b := make([]byte, 16)
-	_, _ = rand.Read(b)
+	if _, err := rand.Read(b); err != nil {
+		panic(fmt.Sprintf("crypto/rand failed: %v", err))
+	}
 	return hex.EncodeToString(b)
 }
 
@@ -51,6 +53,11 @@ const TargetShell = "__shell__"
 // the yamux stream stays alive and output continues buffering.
 func (h *Handler) ShellConnectHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
 		// Validate user session auth.
 		sessInfo := UserSessionFromContext(r)
 		if sessInfo == nil {
@@ -176,7 +183,7 @@ func (h *Handler) shellCreate(w http.ResponseWriter, r *http.Request, agentID, c
 			break
 		}
 		if time.Now().After(deadline) || r.Context().Err() != nil {
-			http.Error(w, fmt.Sprintf("agent %q not connected", agentID), http.StatusNotFound)
+			http.Error(w, "agent not connected, try again", http.StatusNotFound)
 			return
 		}
 		time.Sleep(connectPollInterval)
@@ -191,7 +198,8 @@ func (h *Handler) shellCreate(w http.ResponseWriter, r *http.Request, agentID, c
 	// Open a yamux stream to the agent.
 	stream, err := ms.OpenStream()
 	if err != nil {
-		http.Error(w, fmt.Sprintf("open stream: %v", err), http.StatusServiceUnavailable)
+		log.Printf("shell: open stream failed for agent %s: %v", agentID, err)
+		http.Error(w, "failed to connect to agent, try again", http.StatusServiceUnavailable)
 		return
 	}
 
@@ -199,7 +207,8 @@ func (h *Handler) shellCreate(w http.ResponseWriter, r *http.Request, agentID, c
 	if agentSess != nil && agentSess.WantTarget() {
 		if _, err := fmt.Fprintf(stream, "%s\n", TargetShell); err != nil {
 			stream.Close()
-			http.Error(w, fmt.Sprintf("write target header: %v", err), http.StatusInternalServerError)
+			log.Printf("shell: write target header failed for agent %s: %v", agentID, err)
+			http.Error(w, "failed to connect to agent", http.StatusInternalServerError)
 			return
 		}
 	}
@@ -209,6 +218,7 @@ func (h *Handler) shellCreate(w http.ResponseWriter, r *http.Request, agentID, c
 	ss := NewShellSession(shellID, agentID, sessInfo.UserID, stream, h.metrics)
 	h.shellSessions.Store(ss)
 	ss.Start(h.heartbeat)
+	log.Printf("shell: created session %s (agent=%s, user=%d)", shellID, agentID, sessInfo.UserID)
 
 	// Register in connectSessions for connect-up/connect-resize compatibility.
 	cs := &connectSession{
@@ -226,6 +236,7 @@ func (h *Handler) shellCreate(w http.ResponseWriter, r *http.Request, agentID, c
 		go func() {
 			select {
 			case <-agentSess.Done():
+				log.Printf("shell: agent session died, closing shell %s (agent=%s)", ss.ID(), ss.AgentID())
 				ss.Close()
 			case <-ss.Done():
 			}
@@ -355,6 +366,7 @@ func (h *Handler) ShellSessionDeleteHandler() http.Handler {
 
 		h.shellSessions.Delete(req.ID)
 		ss.Close()
+		log.Printf("shell: deleted session %s (agent=%s)", req.ID, ss.AgentID())
 		w.WriteHeader(http.StatusNoContent)
 	})
 }

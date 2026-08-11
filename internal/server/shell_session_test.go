@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"testing"
 	"time"
 )
@@ -127,3 +128,103 @@ func TestShellSessionRegistry_CloseAll(t *testing.T) {
 		t.Fatalf("session should be dead after CloseAll")
 	}
 }
+
+func TestShellSession_AttachClosedSession(t *testing.T) {
+	ss := &ShellSession{
+		id: "closed-1", agentID: "a", userID: 1,
+		ring: NewRingBuffer(64), wakeup: make(chan struct{}, 1), done: make(chan struct{}),
+		createdAt: time.Now(), lastActivity: time.Now(),
+	}
+	ss.closed.Store(true)
+
+	if err := ss.Attach(&discardWriter{}, nil); err == nil {
+		t.Fatal("Attach on closed session should fail")
+	}
+}
+
+func TestShellSession_DoubleAttach(t *testing.T) {
+	ss := &ShellSession{
+		id: "dbl-1", agentID: "a", userID: 1,
+		ring: NewRingBuffer(64), wakeup: make(chan struct{}, 1), done: make(chan struct{}),
+		createdAt: time.Now(), lastActivity: time.Now(),
+	}
+
+	if err := ss.Attach(&discardWriter{}, nil); err != nil {
+		t.Fatalf("first Attach: %v", err)
+	}
+	if err := ss.Attach(&discardWriter{}, nil); err == nil {
+		t.Fatal("second Attach should fail (already attached)")
+	}
+	ss.Detach()
+	// After Detach, should be able to Attach again.
+	if err := ss.Attach(&discardWriter{}, nil); err != nil {
+		t.Fatalf("Attach after Detach: %v", err)
+	}
+}
+
+func TestShellSession_AttachDrainsRingBuffer(t *testing.T) {
+	ss := &ShellSession{
+		id: "drain-1", agentID: "a", userID: 1,
+		ring: NewRingBuffer(256), wakeup: make(chan struct{}, 1), done: make(chan struct{}),
+		createdAt: time.Now(), lastActivity: time.Now(),
+	}
+
+	// Pre-populate the ring buffer.
+	ss.ring.Write([]byte("hello world"))
+	if ss.ring.Len() != 11 {
+		t.Fatalf("ring Len = %d, want 11", ss.ring.Len())
+	}
+
+	// Attach should drain the ring buffer.
+	var buf bytes.Buffer
+	f := &nopFlusher{}
+	if err := ss.Attach(&buf, f); err != nil {
+		t.Fatalf("Attach: %v", err)
+	}
+
+	if ss.ring.Len() != 0 {
+		t.Fatalf("after Attach, ring Len = %d, want 0", ss.ring.Len())
+	}
+	if buf.Len() == 0 {
+		t.Fatal("Attach should have written buffered data to writer")
+	}
+}
+
+func TestShellSession_CloseIdempotent(t *testing.T) {
+	ss := &ShellSession{
+		id: "idem-1", agentID: "a", userID: 1,
+		ring: NewRingBuffer(64), wakeup: make(chan struct{}, 1), done: make(chan struct{}),
+		createdAt: time.Now(), lastActivity: time.Now(),
+	}
+
+	if err := ss.Close(); err != nil {
+		t.Fatalf("first Close: %v", err)
+	}
+	if err := ss.Close(); err != nil {
+		t.Fatalf("second Close should be no-op, got: %v", err)
+	}
+	if !ss.IsDead() {
+		t.Fatal("session should be dead after Close")
+	}
+}
+
+func TestShellSession_DetachClearsWriter(t *testing.T) {
+	ss := &ShellSession{
+		id: "det-1", agentID: "a", userID: 1,
+		ring: NewRingBuffer(64), wakeup: make(chan struct{}, 1), done: make(chan struct{}),
+		createdAt: time.Now(), lastActivity: time.Now(),
+	}
+
+	ss.Attach(&discardWriter{}, nil)
+	if !ss.Attached() {
+		t.Fatal("should be attached")
+	}
+	ss.Detach()
+	if ss.Attached() {
+		t.Fatal("should not be attached after Detach")
+	}
+}
+
+type nopFlusher struct{}
+
+func (f *nopFlusher) Flush() {}
