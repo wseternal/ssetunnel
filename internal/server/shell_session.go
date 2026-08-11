@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"sync"
@@ -141,6 +142,10 @@ func (ss *ShellSession) Attach(w io.Writer, f http.Flusher) error {
 		ss.mu.Unlock()
 		return fmt.Errorf("session closed")
 	}
+	if ss.sseWriter != nil {
+		ss.mu.Unlock()
+		return fmt.Errorf("already attached")
+	}
 
 	// Drain ring buffer as SSE frames while holding the lock. The
 	// consumer cannot read from the stream and write to the buffer
@@ -215,6 +220,15 @@ func (ss *ShellSession) LastActivity() time.Time {
 	return ss.lastActivity
 }
 
+// snapshotState returns the session's closed, attached, and lastActivity
+// state under a single lock acquisition. Used by CleanupIdle to avoid
+// three separate lock round-trips per session.
+func (ss *ShellSession) snapshotState() (dead, attached bool, lastAct time.Time) {
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+	return ss.closed, ss.sseWriter != nil, ss.lastActivity
+}
+
 // outputConsumer reads from the yamux stream and either writes SSE
 // frames to the attached client or buffers raw bytes into the ring
 // buffer when detached. The lock is held for the entire
@@ -231,32 +245,38 @@ func (ss *ShellSession) outputConsumer(heartbeat time.Duration) {
 		n, err := ss.stream.Read(*buf)
 
 		if n > 0 {
+			// Snapshot writer state under lock, then release before
+			// the potentially-blocking WriteFrame call so that
+			// Detach/Close are not starved by TCP backpressure.
 			ss.mu.Lock()
 			closed := ss.closed
 			w := ss.sseWriter
 			f := ss.flusher
+			data := make([]byte, n)
+			copy(data, (*buf)[:n])
+			ss.mu.Unlock()
 
 			if closed {
-				ss.mu.Unlock()
 				return
 			}
 
 			if w != nil {
-				// Attached: write SSE frame directly to client.
-				if werr := transport.WriteFrame(w, f, (*buf)[:n]); werr != nil {
-					// Client write failed — detach and buffer.
+				// Attached: write SSE frame outside the lock.
+				if werr := transport.WriteFrame(w, f, data); werr != nil {
+					// Client write failed — re-acquire lock to detach and buffer.
+					ss.mu.Lock()
 					ss.sseWriter = nil
 					ss.flusher = nil
 					ss.lastActivity = time.Now()
-					ss.ring.Write((*buf)[:n])
+					ss.ring.Write(data)
 					ss.mu.Unlock()
 				} else {
 					ss.metrics.RecordConnectBytes(ss.agentID, 0, n)
-					ss.mu.Unlock()
 				}
 			} else {
 				// Detached: buffer raw bytes.
-				ss.ring.Write((*buf)[:n])
+				ss.mu.Lock()
+				ss.ring.Write(data)
 				ss.mu.Unlock()
 			}
 		}
@@ -425,11 +445,13 @@ func (r *ShellSessionRegistry) CleanupIdle(timeout time.Duration) {
 
 	r.mu.Lock()
 	for id, ss := range r.sessions {
-		if ss.IsDead() {
+		dead, attached, lastAct := ss.snapshotState()
+		if dead {
 			delete(r.sessions, id)
 			continue
 		}
-		if !ss.Attached() && now.Sub(ss.LastActivity()) > timeout {
+		if !attached && now.Sub(lastAct) > timeout {
+			log.Printf("shell: cleaning up idle session %s (agent=%s, idle=%v)", ss.id, ss.agentID, now.Sub(lastAct))
 			toClose = append(toClose, ss)
 			delete(r.sessions, id)
 		}

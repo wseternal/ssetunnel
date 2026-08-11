@@ -24,11 +24,12 @@ func (rb *RingBuffer) Write(p []byte) (int, error) {
 	if len(p) == 0 {
 		return 0, nil
 	}
+	origN := len(p)
 	rb.mu.Lock()
 	defer rb.mu.Unlock()
 
 	cap := len(rb.buf)
-	n := len(p)
+	n := origN
 
 	// If the write exceeds capacity, keep only the last cap bytes.
 	if n > cap {
@@ -54,7 +55,7 @@ func (rb *RingBuffer) Write(p []byte) (int, error) {
 		rb.head = (rb.head + rb.size - cap) % cap
 		rb.size = cap
 	}
-	return len(p), nil
+	return origN, nil
 }
 
 // ReadAll returns all buffered data in FIFO order and drains the buffer.

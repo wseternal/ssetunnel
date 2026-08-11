@@ -136,3 +136,29 @@ func TestRingBuffer_Cap(t *testing.T) {
 		t.Fatalf("Cap = %d, want 42", rb.Cap())
 	}
 }
+
+// TestRingBuffer_WriteReturnsOriginalLength verifies the io.Writer contract:
+// Write must return the original len(p) even when data exceeds capacity
+// and is internally clipped.
+func TestRingBuffer_WriteReturnsOriginalLength(t *testing.T) {
+	rb := NewRingBuffer(8)
+
+	// Write 16 bytes (2× capacity). Write must return 16, not 8.
+	input := []byte("ABCDEFGHIJKLMNOP")
+	n, err := rb.Write(input)
+	if err != nil {
+		t.Fatalf("Write error: %v", err)
+	}
+	if n != len(input) {
+		t.Fatalf("Write returned %d, want %d (io.Writer contract)", n, len(input))
+	}
+	// Buffer holds only the last 8 bytes.
+	if rb.Len() != 8 {
+		t.Fatalf("Len = %d, want 8", rb.Len())
+	}
+	got := rb.ReadAll()
+	want := []byte("IJKLMNOP")
+	if !bytes.Equal(got, want) {
+		t.Fatalf("ReadAll = %q, want %q", got, want)
+	}
+}

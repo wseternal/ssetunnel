@@ -1,6 +1,8 @@
 package server
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -17,6 +19,14 @@ import (
 type forcedTargetKeyType struct{}
 
 var forcedTargetKey = forcedTargetKeyType{}
+
+// generateShellID returns a 32-character hex string for use as a persistent
+// shell session ID, decoupled from the ephemeral connect session ID.
+func generateShellID() string {
+	b := make([]byte, 16)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
+}
 
 // TargetShell is the magic target name that tells the agent to spawn
 // an interactive shell with a PTY instead of dialing a TCP address.
@@ -191,8 +201,9 @@ func (h *Handler) shellCreate(w http.ResponseWriter, r *http.Request, agentID, c
 		}
 	}
 
-	// Create the persistent shell session.
-	ss := NewShellSession(connectID, agentID, sessInfo.UserID, stream, h.metrics)
+	// Create the persistent shell session with an independent ID.
+	shellID := generateShellID()
+	ss := NewShellSession(shellID, agentID, sessInfo.UserID, stream, h.metrics)
 	h.shellSessions.Store(ss)
 	ss.Start(h.heartbeat)
 
@@ -228,7 +239,7 @@ func (h *Handler) shellCreate(w http.ResponseWriter, r *http.Request, agentID, c
 	if err := ss.Attach(w, f); err != nil {
 		h.connectSessions.Delete(connectID)
 		ss.Close()
-		h.shellSessions.Delete(connectID)
+		h.shellSessions.Delete(shellID)
 		http.Error(w, fmt.Sprintf("attach: %v", err), http.StatusConflict)
 		return
 	}

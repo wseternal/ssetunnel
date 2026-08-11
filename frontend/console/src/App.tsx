@@ -415,15 +415,19 @@ export default function App() {
     return frames;
   }, []);
 
-  const disconnectShell = useCallback(() => {
+  const disconnectShell = useCallback(async () => {
     // Explicitly terminate the persistent shell session on the server.
+    // Await to prevent race where a fast reconnect creates a new session
+    // that the still-in-flight DELETE would then kill.
     const persistentId = shellPersistentId;
     if (persistentId) {
-      fetch('/console/api/v1/shell/sessions/delete', {
-        method: 'POST',
-        headers: { ...authHeaders(), 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id: persistentId }),
-      }).catch(() => {});
+      try {
+        await fetch('/console/api/v1/shell/sessions/delete', {
+          method: 'POST',
+          headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: persistentId }),
+        });
+      } catch { /* best-effort server cleanup */ }
     }
     if (shellAbortRef.current) {
       shellAbortRef.current.abort();
@@ -484,8 +488,9 @@ export default function App() {
     const term = xtermRef.current!;
 
     // If no explicit reattachId, check for existing sessions for this agent.
+    // Skip auto-detect when reattachId is explicitly '' (404 fallback retry).
     let effectiveReattachId = reattachId;
-    if (!effectiveReattachId) {
+    if (!effectiveReattachId && reattachId !== '') {
       const sessions = await fetchShellSessions();
       if (sessions) {
         const existing = (sessions as { id: string; agent_id: string }[]).find(
@@ -552,6 +557,13 @@ export default function App() {
         signal: abort.signal,
       });
       if (!resp.ok) {
+        if (resp.status === 404 && effectiveReattachId) {
+          // Session expired between listing and connect — fall back to new session.
+          term.writeln('\x1b[33m[Previous session expired, creating new session...]\x1b[0m');
+          inputDisposable.dispose();
+          connectShell(agentID, ''); // retry without reattach (skips auto-detect)
+          return;
+        }
         const errText = await resp.text();
         term.writeln(`\x1b[31m[Error: ${resp.status} ${errText}]\x1b[0m`);
         setShellConnected(false);
