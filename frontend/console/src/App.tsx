@@ -1931,64 +1931,68 @@ export default function App() {
                   </Box>
                 )}
 
-                {tabIndex === 4 && (
-                  <Box>
-                    <PageHeader
-                      title="Cloud Shell"
-                      actions={
-                        <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
-                          <FormControl size="small" sx={{ minWidth: 180 }}>
-                            <InputLabel>Agent</InputLabel>
-                            <Select
-                              value={shellAgent}
-                              label="Agent"
-                              onChange={(e) => setShellAgent(e.target.value)}
-                              disabled={shellConnected}
-                            >
-                              {connectedAgents.map((ca) => (
-                                <MenuItem key={ca.agent_id} value={ca.agent_id}>{ca.agent_id}</MenuItem>
-                              ))}
-                            </Select>
-                          </FormControl>
-                          {shellConnected ? (
-                            <Button variant="outlined" color="warning" onClick={disconnectShell}>
-                              Disconnect
-                            </Button>
-                          ) : (
-                            <Button
-                              variant="contained"
-                              startIcon={<TerminalIcon />}
-                              onClick={() => connectShell(shellAgent)}
-                              disabled={!shellAgent}
-                            >
-                              Connect
-                            </Button>
-                          )}
-                        </Box>
-                      }
-                    />
-                    {connectedAgents.length === 0 && (
-                      <Alert severity="info" sx={{ mb: 2 }}>No agents connected. Start an agent to use the cloud shell.</Alert>
-                    )}
-                    <Paper
-                      sx={{
-                        bgcolor: '#1e1e2e',
-                        p: 0.5,
-                        borderRadius: 2,
-                        minHeight: 400,
-                        '& .xterm': { p: 1 },
-                        '& .xterm-viewport': { borderRadius: 1 },
-                      }}
-                    >
-                      <div ref={termRef} style={{ height: 450 }} />
-                    </Paper>
-                    {shellConnected && (
-                      <Typography variant="caption" color="text.secondary" sx={{ mt: 1, display: 'block' }}>
-                        Session: {shellSessionId} | Agent: {shellAgent}{shellReattached ? ' (reattached)' : ''}
-                      </Typography>
-                    )}
-                  </Box>
-                )}
+                {/* Shell panel: terminal div stays mounted (CSS-hidden when not active)
+                    so xterm instance and SSE read loop survive tab switches. */}
+                <Box sx={{ display: tabIndex === 4 ? 'block' : 'none' }}>
+                  {tabIndex === 4 && (
+                    <>
+                      <PageHeader
+                        title="Cloud Shell"
+                        actions={
+                          <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
+                            <FormControl size="small" sx={{ minWidth: 180 }}>
+                              <InputLabel>Agent</InputLabel>
+                              <Select
+                                value={shellAgent}
+                                label="Agent"
+                                onChange={(e) => setShellAgent(e.target.value)}
+                                disabled={shellConnected}
+                              >
+                                {connectedAgents.map((ca) => (
+                                  <MenuItem key={ca.agent_id} value={ca.agent_id}>{ca.agent_id}</MenuItem>
+                                ))}
+                              </Select>
+                            </FormControl>
+                            {shellConnected ? (
+                              <Button variant="outlined" color="warning" onClick={disconnectShell}>
+                                Disconnect
+                              </Button>
+                            ) : (
+                              <Button
+                                variant="contained"
+                                startIcon={<TerminalIcon />}
+                                onClick={() => connectShell(shellAgent)}
+                                disabled={!shellAgent}
+                              >
+                                Connect
+                              </Button>
+                            )}
+                          </Box>
+                        }
+                      />
+                      {connectedAgents.length === 0 && (
+                        <Alert severity="info" sx={{ mb: 2 }}>No agents connected. Start an agent to use the cloud shell.</Alert>
+                      )}
+                    </>
+                  )}
+                  <Paper
+                    sx={{
+                      bgcolor: '#1e1e2e',
+                      p: 0.5,
+                      borderRadius: 2,
+                      minHeight: 400,
+                      '& .xterm': { p: 1 },
+                      '& .xterm-viewport': { borderRadius: 1 },
+                    }}
+                  >
+                    <div ref={termRef} style={{ height: 450 }} />
+                  </Paper>
+                  {tabIndex === 4 && shellConnected && (
+                    <Typography variant="caption" color="text.secondary" sx={{ mt: 1, display: 'block' }}>
+                      Session: {shellSessionId} | Agent: {shellAgent}{shellReattached ? ' (reattached)' : ''}
+                    </Typography>
+                  )}
+                </Box>
                 {tabIndex === 5 && desktopPanel}
               </>
             ) : (
@@ -2146,64 +2150,68 @@ export default function App() {
                   </Box>
                 )}
 
-                {tabIndex === 3 && (
-                  <Box>
-                    <PageHeader
-                      title="Cloud Shell"
-                      actions={
-                        <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
-                          <FormControl size="small" sx={{ minWidth: 180 }}>
-                            <InputLabel>Agent</InputLabel>
-                            <Select
-                              value={shellAgent}
-                              label="Agent"
-                              onChange={(e) => setShellAgent(e.target.value)}
-                              disabled={shellConnected}
-                            >
-                              {connectedAgents.map((ca) => (
-                                <MenuItem key={ca.agent_id} value={ca.agent_id}>{ca.agent_id}</MenuItem>
-                              ))}
-                            </Select>
-                          </FormControl>
-                          {shellConnected ? (
-                            <Button variant="outlined" color="warning" onClick={disconnectShell}>
-                              Disconnect
-                            </Button>
-                          ) : (
-                            <Button
-                              variant="contained"
-                              startIcon={<TerminalIcon />}
-                              onClick={() => connectShell(shellAgent)}
-                              disabled={!shellAgent}
-                            >
-                              Connect
-                            </Button>
-                          )}
-                        </Box>
-                      }
-                    />
-                    {connectedAgents.length === 0 && (
-                      <Alert severity="info" sx={{ mb: 2 }}>No agents connected. Start an agent to use the cloud shell.</Alert>
-                    )}
-                    <Paper
-                      sx={{
-                        bgcolor: '#1e1e2e',
-                        p: 0.5,
-                        borderRadius: 2,
-                        minHeight: 400,
-                        '& .xterm': { p: 1 },
-                        '& .xterm-viewport': { borderRadius: 1 },
-                      }}
-                    >
-                      <div ref={termRef} style={{ height: 450 }} />
-                    </Paper>
-                    {shellConnected && (
-                      <Typography variant="caption" color="text.secondary" sx={{ mt: 1, display: 'block' }}>
-                        Session: {shellSessionId} | Agent: {shellAgent}{shellReattached ? ' (reattached)' : ''}
-                      </Typography>
-                    )}
-                  </Box>
-                )}
+                {/* Shell panel: terminal div stays mounted (CSS-hidden when not active)
+                    so xterm instance and SSE read loop survive tab switches. */}
+                <Box sx={{ display: tabIndex === 3 ? 'block' : 'none' }}>
+                  {tabIndex === 3 && (
+                    <>
+                      <PageHeader
+                        title="Cloud Shell"
+                        actions={
+                          <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
+                            <FormControl size="small" sx={{ minWidth: 180 }}>
+                              <InputLabel>Agent</InputLabel>
+                              <Select
+                                value={shellAgent}
+                                label="Agent"
+                                onChange={(e) => setShellAgent(e.target.value)}
+                                disabled={shellConnected}
+                              >
+                                {connectedAgents.map((ca) => (
+                                  <MenuItem key={ca.agent_id} value={ca.agent_id}>{ca.agent_id}</MenuItem>
+                                ))}
+                              </Select>
+                            </FormControl>
+                            {shellConnected ? (
+                              <Button variant="outlined" color="warning" onClick={disconnectShell}>
+                                Disconnect
+                              </Button>
+                            ) : (
+                              <Button
+                                variant="contained"
+                                startIcon={<TerminalIcon />}
+                                onClick={() => connectShell(shellAgent)}
+                                disabled={!shellAgent}
+                              >
+                                Connect
+                              </Button>
+                            )}
+                          </Box>
+                        }
+                      />
+                      {connectedAgents.length === 0 && (
+                        <Alert severity="info" sx={{ mb: 2 }}>No agents connected. Start an agent to use the cloud shell.</Alert>
+                      )}
+                    </>
+                  )}
+                  <Paper
+                    sx={{
+                      bgcolor: '#1e1e2e',
+                      p: 0.5,
+                      borderRadius: 2,
+                      minHeight: 400,
+                      '& .xterm': { p: 1 },
+                      '& .xterm-viewport': { borderRadius: 1 },
+                    }}
+                  >
+                    <div ref={termRef} style={{ height: 450 }} />
+                  </Paper>
+                  {tabIndex === 3 && shellConnected && (
+                    <Typography variant="caption" color="text.secondary" sx={{ mt: 1, display: 'block' }}>
+                      Session: {shellSessionId} | Agent: {shellAgent}{shellReattached ? ' (reattached)' : ''}
+                    </Typography>
+                  )}
+                </Box>
                 {tabIndex === 4 && desktopPanel}
               </>
             )}

@@ -256,6 +256,12 @@ func (ss *ShellSession) outputConsumer(heartbeat time.Duration) {
 		n, err := ss.stream.Read(*buf)
 
 		if n > 0 {
+			// Always write to ring buffer so reattaching clients can
+			// replay scrollback history (not just the bytes captured
+			// while detached).
+			ss.ring.Write((*buf)[:n])
+			ss.lastActivity = time.Now()
+
 			// Snapshot writer state under lock, then release before
 			// the potentially-blocking WriteFrame call so that
 			// Detach/Close are not starved by TCP backpressure.
@@ -272,31 +278,18 @@ func (ss *ShellSession) outputConsumer(heartbeat time.Duration) {
 			if w != nil {
 				// Attached: write SSE frame outside the lock using pooled buffer.
 				if werr := transport.WriteFrame(w, f, (*buf)[:n]); werr != nil {
-					// Client write failed — re-acquire lock to detach and buffer.
+					// Client write failed — re-acquire lock to detach.
 					// Guard: only clear if the current writer is still the one
 					// that failed (a new client may have attached in the meantime).
 					ss.mu.Lock()
 					if ss.sseWriter == w {
 						ss.sseWriter = nil
 						ss.flusher = nil
-						ss.lastActivity = time.Now()
-					}
-					ss.ring.Write((*buf)[:n])
-					ss.mu.Unlock()
-				} else {
-					// Successful write: check if writer changed during WriteFrame.
-					// If so, data went to a stale (disconnected) writer — buffer
-					// it so the reattaching client recovers via ring replay.
-					ss.mu.Lock()
-					if ss.sseWriter != w {
-						ss.ring.Write((*buf)[:n])
 					}
 					ss.mu.Unlock()
-					ss.metrics.RecordConnectBytes(ss.agentID, 0, n)
 				}
+				ss.metrics.RecordConnectBytes(ss.agentID, 0, n)
 			} else {
-				// Detached: buffer raw bytes and record metrics.
-				ss.ring.Write((*buf)[:n])
 				ss.metrics.RecordConnectBytes(ss.agentID, 0, n)
 			}
 		}
