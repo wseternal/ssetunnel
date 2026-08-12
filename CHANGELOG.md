@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.7.0](https://github.com/wseternal/ssetunnel/compare/v1.6.3...v1.7.0) (2026-08-12)
+
+
+### Features
+
+* **server:** add persistent cloud shell sessions with reattach support ([#47](https://github.com/wseternal/ssetunnel/issues/47)) ([d21acd5](https://github.com/wseternal/ssetunnel/commit/d21acd572c7630502b23efd68e4e8702cca5cf7f))
+
+
+### Bug Fixes
+
+* **remoteapp:** improve screenshot text clarity at default zoom ([#49](https://github.com/wseternal/ssetunnel/issues/49)) ([584f352](https://github.com/wseternal/ssetunnel/commit/584f3526c005f71670573d557693d32a17a6ead4))
+* **server,console:** fix shell tab switch blank page and scrollback restore ([8d2a1bf](https://github.com/wseternal/ssetunnel/commit/8d2a1bfa08e6199373c29bc0603b07be11fafa97))
+* **server:** move lastActivity update inside mutex to prevent data race ([dca9c1c](https://github.com/wseternal/ssetunnel/commit/dca9c1c4f8a9956b825cf839c20fe148b74398dc))
+
 ## [1.6.3](https://github.com/wseternal/ssetunnel/compare/v1.6.2...v1.6.3) (2026-08-10)
 
 
