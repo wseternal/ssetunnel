@@ -17,3 +17,7 @@ const robotgoCaptureErrSubstr = "Capture image not found"
 func isDisplayUnavailable(err error) bool {
 	return err != nil && strings.Contains(err.Error(), robotgoCaptureErrSubstr)
 }
+
+// checkScreenAccess is a no-op with -tags purego (no CGO for platform APIs).
+// Always returns nil.
+func checkScreenAccess() error { return nil }

@@ -16,3 +16,7 @@ const robotgoCaptureErrSubstr = "Capture image not found"
 func isDisplayUnavailable(err error) bool {
 	return err != nil && strings.Contains(err.Error(), robotgoCaptureErrSubstr)
 }
+
+// checkScreenAccess is a no-op on non-Darwin platforms (no portable API to
+// check screen recording permission). Always returns nil.
+func checkScreenAccess() error { return nil }

@@ -124,6 +124,14 @@ func CaptureLoop(ctx context.Context, w io.Writer, inputReceived <-chan struct{}
 		}
 	}
 
+	// Pre-flight: verify screen recording permission on platforms that
+	// support the check. On macOS (CGO) this calls CGPreflightScreenCaptureAccess;
+	// on other platforms the hook is a no-op.
+	if err := checkScreenAccess(); err != nil {
+		writeLog("error", err.Error())
+		return err
+	}
+
 	writeLog("info", fmt.Sprintf("capture started (deferred, %v idle)", deferDelay))
 
 	// backoffDeadline tracks the earliest time the next retry is allowed
