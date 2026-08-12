@@ -334,7 +334,6 @@ export default function App() {
   };
 
   const fetchShellSessions = useCallback(async () => {
-    if (!sessionToken) return;
     try {
       const res = await fetch('/console/api/v1/shell/sessions', { headers: authHeaders() });
       if (checkAuth(res) && res.ok) {
@@ -450,7 +449,7 @@ export default function App() {
   }, [shellPersistentId, fetchShellSessions]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const connectShell = useCallback(async (agentID: string, reattachId?: string) => {
-    if (!agentID || !sessionToken) return;
+    if (!agentID) return;
 
     // Disconnect any existing shell first.
     if (shellAbortRef.current) {
@@ -550,7 +549,7 @@ export default function App() {
     // Start SSE stream using fetch (ReadableStream) for full header control.
     try {
       let resp = await fetch(sseURL, {
-        headers: { Authorization: `Bearer ${sessionToken}` },
+        headers: authHeaders(),
         signal: abort.signal,
       });
 
@@ -562,7 +561,7 @@ export default function App() {
         setShellReattached(false);
         sseURL = `/console/api/v1/shell/connect?id=${encodeURIComponent(sid)}&agent=${encodeURIComponent(agentID)}`;
         resp = await fetch(sseURL, {
-          headers: { Authorization: `Bearer ${sessionToken}` },
+          headers: authHeaders(),
           signal: abort.signal,
         });
       }
@@ -714,7 +713,7 @@ export default function App() {
   }, [resetDesktopState]);
 
   const connectDesktop = useCallback(async (agentID: string) => {
-    if (!agentID || !sessionToken) return;
+    if (!agentID) return;
 
     if (desktopAbortRef.current) {
       desktopAbortRef.current.abort();
@@ -731,7 +730,7 @@ export default function App() {
 
     try {
       const resp = await fetch(sseURL, {
-        headers: { Authorization: `Bearer ${sessionToken}` },
+        headers: authHeaders(),
         signal: abort.signal,
       });
       if (!resp.ok) {
@@ -1548,6 +1547,7 @@ export default function App() {
         <img
           ref={desktopImgRef}
           alt="Remote Desktop"
+          className="remote-desktop-img"
           style={{
             maxWidth: '100%',
             maxHeight: isFullscreen ? '100vh' : '80vh',
@@ -1557,6 +1557,7 @@ export default function App() {
           }}
           draggable={false}
         />
+        <style>{`.remote-desktop-img { image-rendering: crisp-edges; image-rendering: -webkit-optimize-contrast; }`}</style>
       </Paper>
       {desktopConnected && (
         <Typography variant="caption" color="text.secondary" sx={{ mt: 1, display: 'block' }}>

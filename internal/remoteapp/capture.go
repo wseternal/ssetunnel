@@ -15,8 +15,10 @@ import (
 )
 
 // jpegQuality controls the JPEG encoding quality (1–100).
-// 50 balances bandwidth (~50–150 KB per 1080p frame) and clarity.
-const jpegQuality = 50
+// 75 provides crisp text rendering at ~100–300 KB per 1080p frame
+// (~1.5–2× the previous quality-50 baseline). The deferred capture
+// strategy (3 s idle) keeps aggregate bandwidth acceptable.
+const jpegQuality = 75
 
 // maxConsecutiveCaptureFails is the number of consecutive capture failures
 // before the loop gives up and returns an error (circuit breaker).
@@ -120,6 +122,14 @@ func CaptureLoop(ctx context.Context, w io.Writer, inputReceived <-chan struct{}
 			default:
 			}
 		}
+	}
+
+	// Pre-flight: verify screen recording permission on platforms that
+	// support the check. On macOS (CGO) this calls CGPreflightScreenCaptureAccess;
+	// on other platforms the hook is a no-op.
+	if err := checkScreenAccess(); err != nil {
+		writeLog("error", err.Error())
+		return err
 	}
 
 	writeLog("info", fmt.Sprintf("capture started (deferred, %v idle)", deferDelay))

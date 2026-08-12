@@ -57,19 +57,23 @@ func main() {
 	var err error
 	switch os.Args[1] {
 	case "server":
-		if handled, err := dispatchServiceAction("server", os.Args[2:]); handled {
-			if err != nil {
-				log.Fatal(err)
+		if len(os.Args) > 2 && serviceActions[os.Args[2]] {
+			if handled, err := dispatchServiceAction("server", os.Args[2:]); handled {
+				if err != nil {
+					log.Fatal(err)
+				}
+				return
 			}
-			return
 		}
 		err = runServer(ctx, os.Args[2:])
 	case "agent":
-		if handled, err := dispatchServiceAction("agent", os.Args[2:]); handled {
-			if err != nil {
-				log.Fatal(err)
+		if len(os.Args) > 2 && serviceActions[os.Args[2]] {
+			if handled, err := dispatchServiceAction("agent", os.Args[2:]); handled {
+				if err != nil {
+					log.Fatal(err)
+				}
+				return
 			}
-			return
 		}
 		err = runAgent(ctx, os.Args[2:])
 	case "connect":
