@@ -20,7 +20,7 @@ Typed length-prefixed frames: `[type][4-byte BE length][data]`.
 
 | Type | ID | Direction | Payload |
 |---|---|---|---|
-| `FrameScreenshot` | 0x01 | Agent → Server | [8-byte BE UnixMilli timestamp][JPEG data (quality 50)] |
+| `FrameScreenshot` | 0x01 | Agent → Server | [8-byte BE UnixMilli timestamp][JPEG data (quality 75)] |
 | `FrameInput` | 0x02 | Server → Agent | JSON `InputEvent` |
 | `FrameScreenInfo` | 0x03 | Agent → Server | JSON `ScreenInfo{width,height}` |
 | `FrameLogEvent` | 0x04 | Agent → Server | JSON `LogEvent{ts,sev,src,msg}` |
@@ -48,7 +48,8 @@ Max frame size: 4 MiB (`maxFrameSize`). `WriteFrame` constructs the header and p
 - **Buffer reuse**: Single `bytes.Buffer` reused across frames (~150 KB/frame savings).
 - **Circuit breaker**: After `maxConsecutiveCaptureFails` (10) consecutive non-transient failures, returns an error.
 - **Display-unavailable backoff**: When `isDisplayUnavailable()` returns true (monitor off/sleeping), the loop retries every 30 s (`displayOffBackoff`) instead of the 3 s deferral, resets `consecutiveFails`, and does NOT trip the circuit breaker. On macOS (CGO) this queries CoreGraphics `CGDisplayIsActive`; on other platforms (or darwin with `-tags purego`) it matches the robotgo error string (`robotgoCaptureErrSubstr`). Input events cancel active backoff.
-- **JPEG quality**: 50 balances bandwidth (~50–150 KB per 1080p frame) and clarity.
+- **Pre-flight permission check**: `checkScreenAccess()` is called before the first capture. On macOS (CGO) it uses `CGPreflightScreenCaptureAccess()` and fails immediately with an actionable error directing the user to System Settings → Privacy & Security → Screen Recording. On other platforms and `-tags purego`, it is a no-op.
+- **JPEG quality**: 75 provides crisp text rendering at ~100–300 KB per 1080p frame. The deferred capture strategy (3 s idle) keeps aggregate bandwidth acceptable.
 
 Each screenshot payload is prefixed with an 8-byte big-endian Unix-millisecond timestamp (`ScreenshotTimestampSize = 8`). The server parses and strips this prefix before forwarding JPEG to the frontend, and sends a `FrameScreenshotAck` back to the agent.
 

@@ -10,6 +10,7 @@ package remoteapp
 import "C"
 import (
 	"fmt"
+	"log"
 	"strings"
 )
 
@@ -48,6 +49,7 @@ func isDisplayUnavailable(err error) bool {
 	// Display is active: if permission is denied, this is NOT a transient
 	// display-unavailable condition — caller should treat as permanent.
 	if !C.CGPreflightScreenCaptureAccess() {
+		log.Printf("remoteapp: screen recording permission denied (treating as permanent failure)")
 		return false
 	}
 	// Permission granted but capture still failed — genuinely transient
