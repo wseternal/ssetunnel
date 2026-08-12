@@ -1548,6 +1548,7 @@ export default function App() {
         <img
           ref={desktopImgRef}
           alt="Remote Desktop"
+          className="remote-desktop-img"
           style={{
             maxWidth: '100%',
             maxHeight: isFullscreen ? '100vh' : '80vh',
@@ -1557,6 +1558,7 @@ export default function App() {
           }}
           draggable={false}
         />
+        <style>{`.remote-desktop-img { image-rendering: crisp-edges; image-rendering: -webkit-optimize-contrast; }`}</style>
       </Paper>
       {desktopConnected && (
         <Typography variant="caption" color="text.secondary" sx={{ mt: 1, display: 'block' }}>
