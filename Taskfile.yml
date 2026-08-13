@@ -136,13 +136,40 @@ tasks:
         echo "Certificate '{{.SIGN_IDENTITY}}' imported. Verify with: security find-identity -p codesigning -v"
 
   sign:
-    desc: Codesign the release binary (SIGN_BIN=path or defaults to dist)
+    desc: Wrap the release binary in a macOS .app bundle and codesign the bundle (SIGN_BIN=source binary, SIGN_APP=output bundle)
     vars:
       SIGN_BIN: '{{.SIGN_BIN | default (printf "%s/%s-%s-%s" .DIST .BIN OS ARCH)}}'
+      SIGN_APP: '{{.SIGN_APP | default (printf "%s/SSE Tunnel.app" .DIST)}}'
     cmds:
-      - codesign --force --deep --sign "{{.SIGN_IDENTITY}}" "{{.SIGN_BIN}}"
-      - codesign --verify -vvv "{{.SIGN_BIN}}"
-      - codesign -d -vv "{{.SIGN_BIN}}"
+      - rm -rf "{{.SIGN_APP}}"
+      - mkdir -p "{{.SIGN_APP}}/Contents/MacOS"
+      - cp -af "{{.SIGN_BIN}}" "{{.SIGN_APP}}/Contents/MacOS/{{.BIN}}"
+      - |
+        cat > "{{.SIGN_APP}}/Contents/Info.plist" <<'EOF'
+        <?xml version="1.0" encoding="UTF-8"?>
+        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+        <plist version="1.0">
+        <dict>
+          <key>CFBundleIdentifier</key>
+          <string>wseternal.ssetunnel</string>
+          <key>CFBundleName</key>
+          <string>SSE Tunnel</string>
+          <key>CFBundleExecutable</key>
+          <string>ssetunnel</string>
+          <key>CFBundlePackageType</key>
+          <string>APPL</string>
+          <key>CFBundleShortVersionString</key>
+          <string>{{.RELEASE_VERSION}}</string>
+          <key>CFBundleVersion</key>
+          <string>{{.RELEASE_VERSION}}</string>
+        </dict>
+        </plist>
+        EOF
+      - plutil -lint "{{.SIGN_APP}}/Contents/Info.plist"
+      - codesign --force --sign "{{.SIGN_IDENTITY}}" "{{.SIGN_APP}}/Contents/MacOS/{{.BIN}}"
+      - codesign --force --sign "{{.SIGN_IDENTITY}}" "{{.SIGN_APP}}"
+      - codesign --verify --deep --strict --verbose=2 "{{.SIGN_APP}}"
+      - codesign -d -vvv "{{.SIGN_APP}}"
 
   # ── Frontend ────────────────────────────────────────────────────────
 
