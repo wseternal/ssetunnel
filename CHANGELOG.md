@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.7.1](https://github.com/wseternal/ssetunnel/compare/v1.7.0...v1.7.1) (2026-08-13)
+
+
+### Bug Fixes
+
+* **console:** improve cloud shell UX - non-focusable buttons, fullscreen, auto-disconnect on exit ([#50](https://github.com/wseternal/ssetunnel/issues/50)) ([5ab2d0e](https://github.com/wseternal/ssetunnel/commit/5ab2d0e1929d7a3f6448af38b9c89f4afbc9491f))
+* task to sign the app bundle ([#52](https://github.com/wseternal/ssetunnel/issues/52)) ([b6af907](https://github.com/wseternal/ssetunnel/commit/b6af9072502c56d9a7b1e5a4901795f78b6636ca))
+
 ## [1.7.0](https://github.com/wseternal/ssetunnel/compare/v1.6.3...v1.7.0) (2026-08-12)
 
 
