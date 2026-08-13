@@ -529,6 +529,8 @@ export default function App() {
     shellLineBufRef.current = '';
     const sendInput = async (data: string) => {
       // Track typed line to detect exit/logout commands.
+      // Reset on line-cancel controls (Ctrl-U/Ctrl-C/etc.) so stale
+      // buffer content doesn't trigger a false disconnect.
       for (const ch of data) {
         if (ch === '\r' || ch === '\n') {
           const cmd = shellLineBufRef.current.trim();
@@ -540,8 +542,12 @@ export default function App() {
           shellLineBufRef.current = shellLineBufRef.current.slice(0, -1);
         } else if (ch === '\x04') {
           // Ctrl-D: EOF — disconnect immediately.
+          shellLineBufRef.current = '';
           setTimeout(() => disconnectShell(), 300);
-        } else if (ch >= ' ') {
+        } else if (ch < ' ') {
+          // Control characters (Ctrl-U, Ctrl-C, ESC, etc.): reset line buffer.
+          shellLineBufRef.current = '';
+        } else {
           shellLineBufRef.current += ch;
         }
       }
