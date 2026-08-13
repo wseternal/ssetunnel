@@ -233,6 +233,7 @@ export default function App() {
   const termRef = useRef<HTMLDivElement>(null);
   const shellContainerRef = useRef<HTMLDivElement>(null);
   const shellLineBufRef = useRef<string>('');
+  const shellPersistentIdRef = useRef<string>('');
   const xtermRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
   const shellAbortRef = useRef<AbortController | null>(null);
@@ -419,7 +420,9 @@ export default function App() {
     // Explicitly terminate the persistent shell session on the server.
     // Await to prevent race where a fast reconnect creates a new session
     // that the still-in-flight DELETE would then kill.
-    const persistentId = shellPersistentId;
+    // Use ref to avoid stale closure — sendInput captures disconnectShell
+    // before shellPersistentId state is populated.
+    const persistentId = shellPersistentIdRef.current;
     if (persistentId) {
       try {
         await fetch('/console/api/v1/shell/sessions/delete', {
@@ -447,9 +450,10 @@ export default function App() {
     setShellConnected(false);
     setShellSessionId('');
     setShellPersistentId('');
+    shellPersistentIdRef.current = '';
     setShellReattached(false);
     fetchShellSessions();
-  }, [shellPersistentId, fetchShellSessions]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [fetchShellSessions]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const connectShell = useCallback(async (agentID: string, reattachId?: string) => {
     if (!agentID) return;
@@ -604,6 +608,7 @@ export default function App() {
       // Read the persistent session ID from the response header.
       const persistentId = resp.headers.get('X-SSET-Shell-Session') || '';
       setShellPersistentId(persistentId);
+      shellPersistentIdRef.current = persistentId;
 
       setShellConnected(true);
       if (effectiveReattachId) {
@@ -682,6 +687,7 @@ export default function App() {
       setShellConnected(false);
       setShellSessionId('');
       setShellPersistentId('');
+      shellPersistentIdRef.current = '';
       if (shellAbortRef.current === abort) shellAbortRef.current = null;
       fetchShellSessions();
     }
@@ -916,11 +922,13 @@ export default function App() {
     return () => window.removeEventListener('keydown', handler);
   }, [desktopConnected, desktopSessionId, handleDesktopKey]);
 
-  // Sync isFullscreen state with the browser Fullscreen API (desktop).
+  // Sync fullscreen state with the browser Fullscreen API.
+  // Check which element is fullscreen to avoid coupling desktop and shell state.
   useEffect(() => {
     const handler = () => {
-      setIsFullscreen(!!document.fullscreenElement);
-      setIsShellFullscreen(!!document.fullscreenElement);
+      const el = document.fullscreenElement;
+      setIsFullscreen(el === desktopContainerRef.current);
+      setIsShellFullscreen(el === shellContainerRef.current);
     };
     document.addEventListener('fullscreenchange', handler);
     return () => document.removeEventListener('fullscreenchange', handler);
@@ -941,6 +949,14 @@ export default function App() {
       shellContainerRef.current?.requestFullscreen().catch(() => {});
     }
   }, []);
+
+  // Re-fit xterm terminal when shell fullscreen toggles (container height changes).
+  useEffect(() => {
+    if (xtermRef.current && fitAddonRef.current) {
+      const timer = setTimeout(() => fitAddonRef.current?.fit(), 50);
+      return () => clearTimeout(timer);
+    }
+  }, [isShellFullscreen]);
 
   // Magnifier: track cursor position over the screenshot and update the
   // lens overlay via requestAnimationFrame (no React re-renders).
