@@ -229,7 +229,11 @@ export default function App() {
   const [shellSessionId, setShellSessionId] = useState<string>('');
   const [shellPersistentId, setShellPersistentId] = useState<string>('');
   const [shellReattached, setShellReattached] = useState(false);
+  const [isShellFullscreen, setIsShellFullscreen] = useState(false);
   const termRef = useRef<HTMLDivElement>(null);
+  const shellContainerRef = useRef<HTMLDivElement>(null);
+  const shellLineBufRef = useRef<string>('');
+  const shellPersistentIdRef = useRef<string>('');
   const xtermRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
   const shellAbortRef = useRef<AbortController | null>(null);
@@ -416,7 +420,9 @@ export default function App() {
     // Explicitly terminate the persistent shell session on the server.
     // Await to prevent race where a fast reconnect creates a new session
     // that the still-in-flight DELETE would then kill.
-    const persistentId = shellPersistentId;
+    // Use ref to avoid stale closure — sendInput captures disconnectShell
+    // before shellPersistentId state is populated.
+    const persistentId = shellPersistentIdRef.current;
     if (persistentId) {
       try {
         await fetch('/console/api/v1/shell/sessions/delete', {
@@ -444,9 +450,10 @@ export default function App() {
     setShellConnected(false);
     setShellSessionId('');
     setShellPersistentId('');
+    shellPersistentIdRef.current = '';
     setShellReattached(false);
     fetchShellSessions();
-  }, [shellPersistentId, fetchShellSessions]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [fetchShellSessions]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const connectShell = useCallback(async (agentID: string, reattachId?: string) => {
     if (!agentID) return;
@@ -523,7 +530,31 @@ export default function App() {
     }
 
     // Set up input handler: send keystrokes via POST.
+    shellLineBufRef.current = '';
     const sendInput = async (data: string) => {
+      // Track typed line to detect exit/logout commands.
+      // Reset on line-cancel controls (Ctrl-U/Ctrl-C/etc.) so stale
+      // buffer content doesn't trigger a false disconnect.
+      for (const ch of data) {
+        if (ch === '\r' || ch === '\n') {
+          const cmd = shellLineBufRef.current.trim();
+          shellLineBufRef.current = '';
+          if (cmd === 'exit' || cmd === 'logout') {
+            setTimeout(() => disconnectShell(), 500);
+          }
+        } else if (ch === '\x7f' || ch === '\b') {
+          shellLineBufRef.current = shellLineBufRef.current.slice(0, -1);
+        } else if (ch === '\x04') {
+          // Ctrl-D: EOF — disconnect immediately.
+          shellLineBufRef.current = '';
+          setTimeout(() => disconnectShell(), 300);
+        } else if (ch < ' ') {
+          // Control characters (Ctrl-U, Ctrl-C, ESC, etc.): reset line buffer.
+          shellLineBufRef.current = '';
+        } else {
+          shellLineBufRef.current += ch;
+        }
+      }
       try {
         await fetch('/console/api/v1/shell/connect-up', {
           method: 'POST',
@@ -577,6 +608,7 @@ export default function App() {
       // Read the persistent session ID from the response header.
       const persistentId = resp.headers.get('X-SSET-Shell-Session') || '';
       setShellPersistentId(persistentId);
+      shellPersistentIdRef.current = persistentId;
 
       setShellConnected(true);
       if (effectiveReattachId) {
@@ -655,6 +687,7 @@ export default function App() {
       setShellConnected(false);
       setShellSessionId('');
       setShellPersistentId('');
+      shellPersistentIdRef.current = '';
       if (shellAbortRef.current === abort) shellAbortRef.current = null;
       fetchShellSessions();
     }
@@ -889,9 +922,14 @@ export default function App() {
     return () => window.removeEventListener('keydown', handler);
   }, [desktopConnected, desktopSessionId, handleDesktopKey]);
 
-  // Sync isFullscreen state with the browser Fullscreen API.
+  // Sync fullscreen state with the browser Fullscreen API.
+  // Check which element is fullscreen to avoid coupling desktop and shell state.
   useEffect(() => {
-    const handler = () => setIsFullscreen(!!document.fullscreenElement);
+    const handler = () => {
+      const el = document.fullscreenElement;
+      setIsFullscreen(el === desktopContainerRef.current);
+      setIsShellFullscreen(el === shellContainerRef.current);
+    };
     document.addEventListener('fullscreenchange', handler);
     return () => document.removeEventListener('fullscreenchange', handler);
   }, []);
@@ -903,6 +941,100 @@ export default function App() {
       desktopContainerRef.current?.requestFullscreen().catch(() => {});
     }
   }, []);
+
+  const toggleShellFullscreen = useCallback(() => {
+    if (document.fullscreenElement) {
+      document.exitFullscreen();
+    } else {
+      shellContainerRef.current?.requestFullscreen().catch(() => {});
+    }
+  }, []);
+
+  // Re-fit xterm terminal when shell fullscreen toggles (container height changes).
+  useEffect(() => {
+    if (xtermRef.current && fitAddonRef.current) {
+      const timer = setTimeout(() => fitAddonRef.current?.fit(), 50);
+      return () => clearTimeout(timer);
+    }
+  }, [isShellFullscreen]);
+
+  // Shared shell panel UI — rendered in both admin and non-admin tab layouts
+  // with different tabIndex values. The outer Box stays mounted (CSS-hidden)
+  // so the xterm instance and SSE read loop survive tab switches.
+  const renderShellPanel = (shellTabIndex: number) => (
+    <Box sx={{ display: tabIndex === shellTabIndex ? 'block' : 'none' }}>
+      {tabIndex === shellTabIndex && (
+        <>
+          <PageHeader
+            title="Cloud Shell"
+            actions={
+              <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
+                <FormControl size="small" sx={{ minWidth: 180 }}>
+                  <InputLabel>Agent</InputLabel>
+                  <Select
+                    value={shellAgent}
+                    label="Agent"
+                    onChange={(e) => setShellAgent(e.target.value)}
+                    disabled={shellConnected}
+                  >
+                    {connectedAgents.map((ca) => (
+                      <MenuItem key={ca.agent_id} value={ca.agent_id}>{ca.agent_id}</MenuItem>
+                    ))}
+                  </Select>
+                </FormControl>
+                {shellConnected ? (
+                  <Button variant="outlined" color="warning" onClick={disconnectShell} tabIndex={-1}>
+                    Disconnect
+                  </Button>
+                ) : (
+                  <Button
+                    variant="contained"
+                    startIcon={<TerminalIcon />}
+                    onClick={() => connectShell(shellAgent)}
+                    disabled={!shellAgent}
+                    tabIndex={-1}
+                  >
+                    Connect
+                  </Button>
+                )}
+                <Tooltip title={isShellFullscreen ? 'Exit fullscreen' : 'Fullscreen'}>
+                  <IconButton
+                    size="small"
+                    onClick={toggleShellFullscreen}
+                    tabIndex={-1}
+                  >
+                    {isShellFullscreen ? <FullscreenExitIcon fontSize="small" /> : <FullscreenIcon fontSize="small" />}
+                  </IconButton>
+                </Tooltip>
+              </Box>
+            }
+          />
+          {connectedAgents.length === 0 && (
+            <Alert severity="info" sx={{ mb: 2 }}>No agents connected. Start an agent to use the cloud shell.</Alert>
+          )}
+        </>
+      )}
+      <Paper
+        ref={shellContainerRef}
+        sx={{
+          bgcolor: '#1e1e2e',
+          p: 0.5,
+          borderRadius: 2,
+          minHeight: 400,
+          '& .xterm': { p: 1 },
+          '& .xterm-viewport': { borderRadius: 1 },
+          ...(isShellFullscreen && { height: '100vh', borderRadius: 0 }),
+        }}
+      >
+        <div ref={termRef} style={{ height: isShellFullscreen ? 'calc(100vh - 16px)' : 450 }} />
+      </Paper>
+      {tabIndex === shellTabIndex && shellConnected && (
+        <Typography variant="caption" color="text.secondary" sx={{ mt: 1, display: 'block' }}>
+          Session: {shellSessionId} | Agent: {shellAgent}{shellReattached ? ' (reattached)' : ''}
+        </Typography>
+      )}
+    </Box>
+  );
 
   // Magnifier: track cursor position over the screenshot and update the
   // lens overlay via requestAnimationFrame (no React re-renders).
@@ -1932,68 +2064,7 @@ export default function App() {
                   </Box>
                 )}
 
-                {/* Shell panel: terminal div stays mounted (CSS-hidden when not active)
-                    so xterm instance and SSE read loop survive tab switches. */}
-                <Box sx={{ display: tabIndex === 4 ? 'block' : 'none' }}>
-                  {tabIndex === 4 && (
-                    <>
-                      <PageHeader
-                        title="Cloud Shell"
-                        actions={
-                          <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
-                            <FormControl size="small" sx={{ minWidth: 180 }}>
-                              <InputLabel>Agent</InputLabel>
-                              <Select
-                                value={shellAgent}
-                                label="Agent"
-                                onChange={(e) => setShellAgent(e.target.value)}
-                                disabled={shellConnected}
-                              >
-                                {connectedAgents.map((ca) => (
-                                  <MenuItem key={ca.agent_id} value={ca.agent_id}>{ca.agent_id}</MenuItem>
-                                ))}
-                              </Select>
-                            </FormControl>
-                            {shellConnected ? (
-                              <Button variant="outlined" color="warning" onClick={disconnectShell}>
-                                Disconnect
-                              </Button>
-                            ) : (
-                              <Button
-                                variant="contained"
-                                startIcon={<TerminalIcon />}
-                                onClick={() => connectShell(shellAgent)}
-                                disabled={!shellAgent}
-                              >
-                                Connect
-                              </Button>
-                            )}
-                          </Box>
-                        }
-                      />
-                      {connectedAgents.length === 0 && (
-                        <Alert severity="info" sx={{ mb: 2 }}>No agents connected. Start an agent to use the cloud shell.</Alert>
-                      )}
-                    </>
-                  )}
-                  <Paper
-                    sx={{
-                      bgcolor: '#1e1e2e',
-                      p: 0.5,
-                      borderRadius: 2,
-                      minHeight: 400,
-                      '& .xterm': { p: 1 },
-                      '& .xterm-viewport': { borderRadius: 1 },
-                    }}
-                  >
-                    <div ref={termRef} style={{ height: 450 }} />
-                  </Paper>
-                  {tabIndex === 4 && shellConnected && (
-                    <Typography variant="caption" color="text.secondary" sx={{ mt: 1, display: 'block' }}>
-                      Session: {shellSessionId} | Agent: {shellAgent}{shellReattached ? ' (reattached)' : ''}
-                    </Typography>
-                  )}
-                </Box>
+                {renderShellPanel(4)}
                 {tabIndex === 5 && desktopPanel}
               </>
             ) : (
@@ -2151,68 +2222,7 @@ export default function App() {
                   </Box>
                 )}
 
-                {/* Shell panel: terminal div stays mounted (CSS-hidden when not active)
-                    so xterm instance and SSE read loop survive tab switches. */}
-                <Box sx={{ display: tabIndex === 3 ? 'block' : 'none' }}>
-                  {tabIndex === 3 && (
-                    <>
-                      <PageHeader
-                        title="Cloud Shell"
-                        actions={
-                          <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
-                            <FormControl size="small" sx={{ minWidth: 180 }}>
-                              <InputLabel>Agent</InputLabel>
-                              <Select
-                                value={shellAgent}
-                                label="Agent"
-                                onChange={(e) => setShellAgent(e.target.value)}
-                                disabled={shellConnected}
-                              >
-                                {connectedAgents.map((ca) => (
-                                  <MenuItem key={ca.agent_id} value={ca.agent_id}>{ca.agent_id}</MenuItem>
-                                ))}
-                              </Select>
-                            </FormControl>
-                            {shellConnected ? (
-                              <Button variant="outlined" color="warning" onClick={disconnectShell}>
-                                Disconnect
-                              </Button>
-                            ) : (
-                              <Button
-                                variant="contained"
-                                startIcon={<TerminalIcon />}
-                                onClick={() => connectShell(shellAgent)}
-                                disabled={!shellAgent}
-                              >
-                                Connect
-                              </Button>
-                            )}
-                          </Box>
-                        }
-                      />
-                      {connectedAgents.length === 0 && (
-                        <Alert severity="info" sx={{ mb: 2 }}>No agents connected. Start an agent to use the cloud shell.</Alert>
-                      )}
-                    </>
-                  )}
-                  <Paper
-                    sx={{
-                      bgcolor: '#1e1e2e',
-                      p: 0.5,
-                      borderRadius: 2,
-                      minHeight: 400,
-                      '& .xterm': { p: 1 },
-                      '& .xterm-viewport': { borderRadius: 1 },
-                    }}
-                  >
-                    <div ref={termRef} style={{ height: 450 }} />
-                  </Paper>
-                  {tabIndex === 3 && shellConnected && (
-                    <Typography variant="caption" color="text.secondary" sx={{ mt: 1, display: 'block' }}>
-                      Session: {shellSessionId} | Agent: {shellAgent}{shellReattached ? ' (reattached)' : ''}
-                    </Typography>
-                  )}
-                </Box>
+                {renderShellPanel(3)}
                 {tabIndex === 4 && desktopPanel}
               </>
             )}
