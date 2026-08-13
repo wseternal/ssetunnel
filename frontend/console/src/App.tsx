@@ -229,7 +229,10 @@ export default function App() {
   const [shellSessionId, setShellSessionId] = useState<string>('');
   const [shellPersistentId, setShellPersistentId] = useState<string>('');
   const [shellReattached, setShellReattached] = useState(false);
+  const [isShellFullscreen, setIsShellFullscreen] = useState(false);
   const termRef = useRef<HTMLDivElement>(null);
+  const shellContainerRef = useRef<HTMLDivElement>(null);
+  const shellLineBufRef = useRef<string>('');
   const xtermRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
   const shellAbortRef = useRef<AbortController | null>(null);
@@ -523,7 +526,25 @@ export default function App() {
     }
 
     // Set up input handler: send keystrokes via POST.
+    shellLineBufRef.current = '';
     const sendInput = async (data: string) => {
+      // Track typed line to detect exit/logout commands.
+      for (const ch of data) {
+        if (ch === '\r' || ch === '\n') {
+          const cmd = shellLineBufRef.current.trim();
+          shellLineBufRef.current = '';
+          if (cmd === 'exit' || cmd === 'logout') {
+            setTimeout(() => disconnectShell(), 500);
+          }
+        } else if (ch === '\x7f' || ch === '\b') {
+          shellLineBufRef.current = shellLineBufRef.current.slice(0, -1);
+        } else if (ch === '\x04') {
+          // Ctrl-D: EOF — disconnect immediately.
+          setTimeout(() => disconnectShell(), 300);
+        } else if (ch >= ' ') {
+          shellLineBufRef.current += ch;
+        }
+      }
       try {
         await fetch('/console/api/v1/shell/connect-up', {
           method: 'POST',
@@ -889,9 +910,12 @@ export default function App() {
     return () => window.removeEventListener('keydown', handler);
   }, [desktopConnected, desktopSessionId, handleDesktopKey]);
 
-  // Sync isFullscreen state with the browser Fullscreen API.
+  // Sync isFullscreen state with the browser Fullscreen API (desktop).
   useEffect(() => {
-    const handler = () => setIsFullscreen(!!document.fullscreenElement);
+    const handler = () => {
+      setIsFullscreen(!!document.fullscreenElement);
+      setIsShellFullscreen(!!document.fullscreenElement);
+    };
     document.addEventListener('fullscreenchange', handler);
     return () => document.removeEventListener('fullscreenchange', handler);
   }, []);
@@ -901,6 +925,14 @@ export default function App() {
       document.exitFullscreen();
     } else {
       desktopContainerRef.current?.requestFullscreen().catch(() => {});
+    }
+  }, []);
+
+  const toggleShellFullscreen = useCallback(() => {
+    if (document.fullscreenElement) {
+      document.exitFullscreen();
+    } else {
+      shellContainerRef.current?.requestFullscreen().catch(() => {});
     }
   }, []);
 
@@ -1955,7 +1987,7 @@ export default function App() {
                               </Select>
                             </FormControl>
                             {shellConnected ? (
-                              <Button variant="outlined" color="warning" onClick={disconnectShell}>
+                              <Button variant="outlined" color="warning" onClick={disconnectShell} tabIndex={-1}>
                                 Disconnect
                               </Button>
                             ) : (
@@ -1964,10 +1996,20 @@ export default function App() {
                                 startIcon={<TerminalIcon />}
                                 onClick={() => connectShell(shellAgent)}
                                 disabled={!shellAgent}
+                                tabIndex={-1}
                               >
                                 Connect
                               </Button>
                             )}
+                            <Tooltip title={isShellFullscreen ? 'Exit fullscreen' : 'Fullscreen'}>
+                              <IconButton
+                                size="small"
+                                onClick={toggleShellFullscreen}
+                                tabIndex={-1}
+                              >
+                                {isShellFullscreen ? <FullscreenExitIcon fontSize="small" /> : <FullscreenIcon fontSize="small" />}
+                              </IconButton>
+                            </Tooltip>
                           </Box>
                         }
                       />
@@ -1977,6 +2019,7 @@ export default function App() {
                     </>
                   )}
                   <Paper
+                    ref={shellContainerRef}
                     sx={{
                       bgcolor: '#1e1e2e',
                       p: 0.5,
@@ -1984,9 +2027,10 @@ export default function App() {
                       minHeight: 400,
                       '& .xterm': { p: 1 },
                       '& .xterm-viewport': { borderRadius: 1 },
+                      ...(isShellFullscreen && { height: '100vh', borderRadius: 0 }),
                     }}
                   >
-                    <div ref={termRef} style={{ height: 450 }} />
+                    <div ref={termRef} style={{ height: isShellFullscreen ? 'calc(100vh - 16px)' : 450 }} />
                   </Paper>
                   {tabIndex === 4 && shellConnected && (
                     <Typography variant="caption" color="text.secondary" sx={{ mt: 1, display: 'block' }}>
@@ -2174,7 +2218,7 @@ export default function App() {
                               </Select>
                             </FormControl>
                             {shellConnected ? (
-                              <Button variant="outlined" color="warning" onClick={disconnectShell}>
+                              <Button variant="outlined" color="warning" onClick={disconnectShell} tabIndex={-1}>
                                 Disconnect
                               </Button>
                             ) : (
@@ -2183,10 +2227,20 @@ export default function App() {
                                 startIcon={<TerminalIcon />}
                                 onClick={() => connectShell(shellAgent)}
                                 disabled={!shellAgent}
+                                tabIndex={-1}
                               >
                                 Connect
                               </Button>
                             )}
+                            <Tooltip title={isShellFullscreen ? 'Exit fullscreen' : 'Fullscreen'}>
+                              <IconButton
+                                size="small"
+                                onClick={toggleShellFullscreen}
+                                tabIndex={-1}
+                              >
+                                {isShellFullscreen ? <FullscreenExitIcon fontSize="small" /> : <FullscreenIcon fontSize="small" />}
+                              </IconButton>
+                            </Tooltip>
                           </Box>
                         }
                       />
@@ -2196,6 +2250,7 @@ export default function App() {
                     </>
                   )}
                   <Paper
+                    ref={shellContainerRef}
                     sx={{
                       bgcolor: '#1e1e2e',
                       p: 0.5,
@@ -2203,9 +2258,10 @@ export default function App() {
                       minHeight: 400,
                       '& .xterm': { p: 1 },
                       '& .xterm-viewport': { borderRadius: 1 },
+                      ...(isShellFullscreen && { height: '100vh', borderRadius: 0 }),
                     }}
                   >
-                    <div ref={termRef} style={{ height: 450 }} />
+                    <div ref={termRef} style={{ height: isShellFullscreen ? 'calc(100vh - 16px)' : 450 }} />
                   </Paper>
                   {tabIndex === 3 && shellConnected && (
                     <Typography variant="caption" color="text.secondary" sx={{ mt: 1, display: 'block' }}>
