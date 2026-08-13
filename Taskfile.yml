@@ -166,7 +166,6 @@ tasks:
         </plist>
         EOF
       - plutil -lint "{{.SIGN_APP}}/Contents/Info.plist"
-      - codesign --force --sign "{{.SIGN_IDENTITY}}" "{{.SIGN_APP}}/Contents/MacOS/{{.BIN}}"
       - codesign --force --sign "{{.SIGN_IDENTITY}}" "{{.SIGN_APP}}"
       - codesign --verify --deep --strict --verbose=2 "{{.SIGN_APP}}"
       - codesign -d -vvv "{{.SIGN_APP}}"
