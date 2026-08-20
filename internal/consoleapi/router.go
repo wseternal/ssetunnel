@@ -190,7 +190,7 @@ func (a *API) handleSessions(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	// Stable sort by agent_id, then by session ID for same agent.
+	// Sort by agent_id, then by session ID for same agent.
 	sort.Slice(sessions, func(i, j int) bool {
 		if sessions[i].AgentID != sessions[j].AgentID {
 			return sessions[i].AgentID < sessions[j].AgentID
@@ -581,28 +581,41 @@ func (a *API) handleConnectedAgents(w http.ResponseWriter, r *http.Request) {
 	}
 	isAdmin := auth.HasPermission(sessInfo.Role, auth.PermAdmin)
 
-	agents := []ConnectedAgentInfo{}
-	seen := make(map[string]bool)
+	// Collect all visible agent+session pairs, then sort for deterministic output.
+	type agentSession struct {
+		AgentID   string
+		SessionID string
+	}
+	var pairs []agentSession
 	if a.reg != nil {
 		a.reg.Range(func(s *server.Session) bool {
 			if !isAdmin && s.UserID() != sessInfo.UserID {
 				return true
 			}
-			if aid := s.AgentID(); aid != "" && !seen[aid] {
-				seen[aid] = true
-				agents = append(agents, ConnectedAgentInfo{
-					AgentID:   aid,
-					SessionID: s.ID(),
-				})
+			if aid := s.AgentID(); aid != "" {
+				pairs = append(pairs, agentSession{AgentID: aid, SessionID: s.ID()})
 			}
 			return true
 		})
 	}
-
-	// Stable sort by agent_id.
-	sort.Slice(agents, func(i, j int) bool {
-		return agents[i].AgentID < agents[j].AgentID
+	sort.Slice(pairs, func(i, j int) bool {
+		if pairs[i].AgentID != pairs[j].AgentID {
+			return pairs[i].AgentID < pairs[j].AgentID
+		}
+		return pairs[i].SessionID < pairs[j].SessionID
 	})
+	// Deduplicate by agent_id, keeping the lexicographically first session.
+	agents := []ConnectedAgentInfo{}
+	seen := make(map[string]bool)
+	for _, p := range pairs {
+		if !seen[p.AgentID] {
+			seen[p.AgentID] = true
+			agents = append(agents, ConnectedAgentInfo{
+				AgentID:   p.AgentID,
+				SessionID: p.SessionID,
+			})
+		}
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(agents)
@@ -635,6 +648,20 @@ func (a *API) handleAgents(w http.ResponseWriter, r *http.Request) {
 				configs[i].AllowedTargets = nil
 			}
 		}
+
+		// Sort agent configs by agent_id for stable display order.
+		sort.Slice(configs, func(i, j int) bool {
+			if configs[i].AgentID == nil && configs[j].AgentID == nil {
+				return configs[i].ID < configs[j].ID
+			}
+			if configs[i].AgentID == nil {
+				return true
+			}
+			if configs[j].AgentID == nil {
+				return false
+			}
+			return *configs[i].AgentID < *configs[j].AgentID
+		})
 
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(configs)
@@ -996,6 +1023,12 @@ func (a *API) handleMetricsAgents(w http.ResponseWriter, r *http.Request) {
 			filtered = append(filtered, am)
 		}
 	}
+
+	// Sort by agent_id for stable display order (defense-in-depth;
+	// AllAgentMetrics already sorts, but the filter could drift).
+	sort.Slice(filtered, func(i, j int) bool {
+		return filtered[i].AgentID < filtered[j].AgentID
+	})
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(filtered)

@@ -321,7 +321,7 @@ func (h *Handler) ShellSessionListHandler() http.Handler {
 			return true
 		})
 
-		// Stable sort by agent_id, then by session ID for same agent.
+		// Sort by agent_id, then by session ID for same agent.
 		sort.Slice(sessions, func(i, j int) bool {
 			if sessions[i].AgentID != sessions[j].AgentID {
 				return sessions[i].AgentID < sessions[j].AgentID
