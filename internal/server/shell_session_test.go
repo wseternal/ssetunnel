@@ -2,8 +2,14 @@ package server
 
 import (
 	"bytes"
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
+
+	"github.com/wseternal/ssetunnel/internal/auth"
 )
 
 func TestShellSessionRegistry_StoreLoadDelete(t *testing.T) {
@@ -228,3 +234,54 @@ func TestShellSession_DetachClearsWriter(t *testing.T) {
 type nopFlusher struct{}
 
 func (f *nopFlusher) Flush() {}
+
+func TestShellSessionListHandler_SortedByAgentID(t *testing.T) {
+	reg := NewShellSessionRegistry()
+
+	// Register shell sessions in deliberately non-alphabetical agent order.
+	for _, aid := range []string{"zebra-agent", "alpha-agent", "mango-agent"} {
+		ss := &ShellSession{
+			id:           "sess-" + aid,
+			agentID:      aid,
+			userID:       1,
+			ring:         NewRingBuffer(64),
+			wakeup:       make(chan struct{}, 1),
+			done:         make(chan struct{}),
+			createdAt:    time.Now(),
+			lastActivity: time.Now(),
+		}
+		reg.Store(ss)
+	}
+
+	h := &Handler{shellSessions: reg}
+	handler := h.ShellSessionListHandler()
+
+	// Inject admin user session into context.
+	sessInfo := &auth.UserSessionInfo{UserID: 1, Role: "admin"}
+	req := httptest.NewRequest("GET", "/shell/sessions", nil)
+	ctx := context.WithValue(req.Context(), userSessionKey, sessInfo)
+	req = req.WithContext(ctx)
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+
+	var sessions []map[string]interface{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &sessions); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(sessions) != 3 {
+		t.Fatalf("want 3 sessions, got %d", len(sessions))
+	}
+
+	want := []string{"alpha-agent", "mango-agent", "zebra-agent"}
+	for i, s := range sessions {
+		got, _ := s["agent_id"].(string)
+		if got != want[i] {
+			t.Errorf("sessions[%d]: want agent_id=%q, got %q", i, want[i], got)
+		}
+	}
+}
