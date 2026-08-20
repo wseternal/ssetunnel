@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.7.2](https://github.com/wseternal/ssetunnel/compare/v1.7.1...v1.7.2) (2026-08-20)
+
+
+### Bug Fixes
+
+* stable sort order by agent_id for console API responses ([#53](https://github.com/wseternal/ssetunnel/issues/53)) ([eeb675e](https://github.com/wseternal/ssetunnel/commit/eeb675eb1e832856100d28edcd953f6a553e790d))
+
 ## [1.7.1](https://github.com/wseternal/ssetunnel/compare/v1.7.0...v1.7.1) (2026-08-13)
 
 
