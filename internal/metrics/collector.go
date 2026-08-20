@@ -353,6 +353,9 @@ func (c *MetricsCollector) AllAgentMetrics() []AgentMetrics {
 			LastDecision: lastDec,
 		})
 	}
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].AgentID < result[j].AgentID
+	})
 	return result
 }
 

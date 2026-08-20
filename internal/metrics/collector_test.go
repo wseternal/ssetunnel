@@ -217,3 +217,26 @@ func TestCollector_FlushWritesToStore(t *testing.T) {
 		t.Errorf("want BytesUp=1000, got %d", samples[0].BytesUp)
 	}
 }
+
+func TestCollector_AllAgentMetrics_SortedByAgentID(t *testing.T) {
+	store := openTestStore(t)
+	c := NewCollector(store, 100*time.Millisecond, 24*time.Hour)
+	defer c.Close()
+
+	// Record events for agents in deliberately non-alphabetical order.
+	for _, id := range []string{"zebra", "alpha", "mango", "beta"} {
+		c.RecordAgentPost(id, 100, time.Millisecond)
+		c.RecordSessionStart(id)
+	}
+
+	all := c.AllAgentMetrics()
+	if len(all) != 4 {
+		t.Fatalf("want 4 agents, got %d", len(all))
+	}
+	want := []string{"alpha", "beta", "mango", "zebra"}
+	for i, am := range all {
+		if am.AgentID != want[i] {
+			t.Errorf("index %d: want agent_id=%q, got %q", i, want[i], am.AgentID)
+		}
+	}
+}

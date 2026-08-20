@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"sort"
 	"time"
 
 	"github.com/hashicorp/yamux"
@@ -318,6 +319,14 @@ func (h *Handler) ShellSessionListHandler() http.Handler {
 				BufferedBytes: ss.BufferedBytes(),
 			})
 			return true
+		})
+
+		// Stable sort by agent_id, then by session ID for same agent.
+		sort.Slice(sessions, func(i, j int) bool {
+			if sessions[i].AgentID != sessions[j].AgentID {
+				return sessions[i].AgentID < sessions[j].AgentID
+			}
+			return sessions[i].ID < sessions[j].ID
 		})
 
 		w.Header().Set("Content-Type", "application/json")

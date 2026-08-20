@@ -544,3 +544,70 @@ func TestTOTPSetupFlow(t *testing.T) {
 		t.Errorf("expected 409 on begin-setup while enrolled, got %d", rec.Code)
 	}
 }
+
+func TestSessionsAndConnectedAgents_SortedByAgentID(t *testing.T) {
+	ctx := context.Background()
+	dbcfg := orcapostgres.DBConfig{DatabaseURLTemplate: "postgres:tc:"}
+	pool, err := orcapostgres.OpenPool(ctx, dbcfg, orcapostgres.NewMigrator(migrations.FS, nil))
+	if err != nil {
+		t.Fatalf("failed to open pool: %v", err)
+	}
+	store := auth.NewStore(pool)
+	reg := server.NewRegistry()
+	router := consoleapi.NewRouter(store, reg)
+
+	// Create admin user + session.
+	pwHash, _ := auth.HashPassword("adminpass123")
+	adminUser, _ := store.CreateUser(ctx, "sort_test_admin", pwHash, "admin", true, true)
+	adminToken, _ := auth.GenerateToken()
+	_ = store.CreateUserSession(ctx, adminUser.ID, adminToken, 24*time.Hour)
+
+	// Register sessions with agent IDs in deliberately non-alphabetical order.
+	for _, aid := range []string{"zebra-agent", "alpha-agent", "mango-agent"} {
+		s := server.NewSession("sess-" + aid)
+		s.SetAgentID(aid)
+		s.SetUserID(adminUser.ID)
+		reg.Replace(s)
+	}
+
+	// Test /api/v1/sessions ordering.
+	req := httptest.NewRequest("GET", "/api/v1/sessions", nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("sessions: expected 200, got %d", rec.Code)
+	}
+	var sessions []map[string]interface{}
+	_ = json.Unmarshal(rec.Body.Bytes(), &sessions)
+	if len(sessions) != 3 {
+		t.Fatalf("sessions: want 3, got %d", len(sessions))
+	}
+	wantAgents := []string{"alpha-agent", "mango-agent", "zebra-agent"}
+	for i, s := range sessions {
+		got, _ := s["agent_id"].(string)
+		if got != wantAgents[i] {
+			t.Errorf("sessions[%d]: want agent_id=%q, got %q", i, wantAgents[i], got)
+		}
+	}
+
+	// Test /api/v1/connected-agents ordering.
+	req = httptest.NewRequest("GET", "/api/v1/connected-agents", nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("connected-agents: expected 200, got %d", rec.Code)
+	}
+	var agents []map[string]interface{}
+	_ = json.Unmarshal(rec.Body.Bytes(), &agents)
+	if len(agents) != 3 {
+		t.Fatalf("connected-agents: want 3, got %d", len(agents))
+	}
+	for i, a := range agents {
+		got, _ := a["agent_id"].(string)
+		if got != wantAgents[i] {
+			t.Errorf("connected-agents[%d]: want agent_id=%q, got %q", i, wantAgents[i], got)
+		}
+	}
+}

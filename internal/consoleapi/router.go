@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"sort"
 	"strconv"
 	"sync"
 	"time"
@@ -188,6 +189,14 @@ func (a *API) handleSessions(w http.ResponseWriter, r *http.Request) {
 			return true
 		})
 	}
+
+	// Stable sort by agent_id, then by session ID for same agent.
+	sort.Slice(sessions, func(i, j int) bool {
+		if sessions[i].AgentID != sessions[j].AgentID {
+			return sessions[i].AgentID < sessions[j].AgentID
+		}
+		return sessions[i].ID < sessions[j].ID
+	})
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(sessions)
@@ -589,6 +598,11 @@ func (a *API) handleConnectedAgents(w http.ResponseWriter, r *http.Request) {
 			return true
 		})
 	}
+
+	// Stable sort by agent_id.
+	sort.Slice(agents, func(i, j int) bool {
+		return agents[i].AgentID < agents[j].AgentID
+	})
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(agents)
