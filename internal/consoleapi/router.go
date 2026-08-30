@@ -16,8 +16,13 @@ import (
 	"github.com/wseternal/ssetunnel/internal/server"
 )
 
-// minPasswordLength is the minimum allowed password length for user creation and updates.
-const minPasswordLength = 8
+const (
+	// minPasswordLength is the minimum allowed password length for user creation and updates.
+	minPasswordLength = 8
+
+	// defaultSessionTTL is the session lifetime for both login and refresh.
+	defaultSessionTTL = 30 * 24 * time.Hour
+)
 
 // validRoles is the allowlist of valid user roles.
 var validRoles = map[string]bool{"admin": true, "user": true}
@@ -36,6 +41,11 @@ type API struct {
 	totpRateMu    sync.Mutex
 	totpRateCount map[string]int
 	totpRateReset map[string]time.Time
+
+	// Refresh rate limiting: refresh attempts per token digest prefix.
+	refreshRateMu    sync.Mutex
+	refreshRateCount map[string]int
+	refreshRateReset map[string]time.Time
 
 	// stopCleanup signals the rate limiter cleanup goroutine to exit.
 	stopCleanup chan struct{}
@@ -56,11 +66,13 @@ func NewRouter(store *auth.Store, reg *server.Registry) *Router {
 	api := &API{
 		store:         store,
 		reg:           reg,
-		pwRateCount:   make(map[string]int),
-		pwRateReset:   make(map[string]time.Time),
-		totpRateCount: make(map[string]int),
-		totpRateReset: make(map[string]time.Time),
-		stopCleanup:   make(chan struct{}),
+		pwRateCount:      make(map[string]int),
+		pwRateReset:      make(map[string]time.Time),
+		totpRateCount:    make(map[string]int),
+		totpRateReset:    make(map[string]time.Time),
+		refreshRateCount: make(map[string]int),
+		refreshRateReset: make(map[string]time.Time),
+		stopCleanup:      make(chan struct{}),
 	}
 
 	// Periodic cleanup of expired rate limit entries to prevent unbounded memory growth.
@@ -276,9 +288,8 @@ func (a *API) handleUserLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sessionTTL := 30 * 24 * time.Hour
-	expiresAt := time.Now().UTC().Add(sessionTTL)
-	if err := a.store.CreateUserSession(r.Context(), user.ID, sessionToken, sessionTTL); err != nil {
+	expiresAt := time.Now().UTC().Add(defaultSessionTTL)
+	if err := a.store.CreateUserSession(r.Context(), user.ID, sessionToken, defaultSessionTTL); err != nil {
 		http.Error(w, "failed to store session", http.StatusInternalServerError)
 		return
 	}
@@ -355,6 +366,27 @@ func (a *API) resetPWRateLimit(ip string) {
 	delete(a.pwRateReset, ip)
 }
 
+// --- Refresh rate limiting (per token digest) ---
+
+func (a *API) checkRefreshRateLimit(tokenDigest string) bool {
+	a.refreshRateMu.Lock()
+	defer a.refreshRateMu.Unlock()
+	if reset, ok := a.refreshRateReset[tokenDigest]; ok && time.Now().After(reset) {
+		delete(a.refreshRateCount, tokenDigest)
+		delete(a.refreshRateReset, tokenDigest)
+	}
+	return a.refreshRateCount[tokenDigest] >= 1
+}
+
+func (a *API) recordRefreshAttempt(tokenDigest string) {
+	a.refreshRateMu.Lock()
+	defer a.refreshRateMu.Unlock()
+	if _, ok := a.refreshRateReset[tokenDigest]; !ok {
+		a.refreshRateReset[tokenDigest] = time.Now().Add(30 * time.Second)
+	}
+	a.refreshRateCount[tokenDigest]++
+}
+
 // --- TOTP rate limiting (per IP:username) ---
 
 func (a *API) checkTOTPRateLimit(key string) bool {
@@ -413,6 +445,15 @@ func (a *API) rateLimiterCleanup() {
 			}
 		}
 		a.totpRateMu.Unlock()
+
+		a.refreshRateMu.Lock()
+		for tokenDigest, reset := range a.refreshRateReset {
+			if now.After(reset) {
+				delete(a.refreshRateCount, tokenDigest)
+				delete(a.refreshRateReset, tokenDigest)
+			}
+		}
+		a.refreshRateMu.Unlock()
 	}
 }
 
@@ -785,6 +826,10 @@ func (a *API) handleMe(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleRefreshSession atomically rotates the session token. The route is
+// wrapped in userAuth middleware which validates the token first; the handler
+// re-validates inside a transaction (defense-in-depth) to prevent TOCTOU races
+// where the token could be revoked between middleware check and rotation.
 func (a *API) handleRefreshSession(w http.ResponseWriter, r *http.Request) {
 	if a.store == nil {
 		http.Error(w, "auth not configured", http.StatusServiceUnavailable)
@@ -797,7 +842,17 @@ func (a *API) handleRefreshSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := a.store.RefreshUserSession(r.Context(), tokenStr, 30*24*time.Hour)
+	// Rate limit: max 1 refresh per 30 seconds per token. This prevents
+	// tight-loop token rotation while allowing sequential refreshes with
+	// different tokens (each rotation creates a new token).
+	tokenDigest := auth.ComputeDigest(tokenStr)
+	if a.checkRefreshRateLimit(tokenDigest) {
+		http.Error(w, "too many refresh attempts, try again later", http.StatusTooManyRequests)
+		return
+	}
+	a.recordRefreshAttempt(tokenDigest)
+
+	result, err := a.store.RefreshUserSession(r.Context(), tokenStr, defaultSessionTTL)
 	if err != nil {
 		if errors.Is(err, auth.ErrInvalidSession) {
 			http.Error(w, "invalid or expired session", http.StatusUnauthorized)
@@ -806,6 +861,8 @@ func (a *API) handleRefreshSession(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to refresh session", http.StatusInternalServerError)
 		return
 	}
+
+	log.Printf("auth: session refreshed user_id=%d", result.Info.UserID)
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]interface{}{

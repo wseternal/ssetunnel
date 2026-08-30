@@ -4,10 +4,16 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"time"
 )
+
+// refreshHTTPClient is a bounded-timeout client for refresh requests.
+// Using http.DefaultClient would risk hanging the CLI indefinitely if the
+// console server is unreachable.
+var refreshHTTPClient = &http.Client{Timeout: 15 * time.Second}
 
 // sessionRefreshThreshold is the remaining TTL below which the client
 // proactively refreshes the session token.
@@ -35,7 +41,7 @@ func RefreshSession(consoleURL, currentToken string) (newToken string, newExpire
 	}
 	req.Header.Set("Authorization", "Bearer "+currentToken)
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := refreshHTTPClient.Do(req)
 	if err != nil {
 		return "", time.Time{}, fmt.Errorf("refresh request failed: %w", err)
 	}
@@ -54,8 +60,12 @@ func RefreshSession(consoleURL, currentToken string) (newToken string, newExpire
 		return "", time.Time{}, fmt.Errorf("parse refresh response: %w", err)
 	}
 
+	if result.Token == "" {
+		return "", time.Time{}, fmt.Errorf("refresh response missing token")
+	}
 	expiresAt, err := time.Parse(time.RFC3339, result.ExpiresAt)
 	if err != nil {
+		log.Printf("auth: warning: server returned unparseable expires_at %q", result.ExpiresAt)
 		return result.Token, time.Time{}, nil // token valid but no expiry info
 	}
 	return result.Token, expiresAt, nil

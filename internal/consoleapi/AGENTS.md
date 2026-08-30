@@ -10,6 +10,7 @@ JSON management API for the admin console. Mounted at `/api/v1/` under the conso
 | POST | `/api/v1/user-login-check` | Public | Pre-login TOTP enrollment check (anti-enumeration) |
 | POST | `/api/v1/logout` | Public | Clears session cookie, revokes user session |
 | GET | `/api/v1/me` | User | Validate current session, return user info |
+| POST | `/api/v1/refresh-session` | User | Atomically rotate session token (validate→create→delete); rate-limited per token |
 | GET | `/api/v1/sessions` | User | List live tunnel sessions (admin: all, user: own only) |
 | GET | `/api/v1/connected-agents` | User | List connected agent IDs (admin: all, user: own only) |
 | GET | `/api/v1/agents` | User | List agent configs (non-admin: allowed_targets redacted) |
@@ -33,7 +34,7 @@ Username/password authentication with:
 1. Password rate limiting (10 failures per IP per 5 min window)
 2. Per-user TOTP verification (if enrolled) with recovery code fallback
 3. TOTP rate limiting (5 failures per IP:username per 5 min window)
-4. Creates a 30-day user session token
+4. Creates a 30-day user session token; response includes `expires_at` (RFC 3339)
 
 ### `POST /api/v1/user-login-check`
 Returns `{"totp_required": true/false}`. Returns `true` for non-existent users to prevent username enumeration. Fails closed (returns `true`) on DB errors.

@@ -443,6 +443,15 @@ type RefreshResult struct {
 func (s *Store) RefreshUserSession(ctx context.Context, rawToken string, ttl time.Duration) (*RefreshResult, error) {
 	oldDigest := ComputeDigest(rawToken)
 
+	// Generate new token before opening the transaction to minimize FOR UPDATE
+	// lock hold time (crypto/rand can block on entropy-starved systems).
+	newToken, err := GenerateToken()
+	if err != nil {
+		return nil, fmt.Errorf("generate refresh token: %w", err)
+	}
+	newDigest := ComputeDigest(newToken)
+	expiresAt := time.Now().UTC().Add(ttl)
+
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("begin refresh tx: %w", err)
@@ -466,14 +475,6 @@ func (s *Store) RefreshUserSession(ctx context.Context, rawToken string, ttl tim
 		}
 		return nil, fmt.Errorf("validate session for refresh: %w", err)
 	}
-
-	// Generate new token.
-	newToken, err := GenerateToken()
-	if err != nil {
-		return nil, fmt.Errorf("generate refresh token: %w", err)
-	}
-	newDigest := ComputeDigest(newToken)
-	expiresAt := time.Now().UTC().Add(ttl)
 
 	// Create new session.
 	if _, err := tx.Exec(ctx,

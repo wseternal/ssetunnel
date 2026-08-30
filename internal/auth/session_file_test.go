@@ -3,6 +3,7 @@ package auth
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -215,5 +216,58 @@ func TestLoadSession_BackwardCompat_NoExpiresAt(t *testing.T) {
 	}
 	if !expiresAt.IsZero() {
 		t.Errorf("expiresAt = %v, want zero time for old session", expiresAt)
+	}
+}
+
+func TestUpdateSessionToken_PreservesMetadata(t *testing.T) {
+	cleanup := testSessionDir(t)
+	defer cleanup()
+
+	exp := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+	if err := SaveSession("http://server:8080", "old-tok", "alice", "admin", "http://console:8081", exp); err != nil {
+		t.Fatalf("SaveSession: %v", err)
+	}
+
+	// Update only token and expiry.
+	newExp := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
+	if err := UpdateSessionToken("http://server:8080", "new-tok", newExp); err != nil {
+		t.Fatalf("UpdateSessionToken: %v", err)
+	}
+
+	token, server, consoleURL, expiresAt, err := LoadSession("http://server:8080")
+	if err != nil {
+		t.Fatalf("LoadSession: %v", err)
+	}
+	if token != "new-tok" {
+		t.Errorf("token = %q, want %q", token, "new-tok")
+	}
+	if server != "http://server:8080" {
+		t.Errorf("server = %q", server)
+	}
+	if consoleURL != "http://console:8081" {
+		t.Errorf("consoleURL = %q, want %q (should be preserved)", consoleURL, "http://console:8081")
+	}
+	if !expiresAt.Equal(newExp) {
+		t.Errorf("expiresAt = %v, want %v", expiresAt, newExp)
+	}
+
+	// Verify username and role are preserved by reading the raw file.
+	path, _ := SessionFilePath()
+	data, _ := os.ReadFile(path)
+	if !strings.Contains(string(data), `"username": "alice"`) {
+		t.Errorf("username not preserved in session file: %s", data)
+	}
+	if !strings.Contains(string(data), `"role": "admin"`) {
+		t.Errorf("role not preserved in session file: %s", data)
+	}
+}
+
+func TestUpdateSessionToken_NoSession(t *testing.T) {
+	cleanup := testSessionDir(t)
+	defer cleanup()
+
+	err := UpdateSessionToken("http://nonexistent:8080", "tok", time.Now())
+	if err == nil {
+		t.Fatal("expected error for non-existent session")
 	}
 }

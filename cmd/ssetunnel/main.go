@@ -428,6 +428,11 @@ func resolveServerURL(serverFlag, prefix string) (url, token string, err error) 
 		}
 	}
 
+	// Warn about old-format sessions that lack refresh metadata.
+	if token != "" && consoleURL == "" && expiresAt.IsZero() {
+		log.Printf("%s: session lacks refresh metadata (old format); token may expire without warning — re-run `ssetunnel login` to upgrade", prefix)
+	}
+
 	// Proactive token refresh when approaching expiration.
 	if token != "" && consoleURL != "" && auth.NeedsRefresh(expiresAt) {
 		remaining := time.Until(expiresAt)
@@ -438,14 +443,19 @@ func resolveServerURL(serverFlag, prefix string) (url, token string, err error) 
 		}
 		newToken, newExpiresAt, refreshErr := auth.RefreshSession(consoleURL, token)
 		if refreshErr != nil {
-			if remaining < 0 {
+			// Another process may have refreshed already — re-read from disk.
+			if tok2, _, _, exp2, loadErr := auth.LoadSession(serverFlag); loadErr == nil && tok2 != "" && tok2 != token && !auth.NeedsRefresh(exp2) {
+				token = tok2
+				log.Printf("%s: token was refreshed by another process", prefix)
+			} else if remaining < 0 {
 				return "", "", fmt.Errorf("session expired and refresh failed: %w; run `ssetunnel login` to re-authenticate", refreshErr)
+			} else {
+				log.Printf("%s: warning: token refresh failed: %v (continuing with current token)", prefix, refreshErr)
 			}
-			log.Printf("%s: warning: token refresh failed: %v (continuing with current token)", prefix, refreshErr)
 		} else {
 			log.Printf("%s: session token refreshed (expires %s)", prefix, newExpiresAt.Format("2006-01-02"))
-			// Update the session file with the new token.
-			if saveErr := auth.SaveSession(url, newToken, "", "", consoleURL, newExpiresAt); saveErr != nil {
+			// Update only token + expiry, preserving username/role/consoleURL.
+			if saveErr := auth.UpdateSessionToken(url, newToken, newExpiresAt); saveErr != nil {
 				log.Printf("%s: warning: failed to save refreshed session: %v", prefix, saveErr)
 			}
 			token = newToken

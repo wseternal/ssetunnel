@@ -119,7 +119,11 @@ func LoadSession(serverURL string) (token, resolvedServer, consoleURL string, ex
 	lookup := func(entry SessionEntry, srv string) (string, string, string, time.Time) {
 		var t time.Time
 		if entry.ExpiresAt != "" {
-			t, _ = time.Parse(time.RFC3339, entry.ExpiresAt)
+			var parseErr error
+			t, parseErr = time.Parse(time.RFC3339, entry.ExpiresAt)
+			if parseErr != nil {
+				log.Printf("auth: WARNING: corrupted expires_at %q in session file, treating as unknown expiry", entry.ExpiresAt)
+			}
 		}
 		return entry.Token, srv, entry.ConsoleURL, t
 	}
@@ -142,6 +146,26 @@ func LoadSession(serverURL string) (token, resolvedServer, consoleURL string, ex
 		return tok, srv, curl, exp, nil
 	}
 	return "", "", "", time.Time{}, nil
+}
+
+// UpdateSessionToken updates only the token and expiry for an existing session
+// entry, preserving all other fields (username, role, consoleURL). This avoids
+// the data-loss that occurs when SaveSession overwrites the entire entry.
+func UpdateSessionToken(serverURL, newToken string, expiresAt time.Time) error {
+	sf, err := loadSessionFile()
+	if err != nil {
+		return fmt.Errorf("load session file: %w", err)
+	}
+	entry, ok := sf.Sessions[serverURL]
+	if !ok {
+		return fmt.Errorf("no session for %s", serverURL)
+	}
+	entry.Token = newToken
+	if !expiresAt.IsZero() {
+		entry.ExpiresAt = expiresAt.Format(time.RFC3339)
+	}
+	sf.Sessions[serverURL] = entry
+	return saveSessionFile(sf)
 }
 
 // SessionServers returns the list of server URLs with stored sessions.

@@ -94,12 +94,32 @@ Permission constants: `PermAgent`, `PermConnect`, `PermAdmin`.
 
 Multi-server session storage at `~/.ssetunnel/session` (JSON format):
 ```
-SaveSession(serverURL, token, username, role) → writes JSON
-LoadSession(serverURL) → (token, resolvedServer, err)  # empty URL → first entry (sorted)
-SessionServers() → ([]string, error)  # list stored server URLs
+SaveSession(serverURL, token, username, role, consoleURL string, expiresAt time.Time) → writes JSON
+LoadSession(serverURL) → (token, resolvedServer, consoleURL string, expiresAt time.Time, err)
+UpdateSessionToken(serverURL, newToken string, expiresAt time.Time) → updates token+expiry only
+SessionServers() → ([]string, error)
 ```
 
+Session entries include `expires_at` (RFC 3339) and `console_url` fields (both `omitempty` for backward compatibility). `UpdateSessionToken` preserves all other fields when rotating tokens.
+
 Legacy plain-text format is detected and discarded with a warning; users must re-run `ssetunnel login`.
+
+## Session Refresh
+
+```
+NeedsRefresh(expiresAt time.Time) → bool   # true when remaining TTL < 7 days; false for zero time
+RefreshSession(consoleURL, token string) → (newToken string, newExpiresAt time.Time, err)
+```
+
+`RefreshSession` calls `POST /console/api/v1/refresh-session` with a 15-second HTTP client timeout. Validates non-empty token in response. Client-side refresh is transparent — integrated in `resolveServerURL`.
+
+## Store: Session Refresh
+
+```
+RefreshUserSession(ctx, rawToken string, ttl time.Duration) → (*RefreshResult, error)
+```
+
+Atomic token rotation: validate→create→delete in a single PostgreSQL transaction with `FOR UPDATE` row locking. Token generation (`GenerateToken`) runs before `Begin()` to minimize lock hold time.
 
 ## Token Generation
 
