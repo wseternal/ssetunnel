@@ -153,7 +153,7 @@ func TestResolveServerURL_NoFlag_NoSession(t *testing.T) {
 	cleanup := testHomeDir(t)
 	defer cleanup()
 
-	_, _, err := resolveServerURL("", "test")
+	_, _, _, err := resolveServerURL("", "test")
 	if err == nil {
 		t.Fatal("expected error when no flag and no session, got nil")
 	}
@@ -170,7 +170,7 @@ func TestResolveServerURL_NoFlag_WithSession(t *testing.T) {
 		t.Fatalf("SaveSession: %v", err)
 	}
 
-	url, token, err := resolveServerURL("", "test")
+	url, token, _, err := resolveServerURL("", "test")
 	if err != nil {
 		t.Fatalf("resolveServerURL: %v", err)
 	}
@@ -214,7 +214,7 @@ func TestResolveServerURL_RefreshSuccess(t *testing.T) {
 		t.Fatalf("SaveSession: %v", err)
 	}
 
-	url, token, err := resolveServerURL("", "test")
+	url, token, _, err := resolveServerURL("", "test")
 	if err != nil {
 		t.Fatalf("resolveServerURL: %v", err)
 	}
@@ -245,7 +245,7 @@ func TestResolveServerURL_RefreshExpiredFails(t *testing.T) {
 		t.Fatalf("SaveSession: %v", err)
 	}
 
-	_, _, err := resolveServerURL("", "test")
+	_, _, _, err := resolveServerURL("", "test")
 	if err == nil {
 		t.Fatal("expected error for expired session with failed refresh, got nil")
 	}
@@ -265,7 +265,7 @@ func TestResolveServerURL_Flag_WithSession(t *testing.T) {
 		t.Fatalf("SaveSession: %v", err)
 	}
 
-	url, token, err := resolveServerURL("http://flag:8080", "test")
+	url, token, _, err := resolveServerURL("http://flag:8080", "test")
 	if err != nil {
 		t.Fatalf("resolveServerURL: %v", err)
 	}
@@ -281,7 +281,7 @@ func TestResolveServerURL_Flag_NoSession(t *testing.T) {
 	cleanup := testHomeDir(t)
 	defer cleanup()
 
-	url, token, err := resolveServerURL("http://explicit:8080", "test")
+	url, token, _, err := resolveServerURL("http://explicit:8080", "test")
 	if err != nil {
 		t.Fatalf("resolveServerURL: %v", err)
 	}
@@ -301,7 +301,7 @@ func TestResolveServerURL_TrailingSlash(t *testing.T) {
 		t.Fatalf("SaveSession: %v", err)
 	}
 
-	url, token, err := resolveServerURL("http://host:8080/", "test")
+	url, token, _, err := resolveServerURL("http://host:8080/", "test")
 	if err != nil {
 		t.Fatalf("resolveServerURL: %v", err)
 	}

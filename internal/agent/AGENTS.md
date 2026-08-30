@@ -39,6 +39,7 @@ type Agent struct {
     Concurrency     int           // upstream POST sender depth
     Compress        bool          // negotiate gzip-per-batch
     NoAutoTune      bool          // disable server auto-tuning
+    OnTokenRefresh  func() (string, error) // mid-lifecycle token refresh callback
 }
 ```
 
@@ -49,6 +50,8 @@ type Agent struct {
 ## Reconnect Strategy
 
 `Run` loops `runOnce` with exponential backoff (500 ms → 30 s cap, 2× multiplier, 10% jitter) via `cenkalti/backoff`. Sessions surviving past the 10 s health threshold reset the backoff — a drop after long uptime is a network event, not a flapping server.
+
+**Mid-lifecycle token refresh**: Before each reconnect attempt, `Run` calls `RefreshToken()` which invokes `OnTokenRefresh` (if set). The callback checks `NeedsRefresh` from the session file, calls `auth.RefreshSession` + `auth.UpdateSessionToken`, and returns the new token. On success, `Agent.Token` is updated; on failure, the current token is kept and the reconnect proceeds.
 
 **Unrecoverable errors** (`transport.ErrUnauthorized`): Exit immediately — the token is invalid and retrying will not help.
 

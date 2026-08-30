@@ -47,6 +47,13 @@ type Agent struct {
 	// NoAutoTune disables the server's auto-tuning: event: tune frames
 	// are ignored and the agent keeps its static CLI flags.
 	NoAutoTune bool
+
+	// OnTokenRefresh, when set, is called before each reconnect attempt
+	// to refresh the session token. It returns the new raw token or an
+	// error. On success the agent's Token field is updated; on failure
+	// the current token is kept and the reconnect proceeds (the server
+	// will reject an actually-expired token with 401).
+	OnTokenRefresh func() (newToken string, err error)
 }
 
 // Run connects and reconnects until ctx is canceled. Reconnect uses
@@ -61,6 +68,11 @@ func (a *Agent) Run(ctx context.Context) error {
 	}
 	const healthThreshold = 10 * time.Second
 	for {
+		// Refresh token before each (re)connect to keep long-lived
+		// sessions valid. Failure is non-fatal — the current token
+		// may still be accepted by the server.
+		a.RefreshToken()
+
 		start := time.Now()
 		err := a.runOnce(ctx)
 
@@ -95,6 +107,24 @@ func (a *Agent) Run(ctx context.Context) error {
 		case <-ctx.Done():
 			return nil
 		}
+	}
+}
+
+// RefreshToken calls OnTokenRefresh to obtain a new session token.
+// On success it updates Agent.Token; on failure (or when OnTokenRefresh
+// is nil) it logs a warning and keeps the current token.
+func (a *Agent) RefreshToken() {
+	if a.OnTokenRefresh == nil {
+		return
+	}
+	newToken, err := a.OnTokenRefresh()
+	if err != nil {
+		log.Printf("agent: token refresh failed: %v (continuing with current token)", err)
+		return
+	}
+	if newToken != "" {
+		a.Token = newToken
+		log.Printf("agent: session token refreshed")
 	}
 }
 
