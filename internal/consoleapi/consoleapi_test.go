@@ -48,7 +48,7 @@ func TestConsoleAPI(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to generate admin token: %v", err)
 	}
-	if err := store.CreateUserSession(ctx, adminUser.ID, adminToken, 24*time.Hour); err != nil {
+	if _, err := store.CreateUserSession(ctx, adminUser.ID, adminToken, 24*time.Hour); err != nil {
 		t.Fatalf("failed to create admin session: %v", err)
 	}
 
@@ -159,7 +159,7 @@ func setupTestEnv(t *testing.T) (http.Handler, *auth.Store, *auth.UserInfo, stri
 	}
 
 	token, _ := auth.GenerateToken()
-	_ = store.CreateUserSession(ctx, user.ID, token, 24*time.Hour)
+	_, _ = store.CreateUserSession(ctx, user.ID, token, 24*time.Hour)
 
 	return router, store, user, token
 }
@@ -350,13 +350,13 @@ func TestNonAdminSessionFiltering(t *testing.T) {
 	adminHash, _ := auth.HashPassword("adminpass123")
 	adminUser, _ := store.CreateUser(ctx, "nonadmin_test_admin", adminHash, "admin", true, true)
 	adminToken, _ := auth.GenerateToken()
-	_ = store.CreateUserSession(ctx, adminUser.ID, adminToken, 24*time.Hour)
+	_, _ = store.CreateUserSession(ctx, adminUser.ID, adminToken, 24*time.Hour)
 
 	// Create regular user + session.
 	userHash, _ := auth.HashPassword("userpass12345")
 	regUser, _ := store.CreateUser(ctx, "nonadmin_test_user", userHash, "user", true, true)
 	userToken, _ := auth.GenerateToken()
-	_ = store.CreateUserSession(ctx, regUser.ID, userToken, 24*time.Hour)
+	_, _ = store.CreateUserSession(ctx, regUser.ID, userToken, 24*time.Hour)
 
 	// Create sessions in the registry with different user attributions.
 	adminSess := server.NewSession("sess-admin-1")
@@ -560,7 +560,7 @@ func TestSessionsAndConnectedAgents_SortedByAgentID(t *testing.T) {
 	pwHash, _ := auth.HashPassword("adminpass123")
 	adminUser, _ := store.CreateUser(ctx, "sort_test_admin", pwHash, "admin", true, true)
 	adminToken, _ := auth.GenerateToken()
-	_ = store.CreateUserSession(ctx, adminUser.ID, adminToken, 24*time.Hour)
+	_, _ = store.CreateUserSession(ctx, adminUser.ID, adminToken, 24*time.Hour)
 
 	// Register sessions with agent IDs in deliberately non-alphabetical order.
 	for _, aid := range []string{"zebra-agent", "alpha-agent", "mango-agent"} {

@@ -2,7 +2,10 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
@@ -176,6 +179,81 @@ func TestResolveServerURL_NoFlag_WithSession(t *testing.T) {
 	}
 	if token != "tok1" {
 		t.Errorf("token = %q, want %q", token, "tok1")
+	}
+}
+
+func TestResolveServerURL_RefreshSuccess(t *testing.T) {
+	cleanup := testHomeDir(t)
+	defer cleanup()
+
+	refreshCalled := false
+	newToken := "refreshed-token-xyz"
+	newExpiresAt := time.Now().UTC().Add(30 * 24 * time.Hour)
+
+	// Mock refresh server.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/console/api/v1/refresh-session" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+		authHeader := r.Header.Get("Authorization")
+		if authHeader != "Bearer old-token" {
+			t.Errorf("auth = %q, want Bearer old-token", authHeader)
+		}
+		refreshCalled = true
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{
+			"token":      newToken,
+			"expires_at": newExpiresAt.Format(time.RFC3339),
+		})
+	}))
+	defer srv.Close()
+
+	// Save session with near-expiry (3 days) and consoleURL pointing to mock server.
+	nearExpiry := time.Now().Add(3 * 24 * time.Hour)
+	if err := auth.SaveSession("http://tunnel:8080", "old-token", "user1", "admin", srv.URL, nearExpiry); err != nil {
+		t.Fatalf("SaveSession: %v", err)
+	}
+
+	url, token, err := resolveServerURL("", "test")
+	if err != nil {
+		t.Fatalf("resolveServerURL: %v", err)
+	}
+	if url != "http://tunnel:8080" {
+		t.Errorf("url = %q, want %q", url, "http://tunnel:8080")
+	}
+	if token != newToken {
+		t.Errorf("token = %q, want refreshed %q", token, newToken)
+	}
+	if !refreshCalled {
+		t.Error("refresh endpoint was not called")
+	}
+}
+
+func TestResolveServerURL_RefreshExpiredFails(t *testing.T) {
+	cleanup := testHomeDir(t)
+	defer cleanup()
+
+	// Mock refresh server that rejects.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "invalid or expired session", http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+
+	// Save session that is fully expired (1 hour ago).
+	expired := time.Now().Add(-1 * time.Hour)
+	if err := auth.SaveSession("http://tunnel:8080", "expired-token", "user1", "admin", srv.URL, expired); err != nil {
+		t.Fatalf("SaveSession: %v", err)
+	}
+
+	_, _, err := resolveServerURL("", "test")
+	if err == nil {
+		t.Fatal("expected error for expired session with failed refresh, got nil")
+	}
+	if !strings.Contains(err.Error(), "session expired and refresh failed") {
+		t.Errorf("unexpected error: %v", err)
+	}
+	if !strings.Contains(err.Error(), "ssetunnel login") {
+		t.Errorf("error should mention re-login: %v", err)
 	}
 }
 

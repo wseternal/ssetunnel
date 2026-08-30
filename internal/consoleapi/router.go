@@ -288,8 +288,8 @@ func (a *API) handleUserLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	expiresAt := time.Now().UTC().Add(defaultSessionTTL)
-	if err := a.store.CreateUserSession(r.Context(), user.ID, sessionToken, defaultSessionTTL); err != nil {
+	expiresAt, err := a.store.CreateUserSession(r.Context(), user.ID, sessionToken, defaultSessionTTL)
+	if err != nil {
 		http.Error(w, "failed to store session", http.StatusInternalServerError)
 		return
 	}

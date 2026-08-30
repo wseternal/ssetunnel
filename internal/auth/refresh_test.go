@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -76,5 +77,42 @@ func TestRefreshSession_ServerError(t *testing.T) {
 	_, _, err := RefreshSession(srv.URL, "expired-token")
 	if err == nil {
 		t.Fatal("expected error for 401 response")
+	}
+}
+
+func TestValidateConsoleURL(t *testing.T) {
+	tests := []struct {
+		name    string
+		url     string
+		wantErr bool
+	}{
+		{"http localhost", "http://localhost:8081", false},
+		{"http 127.0.0.1", "http://127.0.0.1:8081", false},
+		{"http [::1]", "http://[::1]:8081", false},
+		{"https remote host", "https://tunnel.example.com:8081", false},
+		{"https no port", "https://tunnel.example.com", false},
+		{"http remote host rejected", "http://tunnel.example.com:8081", true},
+		{"http internal IP rejected", "http://10.0.0.1:8081", true},
+		{"ftp scheme rejected", "ftp://server:21", true},
+		{"file scheme rejected", "file:///etc/passwd", true},
+		{"empty string", "", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateConsoleURL(tt.url)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("validateConsoleURL(%q) error = %v, wantErr %v", tt.url, err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestRefreshSession_InvalidConsoleURL(t *testing.T) {
+	_, _, err := RefreshSession("http://internal.corp:8081", "some-token")
+	if err == nil {
+		t.Fatal("expected error for non-localhost http URL")
+	}
+	if !strings.Contains(err.Error(), "https") {
+		t.Errorf("error should mention https requirement: %v", err)
 	}
 }

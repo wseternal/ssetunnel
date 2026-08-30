@@ -103,7 +103,7 @@ func runE2E(m *testing.M) int {
 		fmt.Fprintf(os.Stderr, "e2e: generate user session: %v\n", err)
 		return 1
 	}
-	if err := authStore.CreateUserSession(ctx, testUser.ID, userSessionToken, 24*time.Hour); err != nil {
+	if _, err := authStore.CreateUserSession(ctx, testUser.ID, userSessionToken, 24*time.Hour); err != nil {
 		fmt.Fprintf(os.Stderr, "e2e: create user session: %v\n", err)
 		return 1
 	}

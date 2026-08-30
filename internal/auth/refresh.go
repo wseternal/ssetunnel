@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -29,10 +30,34 @@ func NeedsRefresh(expiresAt time.Time) bool {
 	return time.Until(expiresAt) < sessionRefreshThreshold
 }
 
+// validateConsoleURL checks that the console URL uses a safe scheme and,
+// for non-localhost hosts, requires HTTPS to prevent SSRF against internal
+// services via a manipulated session file.
+func validateConsoleURL(consoleURL string) error {
+	u, err := url.Parse(consoleURL)
+	if err != nil {
+		return fmt.Errorf("invalid console URL: %w", err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("console URL must use http or https scheme, got %q", u.Scheme)
+	}
+	if u.Scheme == "http" {
+		host := u.Hostname()
+		if host != "localhost" && host != "127.0.0.1" && host != "::1" {
+			return fmt.Errorf("console URL must use https for non-localhost hosts (got http for %q)", host)
+		}
+	}
+	return nil
+}
+
 // RefreshSession calls the server's refresh-session endpoint and returns the
 // new token and its expiry time. consoleURL is the base console server URL
 // (e.g. "http://server:8081").
 func RefreshSession(consoleURL, currentToken string) (newToken string, newExpiresAt time.Time, err error) {
+	if err := validateConsoleURL(consoleURL); err != nil {
+		return "", time.Time{}, err
+	}
+
 	url := strings.TrimRight(consoleURL, "/") + "/console/api/v1/refresh-session"
 
 	req, err := http.NewRequest(http.MethodPost, url, nil)

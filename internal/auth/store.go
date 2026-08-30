@@ -390,16 +390,19 @@ func (s *Store) EnsureAdminUser(ctx context.Context) (string, error) {
 
 // --- User Sessions ---
 
-func (s *Store) CreateUserSession(ctx context.Context, userID int64, rawToken string, ttl time.Duration) error {
+// CreateUserSession creates a new user session with a generated token.
+// Returns the computed expiry time so callers can use the same value
+// in responses without clock skew.
+func (s *Store) CreateUserSession(ctx context.Context, userID int64, rawToken string, ttl time.Duration) (time.Time, error) {
 	digest := ComputeDigest(rawToken)
 	expiresAt := time.Now().UTC().Add(ttl)
 
 	query := `INSERT INTO user_sessions (user_id, digest, expires_at) VALUES ($1, $2, $3)`
 	_, err := s.pool.Exec(ctx, query, userID, digest, expiresAt)
 	if err != nil {
-		return fmt.Errorf("create user session: %w", err)
+		return time.Time{}, fmt.Errorf("create user session: %w", err)
 	}
-	return nil
+	return expiresAt, nil
 }
 
 func (s *Store) ValidateUserSession(ctx context.Context, rawToken string) (*UserSessionInfo, error) {
