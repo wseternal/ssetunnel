@@ -122,7 +122,7 @@ func (a *Agent) RefreshToken() {
 		log.Printf("agent: token refresh failed: %v (continuing with current token)", err)
 		return
 	}
-	if newToken != "" {
+	if newToken != "" && newToken != a.Token {
 		a.Token = newToken
 		log.Printf("agent: session token refreshed")
 	}

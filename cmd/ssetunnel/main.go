@@ -323,8 +323,12 @@ func runAgent(ctx context.Context, args []string) error {
 		refreshFn = func() (string, error) {
 			// Load current expiry from session file to check if refresh is needed.
 			_, _, _, expiresAt, loadErr := auth.LoadSession(serverKey)
-			if loadErr != nil || !auth.NeedsRefresh(expiresAt) {
-				return *tokenPtr, nil // not due yet or can't determine
+			if loadErr != nil {
+				log.Printf("agent: warning: cannot read session file: %v", loadErr)
+				return *tokenPtr, nil
+			}
+			if !auth.NeedsRefresh(expiresAt) {
+				return *tokenPtr, nil // not due yet
 			}
 			newTok, newExp, err := auth.RefreshSession(cURL, *tokenPtr)
 			if err != nil {

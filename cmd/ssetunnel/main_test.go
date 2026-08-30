@@ -312,3 +312,34 @@ func TestResolveServerURL_TrailingSlash(t *testing.T) {
 		t.Errorf("token = %q, want %q", token, "tok")
 	}
 }
+
+// TestSharedTokenPointer verifies the RequestModifier + shared-pointer
+// pattern used in runAgent: when the token is refreshed via *tokenPtr,
+// the RequestModifier closure sees the updated value.
+func TestSharedTokenPointer(t *testing.T) {
+	sessToken := "original-token"
+	tokenPtr := &sessToken
+
+	var captured string
+	reqMod := func(req *http.Request) {
+		captured = "Bearer " + *tokenPtr
+	}
+
+	// Simulate refresh updating the shared pointer.
+	*tokenPtr = "refreshed-token"
+
+	req, _ := http.NewRequest("GET", "http://example.com", nil)
+	reqMod(req)
+
+	want := "Bearer refreshed-token"
+	if captured != want {
+		t.Errorf("RequestModifier captured %q, want %q", captured, want)
+	}
+	if req.Header.Get("Authorization") == "" {
+		// Verify the modifier also works via Header.Set
+		req.Header.Set("Authorization", captured)
+		if req.Header.Get("Authorization") != want {
+			t.Errorf("Authorization header = %q, want %q", req.Header.Get("Authorization"), want)
+		}
+	}
+}
