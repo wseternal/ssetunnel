@@ -3,16 +3,16 @@
 **Autonomy rule:** Always proceed autonomously to the next iteration/task without stopping to ask for confirmation.
 
 - **Goal file:** docs/as-goals/session-token-refresh.md
-- **Current phase:** 3
-- **Iteration:** 0/10
+- **Current phase:** 4 (DONE)
+- **Iteration:** 1/10
 
 ## Gate Dashboard
 
 | Gate | Status | Last Evaluated |
 |------|--------|----------------|
-| G1: Server refresh endpoint | Pending | - |
-| G2: Client transparent refresh | Pending | - |
-| G3: Security validation | Pending | - |
+| G1: Server refresh endpoint | ✅ Pass | Iteration 1 |
+| G2: Client transparent refresh | ✅ Pass | Iteration 1 |
+| G3: Security validation | ✅ Pass | Iteration 1 |
 
 ## Activated Bench Roles
 - Security Engineer (auth-touching change)
@@ -22,12 +22,11 @@
 
 | Iteration | Decision | Gates | Commits | Artifacts |
 |-----------|----------|-------|---------|-----------|
-| - | - | - | - | - |
+| 1 | DONE | 3/3 | `b1746358`, `541c304f` | [plan](1/plan.md) / [review](1/review.md) / [manifest](1/evidence-manifest.md) |
 
 ## Open Defects
 
-None yet.
+None.
 
 ## Next Actions
-- [ ] Phase 3: Define exit gates with evidence requirements
-- [ ] Phase 4: Begin iteration 1
+- [x] Implementation complete — all gates passed
