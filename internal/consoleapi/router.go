@@ -97,6 +97,7 @@ func NewRouter(store *auth.Store, reg *server.Registry) *Router {
 
 	// User session routes (authenticated user)
 	r.Handle("/api/v1/me", userAuth(http.HandlerFunc(api.handleMe))).Methods("GET")
+	r.Handle("/api/v1/refresh-session", userAuth(http.HandlerFunc(api.handleRefreshSession))).Methods("POST")
 
 	// TOTP management routes (authenticated user)
 	r.Handle("/api/v1/totp/status", userAuth(http.HandlerFunc(api.handleTOTPStatus))).Methods("GET")
@@ -275,7 +276,9 @@ func (a *API) handleUserLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := a.store.CreateUserSession(r.Context(), user.ID, sessionToken, 30*24*time.Hour); err != nil {
+	sessionTTL := 30 * 24 * time.Hour
+	expiresAt := time.Now().UTC().Add(sessionTTL)
+	if err := a.store.CreateUserSession(r.Context(), user.ID, sessionToken, sessionTTL); err != nil {
 		http.Error(w, "failed to store session", http.StatusInternalServerError)
 		return
 	}
@@ -288,6 +291,7 @@ func (a *API) handleUserLogin(w http.ResponseWriter, r *http.Request) {
 		"username":      user.Username,
 		"role":          user.Role,
 		"totp_enrolled": totpEnrolled,
+		"expires_at":    expiresAt.Format(time.RFC3339),
 	})
 }
 
@@ -778,6 +782,35 @@ func (a *API) handleMe(w http.ResponseWriter, r *http.Request) {
 		"user_id":    sessInfo.UserID,
 		"role":       sessInfo.Role,
 		"expires_at": sessInfo.ExpiresAt,
+	})
+}
+
+func (a *API) handleRefreshSession(w http.ResponseWriter, r *http.Request) {
+	if a.store == nil {
+		http.Error(w, "auth not configured", http.StatusServiceUnavailable)
+		return
+	}
+
+	tokenStr := server.ExtractBearerToken(r)
+	if tokenStr == "" {
+		http.Error(w, "missing bearer token", http.StatusUnauthorized)
+		return
+	}
+
+	result, err := a.store.RefreshUserSession(r.Context(), tokenStr, 30*24*time.Hour)
+	if err != nil {
+		if errors.Is(err, auth.ErrInvalidSession) {
+			http.Error(w, "invalid or expired session", http.StatusUnauthorized)
+			return
+		}
+		http.Error(w, "failed to refresh session", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"token":      result.Token,
+		"expires_at": result.ExpiresAt.Format(time.RFC3339),
 	})
 }
 

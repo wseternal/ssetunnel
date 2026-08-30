@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // testSessionDir sets up a temporary session directory and returns a cleanup func.
@@ -21,13 +22,13 @@ func TestSaveAndLoadSession(t *testing.T) {
 	defer cleanup()
 
 	// Save a session
-	err := SaveSession("http://server1:8080", "token1", "user1", "admin")
+	err := SaveSession("http://server1:8080", "token1", "user1", "admin", "", time.Time{})
 	if err != nil {
 		t.Fatalf("SaveSession: %v", err)
 	}
 
 	// Load with matching server
-	token, server, err := LoadSession("http://server1:8080")
+	token, server, _, _, err := LoadSession("http://server1:8080")
 	if err != nil {
 		t.Fatalf("LoadSession: %v", err)
 	}
@@ -44,13 +45,13 @@ func TestLoadSession_NoMatch(t *testing.T) {
 	defer cleanup()
 
 	// Save a session
-	err := SaveSession("http://server1:8080", "token1", "user1", "admin")
+	err := SaveSession("http://server1:8080", "token1", "user1", "admin", "", time.Time{})
 	if err != nil {
 		t.Fatalf("SaveSession: %v", err)
 	}
 
 	// Load with non-matching server
-	token, server, err := LoadSession("http://other:8080")
+	token, server, _, _, err := LoadSession("http://other:8080")
 	if err != nil {
 		t.Fatalf("LoadSession: %v", err)
 	}
@@ -67,13 +68,13 @@ func TestLoadSession_Default(t *testing.T) {
 	defer cleanup()
 
 	// Save a session
-	err := SaveSession("http://server1:8080", "token1", "user1", "admin")
+	err := SaveSession("http://server1:8080", "token1", "user1", "admin", "", time.Time{})
 	if err != nil {
 		t.Fatalf("SaveSession: %v", err)
 	}
 
 	// Load with empty server (should return first entry)
-	token, server, err := LoadSession("")
+	token, server, _, _, err := LoadSession("")
 	if err != nil {
 		t.Fatalf("LoadSession: %v", err)
 	}
@@ -90,20 +91,20 @@ func TestSaveSession_MultipleServers(t *testing.T) {
 	defer cleanup()
 
 	// Save sessions for two servers
-	if err := SaveSession("http://server1:8080", "token1", "user1", "admin"); err != nil {
+	if err := SaveSession("http://server1:8080", "token1", "user1", "admin", "", time.Time{}); err != nil {
 		t.Fatalf("SaveSession server1: %v", err)
 	}
-	if err := SaveSession("https://server2.com", "token2", "user2", "viewer"); err != nil {
+	if err := SaveSession("https://server2.com", "token2", "user2", "viewer", "", time.Time{}); err != nil {
 		t.Fatalf("SaveSession server2: %v", err)
 	}
 
 	// Load each
-	token1, srv1, _ := LoadSession("http://server1:8080")
+	token1, srv1, _, _, _ := LoadSession("http://server1:8080")
 	if token1 != "token1" || srv1 != "http://server1:8080" {
 		t.Errorf("server1: token=%q server=%q", token1, srv1)
 	}
 
-	token2, srv2, _ := LoadSession("https://server2.com")
+	token2, srv2, _, _, _ := LoadSession("https://server2.com")
 	if token2 != "token2" || srv2 != "https://server2.com" {
 		t.Errorf("server2: token=%q server=%q", token2, srv2)
 	}
@@ -123,7 +124,7 @@ func TestLoadSession_NoFile(t *testing.T) {
 	defer cleanup()
 
 	// Load without any session file
-	token, server, err := LoadSession("")
+	token, server, _, _, err := LoadSession("")
 	if err != nil {
 		t.Fatalf("LoadSession: %v", err)
 	}
@@ -142,7 +143,7 @@ func TestLoadSession_LegacyFormat(t *testing.T) {
 	os.WriteFile(path, []byte("legacy-token-123"), 0600)
 
 	// Load should treat legacy format as empty (no server match)
-	token, server, err := LoadSession("http://server:8080")
+	token, server, _, _, err := LoadSession("http://server:8080")
 	if err != nil {
 		t.Fatalf("LoadSession: %v", err)
 	}
@@ -157,17 +158,62 @@ func TestSaveSession_Overwrite(t *testing.T) {
 	defer cleanup()
 
 	// Save initial
-	if err := SaveSession("http://server:8080", "token1", "user1", "admin"); err != nil {
+	if err := SaveSession("http://server:8080", "token1", "user1", "admin", "", time.Time{}); err != nil {
 		t.Fatalf("SaveSession: %v", err)
 	}
 
 	// Overwrite same server
-	if err := SaveSession("http://server:8080", "token2", "user1", "admin"); err != nil {
+	if err := SaveSession("http://server:8080", "token2", "user1", "admin", "", time.Time{}); err != nil {
 		t.Fatalf("SaveSession overwrite: %v", err)
 	}
 
-	token, _, _ := LoadSession("http://server:8080")
+	token, _, _, _, _ := LoadSession("http://server:8080")
 	if token != "token2" {
 		t.Errorf("token = %q, want %q after overwrite", token, "token2")
+	}
+}
+
+func TestSaveSession_ExpiresAt(t *testing.T) {
+	cleanup := testSessionDir(t)
+	defer cleanup()
+
+	exp := time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC)
+	if err := SaveSession("http://server:8080", "tok", "user", "admin", "http://console:8081", exp); err != nil {
+		t.Fatalf("SaveSession: %v", err)
+	}
+
+	token, server, consoleURL, expiresAt, err := LoadSession("http://server:8080")
+	if err != nil {
+		t.Fatalf("LoadSession: %v", err)
+	}
+	if token != "tok" {
+		t.Errorf("token = %q, want %q", token, "tok")
+	}
+	if server != "http://server:8080" {
+		t.Errorf("server = %q", server)
+	}
+	if consoleURL != "http://console:8081" {
+		t.Errorf("consoleURL = %q, want %q", consoleURL, "http://console:8081")
+	}
+	if !expiresAt.Equal(exp) {
+		t.Errorf("expiresAt = %v, want %v", expiresAt, exp)
+	}
+}
+
+func TestLoadSession_BackwardCompat_NoExpiresAt(t *testing.T) {
+	cleanup := testSessionDir(t)
+	defer cleanup()
+
+	// Save without expires_at (old session)
+	if err := SaveSession("http://server:8080", "tok", "user", "admin", "", time.Time{}); err != nil {
+		t.Fatalf("SaveSession: %v", err)
+	}
+
+	_, _, _, expiresAt, err := LoadSession("http://server:8080")
+	if err != nil {
+		t.Fatalf("LoadSession: %v", err)
+	}
+	if !expiresAt.IsZero() {
+		t.Errorf("expiresAt = %v, want zero time for old session", expiresAt)
 	}
 }

@@ -402,11 +402,12 @@ const (
 // resolveServerURL resolves the server URL and session token.
 // If serverFlag is set, uses it and loads the matching token.
 // If serverFlag is empty, loads the first saved session.
+// Proactively refreshes the token if it is near expiration.
 // Returns error if no server URL can be resolved.
 func resolveServerURL(serverFlag, prefix string) (url, token string, err error) {
 	// Trim trailing slash for consistent URL handling.
 	serverFlag = strings.TrimRight(serverFlag, "/")
-	token, resolvedServer, sessErr := auth.LoadSession(serverFlag)
+	token, resolvedServer, consoleURL, expiresAt, sessErr := auth.LoadSession(serverFlag)
 
 	url = serverFlag
 	if url == "" {
@@ -426,6 +427,31 @@ func resolveServerURL(serverFlag, prefix string) (url, token string, err error) 
 			log.Printf("%s: using saved session for %s", prefix, url)
 		}
 	}
+
+	// Proactive token refresh when approaching expiration.
+	if token != "" && consoleURL != "" && auth.NeedsRefresh(expiresAt) {
+		remaining := time.Until(expiresAt)
+		if remaining < 0 {
+			log.Printf("%s: session expired, attempting refresh...", prefix)
+		} else {
+			log.Printf("%s: session expires in %s, refreshing...", prefix, remaining.Round(time.Hour))
+		}
+		newToken, newExpiresAt, refreshErr := auth.RefreshSession(consoleURL, token)
+		if refreshErr != nil {
+			if remaining < 0 {
+				return "", "", fmt.Errorf("session expired and refresh failed: %w; run `ssetunnel login` to re-authenticate", refreshErr)
+			}
+			log.Printf("%s: warning: token refresh failed: %v (continuing with current token)", prefix, refreshErr)
+		} else {
+			log.Printf("%s: session token refreshed (expires %s)", prefix, newExpiresAt.Format("2006-01-02"))
+			// Update the session file with the new token.
+			if saveErr := auth.SaveSession(url, newToken, "", "", consoleURL, newExpiresAt); saveErr != nil {
+				log.Printf("%s: warning: failed to save refreshed session: %v", prefix, saveErr)
+			}
+			token = newToken
+		}
+	}
+
 	return url, token, nil
 }
 
@@ -572,12 +598,19 @@ func runLogin(_ context.Context, args []string) error {
 	}
 
 	var result struct {
-		Token    string `json:"token"`
-		Username string `json:"username"`
-		Role     string `json:"role"`
+		Token     string `json:"token"`
+		Username  string `json:"username"`
+		Role      string `json:"role"`
+		ExpiresAt string `json:"expires_at"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	// Parse expiry for session file storage.
+	var expiresAt time.Time
+	if result.ExpiresAt != "" {
+		expiresAt, _ = time.Parse(time.RFC3339, result.ExpiresAt)
 	}
 
 	// Determine tunnel URL for session storage.
@@ -587,7 +620,7 @@ func runLogin(_ context.Context, args []string) error {
 	}
 	tunnelURL = strings.TrimRight(tunnelURL, "/")
 
-	if err := auth.SaveSession(tunnelURL, result.Token, result.Username, result.Role); err != nil {
+	if err := auth.SaveSession(tunnelURL, result.Token, result.Username, result.Role, *serverURL, expiresAt); err != nil {
 		return fmt.Errorf("failed to save session: %w", err)
 	}
 

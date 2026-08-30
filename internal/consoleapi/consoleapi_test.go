@@ -611,3 +611,62 @@ func TestSessionsAndConnectedAgents_SortedByAgentID(t *testing.T) {
 		}
 	}
 }
+
+func TestRefreshSession(t *testing.T) {
+	router, store, user, token := setupTestEnv(t)
+	ctx := context.Background()
+
+	// 1. Refresh with valid token → 200 + new token
+	req := httptest.NewRequest("POST", "/api/v1/refresh-session", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("refresh: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]interface{}
+	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+	newToken, ok := resp["token"].(string)
+	if !ok || newToken == "" {
+		t.Fatal("refresh: expected non-empty token in response")
+	}
+	if newToken == token {
+		t.Error("refresh: new token should differ from old token")
+	}
+	expiresAtStr, ok := resp["expires_at"].(string)
+	if !ok || expiresAtStr == "" {
+		t.Error("refresh: expected expires_at in response")
+	}
+
+	// 2. Old token should be rejected after refresh (rotated)
+	req = httptest.NewRequest("POST", "/api/v1/refresh-session", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("refresh with old token: expected 401, got %d", rec.Code)
+	}
+
+	// 3. New token should work
+	req = httptest.NewRequest("POST", "/api/v1/refresh-session", nil)
+	req.Header.Set("Authorization", "Bearer "+newToken)
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Errorf("refresh with new token: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// 4. Disabled user cannot refresh
+	_ = store.UpdateUserWithDisabled(ctx, user.ID, nil, nil, nil, nil, boolPtr(true))
+	req = httptest.NewRequest("POST", "/api/v1/refresh-session", nil)
+	req.Header.Set("Authorization", "Bearer "+newToken)
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	// Disabled user's session should be rejected (the middleware or store rejects it)
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("disabled user refresh: expected 401, got %d", rec.Code)
+	}
+}
+
+func boolPtr(b bool) *bool { return &b }

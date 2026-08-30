@@ -163,7 +163,7 @@ func TestResolveServerURL_NoFlag_WithSession(t *testing.T) {
 	cleanup := testHomeDir(t)
 	defer cleanup()
 
-	if err := auth.SaveSession("http://saved:8080", "tok1", "user1", "admin"); err != nil {
+	if err := auth.SaveSession("http://saved:8080", "tok1", "user1", "admin", "", time.Time{}); err != nil {
 		t.Fatalf("SaveSession: %v", err)
 	}
 
@@ -183,7 +183,7 @@ func TestResolveServerURL_Flag_WithSession(t *testing.T) {
 	cleanup := testHomeDir(t)
 	defer cleanup()
 
-	if err := auth.SaveSession("http://flag:8080", "tok2", "user2", "admin"); err != nil {
+	if err := auth.SaveSession("http://flag:8080", "tok2", "user2", "admin", "", time.Time{}); err != nil {
 		t.Fatalf("SaveSession: %v", err)
 	}
 
@@ -219,7 +219,7 @@ func TestResolveServerURL_TrailingSlash(t *testing.T) {
 	cleanup := testHomeDir(t)
 	defer cleanup()
 
-	if err := auth.SaveSession("http://host:8080", "tok", "user", "admin"); err != nil {
+	if err := auth.SaveSession("http://host:8080", "tok", "user", "admin", "", time.Time{}); err != nil {
 		t.Fatalf("SaveSession: %v", err)
 	}
 
