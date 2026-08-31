@@ -48,7 +48,7 @@ func TestConsoleAPI(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to generate admin token: %v", err)
 	}
-	if err := store.CreateUserSession(ctx, adminUser.ID, adminToken, 24*time.Hour); err != nil {
+	if _, err := store.CreateUserSession(ctx, adminUser.ID, adminToken, 24*time.Hour); err != nil {
 		t.Fatalf("failed to create admin session: %v", err)
 	}
 
@@ -159,7 +159,7 @@ func setupTestEnv(t *testing.T) (http.Handler, *auth.Store, *auth.UserInfo, stri
 	}
 
 	token, _ := auth.GenerateToken()
-	_ = store.CreateUserSession(ctx, user.ID, token, 24*time.Hour)
+	_, _ = store.CreateUserSession(ctx, user.ID, token, 24*time.Hour)
 
 	return router, store, user, token
 }
@@ -350,13 +350,13 @@ func TestNonAdminSessionFiltering(t *testing.T) {
 	adminHash, _ := auth.HashPassword("adminpass123")
 	adminUser, _ := store.CreateUser(ctx, "nonadmin_test_admin", adminHash, "admin", true, true)
 	adminToken, _ := auth.GenerateToken()
-	_ = store.CreateUserSession(ctx, adminUser.ID, adminToken, 24*time.Hour)
+	_, _ = store.CreateUserSession(ctx, adminUser.ID, adminToken, 24*time.Hour)
 
 	// Create regular user + session.
 	userHash, _ := auth.HashPassword("userpass12345")
 	regUser, _ := store.CreateUser(ctx, "nonadmin_test_user", userHash, "user", true, true)
 	userToken, _ := auth.GenerateToken()
-	_ = store.CreateUserSession(ctx, regUser.ID, userToken, 24*time.Hour)
+	_, _ = store.CreateUserSession(ctx, regUser.ID, userToken, 24*time.Hour)
 
 	// Create sessions in the registry with different user attributions.
 	adminSess := server.NewSession("sess-admin-1")
@@ -560,7 +560,7 @@ func TestSessionsAndConnectedAgents_SortedByAgentID(t *testing.T) {
 	pwHash, _ := auth.HashPassword("adminpass123")
 	adminUser, _ := store.CreateUser(ctx, "sort_test_admin", pwHash, "admin", true, true)
 	adminToken, _ := auth.GenerateToken()
-	_ = store.CreateUserSession(ctx, adminUser.ID, adminToken, 24*time.Hour)
+	_, _ = store.CreateUserSession(ctx, adminUser.ID, adminToken, 24*time.Hour)
 
 	// Register sessions with agent IDs in deliberately non-alphabetical order.
 	for _, aid := range []string{"zebra-agent", "alpha-agent", "mango-agent"} {
@@ -611,3 +611,62 @@ func TestSessionsAndConnectedAgents_SortedByAgentID(t *testing.T) {
 		}
 	}
 }
+
+func TestRefreshSession(t *testing.T) {
+	router, store, user, token := setupTestEnv(t)
+	ctx := context.Background()
+
+	// 1. Refresh with valid token → 200 + new token
+	req := httptest.NewRequest("POST", "/api/v1/refresh-session", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("refresh: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]interface{}
+	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+	newToken, ok := resp["token"].(string)
+	if !ok || newToken == "" {
+		t.Fatal("refresh: expected non-empty token in response")
+	}
+	if newToken == token {
+		t.Error("refresh: new token should differ from old token")
+	}
+	expiresAtStr, ok := resp["expires_at"].(string)
+	if !ok || expiresAtStr == "" {
+		t.Error("refresh: expected expires_at in response")
+	}
+
+	// 2. Old token should be rejected after refresh (rotated)
+	req = httptest.NewRequest("POST", "/api/v1/refresh-session", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("refresh with old token: expected 401, got %d", rec.Code)
+	}
+
+	// 3. New token should work
+	req = httptest.NewRequest("POST", "/api/v1/refresh-session", nil)
+	req.Header.Set("Authorization", "Bearer "+newToken)
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Errorf("refresh with new token: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// 4. Disabled user cannot refresh
+	_ = store.UpdateUserWithDisabled(ctx, user.ID, nil, nil, nil, nil, boolPtr(true))
+	req = httptest.NewRequest("POST", "/api/v1/refresh-session", nil)
+	req.Header.Set("Authorization", "Bearer "+newToken)
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	// Disabled user's session should be rejected (the middleware or store rejects it)
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("disabled user refresh: expected 401, got %d", rec.Code)
+	}
+}
+
+func boolPtr(b bool) *bool { return &b }

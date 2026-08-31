@@ -49,7 +49,7 @@ func TestConnectClient_LocalPortMode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to generate token: %v", err)
 	}
-	err = store.CreateUserSession(ctx, testUser.ID, userToken, 24*time.Hour)
+	_, err = store.CreateUserSession(ctx, testUser.ID, userToken, 24*time.Hour)
 	if err != nil {
 		t.Fatalf("failed to create user session: %v", err)
 	}

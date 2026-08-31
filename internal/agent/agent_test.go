@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"net"
 	"testing"
 	"time"
@@ -124,5 +125,81 @@ func TestAgent_RunRespectsBackoff(t *testing.T) {
 	// This is a sanity bound — exact count depends on jitter.
 	if elapsed < 2*time.Second {
 		t.Errorf("Run returned suspiciously fast (%v); backoff may not be working", elapsed)
+	}
+}
+
+func TestRefreshToken(t *testing.T) {
+	t.Run("updates token on success", func(t *testing.T) {
+		a := &Agent{Token: "old-token"}
+		a.OnTokenRefresh = func() (string, error) {
+			return "new-token", nil
+		}
+		a.RefreshToken()
+		if a.Token != "new-token" {
+			t.Errorf("Token = %q, want %q", a.Token, "new-token")
+		}
+	})
+
+	t.Run("preserves token on error", func(t *testing.T) {
+		a := &Agent{Token: "keep-me"}
+		a.OnTokenRefresh = func() (string, error) {
+			return "", errors.New("refresh failed")
+		}
+		a.RefreshToken()
+		if a.Token != "keep-me" {
+			t.Errorf("Token = %q, want %q (should be unchanged)", a.Token, "keep-me")
+		}
+	})
+
+	t.Run("no-op when callback nil", func(t *testing.T) {
+		a := &Agent{Token: "untouched"}
+		a.RefreshToken() // must not panic
+		if a.Token != "untouched" {
+			t.Errorf("Token = %q, want %q", a.Token, "untouched")
+		}
+	})
+}
+
+// TestAgent_RunRefreshesBeforeReconnect verifies that the agent calls
+// RefreshToken before each reconnect attempt, ensuring the token stays
+// fresh across long-lived sessions.
+func TestAgent_RunRefreshesBeforeReconnect(t *testing.T) {
+	// Bind to :0 to find an unused port, then close it — dialing that
+	// port will get "connection refused" reliably.
+	ln, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	addr := ln.Addr().String()
+	ln.Close()
+
+	refreshCount := 0
+	a := &Agent{
+		ServerURL: "http://" + addr,
+		Target:    "127.0.0.1:1",
+		OnTokenRefresh: func() (string, error) {
+			refreshCount++
+			return "refreshed-token", nil
+		},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- a.Run(ctx) }()
+	<-ctx.Done()
+
+	select {
+	case <-errCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return 5s after context cancel")
+	}
+
+	if refreshCount == 0 {
+		t.Error("OnTokenRefresh was never called during reconnect loop")
+	}
+	if a.Token != "refreshed-token" {
+		t.Errorf("Token = %q, want %q", a.Token, "refreshed-token")
 	}
 }

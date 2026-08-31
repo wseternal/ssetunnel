@@ -390,16 +390,19 @@ func (s *Store) EnsureAdminUser(ctx context.Context) (string, error) {
 
 // --- User Sessions ---
 
-func (s *Store) CreateUserSession(ctx context.Context, userID int64, rawToken string, ttl time.Duration) error {
+// CreateUserSession creates a new user session with a generated token.
+// Returns the computed expiry time so callers can use the same value
+// in responses without clock skew.
+func (s *Store) CreateUserSession(ctx context.Context, userID int64, rawToken string, ttl time.Duration) (time.Time, error) {
 	digest := ComputeDigest(rawToken)
 	expiresAt := time.Now().UTC().Add(ttl)
 
 	query := `INSERT INTO user_sessions (user_id, digest, expires_at) VALUES ($1, $2, $3)`
 	_, err := s.pool.Exec(ctx, query, userID, digest, expiresAt)
 	if err != nil {
-		return fmt.Errorf("create user session: %w", err)
+		return time.Time{}, fmt.Errorf("create user session: %w", err)
 	}
-	return nil
+	return expiresAt, nil
 }
 
 func (s *Store) ValidateUserSession(ctx context.Context, rawToken string) (*UserSessionInfo, error) {
@@ -428,6 +431,77 @@ func (s *Store) RevokeUserSession(ctx context.Context, rawToken string) error {
 	digest := ComputeDigest(rawToken)
 	_, err := s.pool.Exec(ctx, `DELETE FROM user_sessions WHERE digest = $1`, digest)
 	return err
+}
+
+// RefreshResult holds the output of a successful session refresh.
+type RefreshResult struct {
+	Token     string    // new raw session token
+	ExpiresAt time.Time // new session expiry
+	Info      *UserSessionInfo
+}
+
+// RefreshUserSession atomically rotates a user session token: validates the
+// current token, creates a new session with a fresh TTL, and deletes the old
+// session — all in a single transaction. Returns the new token and session info.
+func (s *Store) RefreshUserSession(ctx context.Context, rawToken string, ttl time.Duration) (*RefreshResult, error) {
+	oldDigest := ComputeDigest(rawToken)
+
+	// Generate new token before opening the transaction to minimize FOR UPDATE
+	// lock hold time (crypto/rand can block on entropy-starved systems).
+	newToken, err := GenerateToken()
+	if err != nil {
+		return nil, fmt.Errorf("generate refresh token: %w", err)
+	}
+	newDigest := ComputeDigest(newToken)
+	expiresAt := time.Now().UTC().Add(ttl)
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin refresh tx: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+
+	// Validate current token and fetch user info within the transaction.
+	var info UserSessionInfo
+	validateQuery := `
+		SELECT us.user_id, us.expires_at, u.role, u.perm_connect, u.perm_agent
+		FROM user_sessions us
+		JOIN users u ON u.id = us.user_id
+		WHERE us.digest = $1 AND us.expires_at > CURRENT_TIMESTAMP AND u.disabled_at IS NULL
+		FOR UPDATE
+	`
+	if err := tx.QueryRow(ctx, validateQuery, oldDigest).Scan(
+		&info.UserID, &info.ExpiresAt, &info.Role, &info.PermConnect, &info.PermAgent,
+	); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrInvalidSession
+		}
+		return nil, fmt.Errorf("validate session for refresh: %w", err)
+	}
+
+	// Create new session.
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO user_sessions (user_id, digest, expires_at) VALUES ($1, $2, $3)`,
+		info.UserID, newDigest, expiresAt,
+	); err != nil {
+		return nil, fmt.Errorf("create refreshed session: %w", err)
+	}
+
+	// Delete old session.
+	if _, err := tx.Exec(ctx, `DELETE FROM user_sessions WHERE digest = $1`, oldDigest); err != nil {
+		return nil, fmt.Errorf("delete old session: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit refresh: %w", err)
+	}
+
+	info.ExpiresAt = expiresAt
+	return &RefreshResult{
+		Token:     newToken,
+		ExpiresAt: expiresAt,
+		Info:      &info,
+	}, nil
 }
 
 // --- TOTP & Recovery Codes ---

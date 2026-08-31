@@ -2,7 +2,10 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
@@ -150,7 +153,7 @@ func TestResolveServerURL_NoFlag_NoSession(t *testing.T) {
 	cleanup := testHomeDir(t)
 	defer cleanup()
 
-	_, _, err := resolveServerURL("", "test")
+	_, _, _, err := resolveServerURL("", "test")
 	if err == nil {
 		t.Fatal("expected error when no flag and no session, got nil")
 	}
@@ -163,11 +166,11 @@ func TestResolveServerURL_NoFlag_WithSession(t *testing.T) {
 	cleanup := testHomeDir(t)
 	defer cleanup()
 
-	if err := auth.SaveSession("http://saved:8080", "tok1", "user1", "admin"); err != nil {
+	if err := auth.SaveSession("http://saved:8080", "tok1", "user1", "admin", "", time.Time{}); err != nil {
 		t.Fatalf("SaveSession: %v", err)
 	}
 
-	url, token, err := resolveServerURL("", "test")
+	url, token, _, err := resolveServerURL("", "test")
 	if err != nil {
 		t.Fatalf("resolveServerURL: %v", err)
 	}
@@ -179,15 +182,90 @@ func TestResolveServerURL_NoFlag_WithSession(t *testing.T) {
 	}
 }
 
+func TestResolveServerURL_RefreshSuccess(t *testing.T) {
+	cleanup := testHomeDir(t)
+	defer cleanup()
+
+	refreshCalled := false
+	newToken := "refreshed-token-xyz"
+	newExpiresAt := time.Now().UTC().Add(30 * 24 * time.Hour)
+
+	// Mock refresh server.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/console/api/v1/refresh-session" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+		authHeader := r.Header.Get("Authorization")
+		if authHeader != "Bearer old-token" {
+			t.Errorf("auth = %q, want Bearer old-token", authHeader)
+		}
+		refreshCalled = true
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{
+			"token":      newToken,
+			"expires_at": newExpiresAt.Format(time.RFC3339),
+		})
+	}))
+	defer srv.Close()
+
+	// Save session with near-expiry (3 days) and consoleURL pointing to mock server.
+	nearExpiry := time.Now().Add(3 * 24 * time.Hour)
+	if err := auth.SaveSession("http://tunnel:8080", "old-token", "user1", "admin", srv.URL, nearExpiry); err != nil {
+		t.Fatalf("SaveSession: %v", err)
+	}
+
+	url, token, _, err := resolveServerURL("", "test")
+	if err != nil {
+		t.Fatalf("resolveServerURL: %v", err)
+	}
+	if url != "http://tunnel:8080" {
+		t.Errorf("url = %q, want %q", url, "http://tunnel:8080")
+	}
+	if token != newToken {
+		t.Errorf("token = %q, want refreshed %q", token, newToken)
+	}
+	if !refreshCalled {
+		t.Error("refresh endpoint was not called")
+	}
+}
+
+func TestResolveServerURL_RefreshExpiredFails(t *testing.T) {
+	cleanup := testHomeDir(t)
+	defer cleanup()
+
+	// Mock refresh server that rejects.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "invalid or expired session", http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+
+	// Save session that is fully expired (1 hour ago).
+	expired := time.Now().Add(-1 * time.Hour)
+	if err := auth.SaveSession("http://tunnel:8080", "expired-token", "user1", "admin", srv.URL, expired); err != nil {
+		t.Fatalf("SaveSession: %v", err)
+	}
+
+	_, _, _, err := resolveServerURL("", "test")
+	if err == nil {
+		t.Fatal("expected error for expired session with failed refresh, got nil")
+	}
+	if !strings.Contains(err.Error(), "session expired and refresh failed") {
+		t.Errorf("unexpected error: %v", err)
+	}
+	if !strings.Contains(err.Error(), "ssetunnel login") {
+		t.Errorf("error should mention re-login: %v", err)
+	}
+}
+
 func TestResolveServerURL_Flag_WithSession(t *testing.T) {
 	cleanup := testHomeDir(t)
 	defer cleanup()
 
-	if err := auth.SaveSession("http://flag:8080", "tok2", "user2", "admin"); err != nil {
+	if err := auth.SaveSession("http://flag:8080", "tok2", "user2", "admin", "", time.Time{}); err != nil {
 		t.Fatalf("SaveSession: %v", err)
 	}
 
-	url, token, err := resolveServerURL("http://flag:8080", "test")
+	url, token, _, err := resolveServerURL("http://flag:8080", "test")
 	if err != nil {
 		t.Fatalf("resolveServerURL: %v", err)
 	}
@@ -203,7 +281,7 @@ func TestResolveServerURL_Flag_NoSession(t *testing.T) {
 	cleanup := testHomeDir(t)
 	defer cleanup()
 
-	url, token, err := resolveServerURL("http://explicit:8080", "test")
+	url, token, _, err := resolveServerURL("http://explicit:8080", "test")
 	if err != nil {
 		t.Fatalf("resolveServerURL: %v", err)
 	}
@@ -219,11 +297,11 @@ func TestResolveServerURL_TrailingSlash(t *testing.T) {
 	cleanup := testHomeDir(t)
 	defer cleanup()
 
-	if err := auth.SaveSession("http://host:8080", "tok", "user", "admin"); err != nil {
+	if err := auth.SaveSession("http://host:8080", "tok", "user", "admin", "", time.Time{}); err != nil {
 		t.Fatalf("SaveSession: %v", err)
 	}
 
-	url, token, err := resolveServerURL("http://host:8080/", "test")
+	url, token, _, err := resolveServerURL("http://host:8080/", "test")
 	if err != nil {
 		t.Fatalf("resolveServerURL: %v", err)
 	}
@@ -232,5 +310,36 @@ func TestResolveServerURL_TrailingSlash(t *testing.T) {
 	}
 	if token != "tok" {
 		t.Errorf("token = %q, want %q", token, "tok")
+	}
+}
+
+// TestSharedTokenPointer verifies the RequestModifier + shared-pointer
+// pattern used in runAgent: when the token is refreshed via *tokenPtr,
+// the RequestModifier closure sees the updated value.
+func TestSharedTokenPointer(t *testing.T) {
+	sessToken := "original-token"
+	tokenPtr := &sessToken
+
+	var captured string
+	reqMod := func(req *http.Request) {
+		captured = "Bearer " + *tokenPtr
+	}
+
+	// Simulate refresh updating the shared pointer.
+	*tokenPtr = "refreshed-token"
+
+	req, _ := http.NewRequest("GET", "http://example.com", nil)
+	reqMod(req)
+
+	want := "Bearer refreshed-token"
+	if captured != want {
+		t.Errorf("RequestModifier captured %q, want %q", captured, want)
+	}
+	if req.Header.Get("Authorization") == "" {
+		// Verify the modifier also works via Header.Set
+		req.Header.Set("Authorization", captured)
+		if req.Header.Get("Authorization") != want {
+			t.Errorf("Authorization header = %q, want %q", req.Header.Get("Authorization"), want)
+		}
 	}
 }

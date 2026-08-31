@@ -64,6 +64,8 @@ Service user: non-root users get user-level services (systemd --user / LaunchAge
 
 Agent and connect commands load session tokens from `~/.ssetunnel/session` (JSON, multi-server), created by `ssetunnel login`. If `--server` is omitted, the first saved session is used (sorted alphabetically).
 
+Session tokens are proactively refreshed when the remaining TTL falls below 7 days. Refresh uses `UpdateSessionToken` to preserve stored metadata (username, role). On refresh failure for expired tokens, a hard error directs the user to re-run `ssetunnel login`. Old-format sessions (without `expires_at`/`console_url`) log a warning but continue to work until server-side expiry.
+
 ## Rules
 * All subcommands use `signal.NotifyContext` for graceful shutdown on SIGINT/SIGTERM.
 * Agent flags are clamped: batch-size 1024..1048576, concurrency 1..4.

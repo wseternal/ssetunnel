@@ -7,13 +7,16 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"time"
 )
 
 // SessionEntry holds the credentials for a single server.
 type SessionEntry struct {
-	Token    string `json:"token"`
-	Username string `json:"username,omitempty"`
-	Role     string `json:"role,omitempty"`
+	Token      string `json:"token"`
+	Username   string `json:"username,omitempty"`
+	Role       string `json:"role,omitempty"`
+	ExpiresAt  string `json:"expires_at,omitempty"`  // RFC 3339
+	ConsoleURL string `json:"console_url,omitempty"` // console API base URL for token refresh
 }
 
 // sessionFile is the on-disk format for ~/.ssetunnel/session.
@@ -86,32 +89,50 @@ func saveSessionFile(sf sessionFile) error {
 
 // SaveSession writes the session entry for the given server URL.
 // Multiple servers can be stored; each keyed by serverURL.
-func SaveSession(serverURL, token, username, role string) error {
+// consoleURL and expiresAt may be empty/zero for backward compatibility.
+func SaveSession(serverURL, token, username, role, consoleURL string, expiresAt time.Time) error {
 	sf, err := loadSessionFile()
 	if err != nil {
 		return fmt.Errorf("load session file: %w", err)
 	}
-	sf.Sessions[serverURL] = SessionEntry{
-		Token:    token,
-		Username: username,
-		Role:     role,
+	entry := SessionEntry{
+		Token:      token,
+		Username:   username,
+		Role:       role,
+		ConsoleURL: consoleURL,
 	}
+	if !expiresAt.IsZero() {
+		entry.ExpiresAt = expiresAt.Format(time.RFC3339)
+	}
+	sf.Sessions[serverURL] = entry
 	return saveSessionFile(sf)
 }
 
 // LoadSession reads the session entry for the given server URL.
 // If serverURL is empty, returns the first entry (for backward compat).
-// Returns ("", "", nil) if no matching session exists.
-func LoadSession(serverURL string) (token, resolvedServer string, err error) {
+// Returns zero time for expiresAt when the entry lacks expiry metadata (old sessions).
+func LoadSession(serverURL string) (token, resolvedServer, consoleURL string, expiresAt time.Time, err error) {
 	sf, err := loadSessionFile()
 	if err != nil {
-		return "", "", err
+		return "", "", "", time.Time{}, err
+	}
+	lookup := func(entry SessionEntry, srv string) (string, string, string, time.Time) {
+		var t time.Time
+		if entry.ExpiresAt != "" {
+			var parseErr error
+			t, parseErr = time.Parse(time.RFC3339, entry.ExpiresAt)
+			if parseErr != nil {
+				log.Printf("auth: WARNING: corrupted expires_at %q in session file, treating as unknown expiry", entry.ExpiresAt)
+			}
+		}
+		return entry.Token, srv, entry.ConsoleURL, t
 	}
 	if serverURL != "" {
 		if entry, ok := sf.Sessions[serverURL]; ok {
-			return entry.Token, serverURL, nil
+			tok, srv, curl, exp := lookup(entry, serverURL)
+			return tok, srv, curl, exp, nil
 		}
-		return "", "", nil
+		return "", "", "", time.Time{}, nil
 	}
 	// No server specified — return first entry (sorted for determinism).
 	keys := make([]string, 0, len(sf.Sessions))
@@ -121,9 +142,30 @@ func LoadSession(serverURL string) (token, resolvedServer string, err error) {
 	sort.Strings(keys)
 	if len(keys) > 0 {
 		entry := sf.Sessions[keys[0]]
-		return entry.Token, keys[0], nil
+		tok, srv, curl, exp := lookup(entry, keys[0])
+		return tok, srv, curl, exp, nil
 	}
-	return "", "", nil
+	return "", "", "", time.Time{}, nil
+}
+
+// UpdateSessionToken updates only the token and expiry for an existing session
+// entry, preserving all other fields (username, role, consoleURL). This avoids
+// the data-loss that occurs when SaveSession overwrites the entire entry.
+func UpdateSessionToken(serverURL, newToken string, expiresAt time.Time) error {
+	sf, err := loadSessionFile()
+	if err != nil {
+		return fmt.Errorf("load session file: %w", err)
+	}
+	entry, ok := sf.Sessions[serverURL]
+	if !ok {
+		return fmt.Errorf("no session for %s", serverURL)
+	}
+	entry.Token = newToken
+	if !expiresAt.IsZero() {
+		entry.ExpiresAt = expiresAt.Format(time.RFC3339)
+	}
+	sf.Sessions[serverURL] = entry
+	return saveSessionFile(sf)
 }
 
 // SessionServers returns the list of server URLs with stored sessions.

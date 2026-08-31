@@ -296,17 +296,49 @@ func runAgent(ctx context.Context, args []string) error {
 	batch, conc := clampAgentFlags(*batchSize, *concurrency)
 
 	// Resolve server URL and session token.
-	url, sessToken, err := resolveServerURL(*serverURL, "agent")
+	url, sessToken, consoleURL, err := resolveServerURL(*serverURL, "agent")
 	if err != nil {
 		return err
 	}
 
-	// Build request modifier for session-based auth
+	// Build request modifier for session-based auth.
+	// Use a shared pointer so the RequestModifier, OnTokenUpgrade, and
+	// OnTokenRefresh all observe the latest token value.
 	var reqMod func(*http.Request)
+	var tokenPtr *string
 	if sessToken != "" {
-		token := sessToken // capture for closure
+		tokenPtr = &sessToken
 		reqMod = func(req *http.Request) {
-			req.Header.Set("Authorization", "Bearer "+token)
+			req.Header.Set("Authorization", "Bearer "+*tokenPtr)
+		}
+	}
+
+	// Build mid-lifecycle token refresh callback.
+	// Called before each reconnect to keep the session fresh during
+	// long-running agent sessions.
+	var refreshFn func() (string, error)
+	if tokenPtr != nil && consoleURL != "" {
+		serverKey := url // capture session file key
+		cURL := consoleURL
+		refreshFn = func() (string, error) {
+			// Load current expiry from session file to check if refresh is needed.
+			_, _, _, expiresAt, loadErr := auth.LoadSession(serverKey)
+			if loadErr != nil {
+				log.Printf("agent: warning: cannot read session file: %v", loadErr)
+				return *tokenPtr, nil
+			}
+			if !auth.NeedsRefresh(expiresAt) {
+				return *tokenPtr, nil // not due yet
+			}
+			newTok, newExp, err := auth.RefreshSession(cURL, *tokenPtr)
+			if err != nil {
+				return "", err
+			}
+			if saveErr := auth.UpdateSessionToken(serverKey, newTok, newExp); saveErr != nil {
+				log.Printf("agent: warning: failed to save refreshed session: %v", saveErr)
+			}
+			*tokenPtr = newTok // update shared pointer for RequestModifier
+			return newTok, nil
 		}
 	}
 
@@ -324,16 +356,17 @@ func runAgent(ctx context.Context, args []string) error {
 	}
 
 	ag := &agent.Agent{
-		ServerURL:       url,
-		BasePath:        *basePath,
-		Target:          *target,
-		AgentID:         *agentID,
-		Token:           sessToken,
-		RequestModifier: reqMod,
-		BatchSize:       batch,
-		Concurrency:     conc,
-		Compress:        *compress,
-		NoAutoTune:      *noAutoTune,
+		ServerURL:        url,
+		BasePath:         *basePath,
+		Target:           *target,
+		AgentID:          *agentID,
+		Token:            sessToken,
+		RequestModifier:  reqMod,
+		BatchSize:        batch,
+		Concurrency:      conc,
+		Compress:         *compress,
+		NoAutoTune:       *noAutoTune,
+		OnTokenRefresh:   refreshFn,
 	}
 	return ag.Run(ctx)
 }
@@ -358,7 +391,7 @@ func runConnect(ctx context.Context, args []string) error {
 	}
 
 	// Resolve server URL and session token.
-	url, sessToken, err := resolveServerURL(*server, "connect")
+	url, sessToken, _, err := resolveServerURL(*server, "connect")
 	if err != nil {
 		return err
 	}
@@ -402,22 +435,23 @@ const (
 // resolveServerURL resolves the server URL and session token.
 // If serverFlag is set, uses it and loads the matching token.
 // If serverFlag is empty, loads the first saved session.
+// Proactively refreshes the token if it is near expiration.
 // Returns error if no server URL can be resolved.
-func resolveServerURL(serverFlag, prefix string) (url, token string, err error) {
+func resolveServerURL(serverFlag, prefix string) (url, token, consoleURL string, err error) {
 	// Trim trailing slash for consistent URL handling.
 	serverFlag = strings.TrimRight(serverFlag, "/")
-	token, resolvedServer, sessErr := auth.LoadSession(serverFlag)
+	token, resolvedServer, consoleURL, expiresAt, sessErr := auth.LoadSession(serverFlag)
 
 	url = serverFlag
 	if url == "" {
 		if sessErr != nil {
-			return "", "", fmt.Errorf("--server is required (failed to load saved session: %w); run `ssetunnel login` first", sessErr)
+			return "", "", "", fmt.Errorf("--server is required (failed to load saved session: %w); run `ssetunnel login` first", sessErr)
 		}
 		if resolvedServer != "" {
 			url = resolvedServer
 			log.Printf("%s: using saved session for %s", prefix, url)
 		} else {
-			return "", "", fmt.Errorf("--server is required (no saved session found; run `ssetunnel login` first)")
+			return "", "", "", fmt.Errorf("--server is required (no saved session found; run `ssetunnel login` first)")
 		}
 	} else {
 		if sessErr != nil {
@@ -426,7 +460,42 @@ func resolveServerURL(serverFlag, prefix string) (url, token string, err error) 
 			log.Printf("%s: using saved session for %s", prefix, url)
 		}
 	}
-	return url, token, nil
+
+	// Warn about old-format sessions that lack refresh metadata.
+	if token != "" && consoleURL == "" && expiresAt.IsZero() {
+		log.Printf("%s: session lacks refresh metadata (old format); token may expire without warning — re-run `ssetunnel login` to upgrade", prefix)
+	}
+
+	// Proactive token refresh when approaching expiration.
+	if token != "" && consoleURL != "" && auth.NeedsRefresh(expiresAt) {
+		remaining := time.Until(expiresAt)
+		if remaining < 0 {
+			log.Printf("%s: session expired, attempting refresh...", prefix)
+		} else {
+			log.Printf("%s: session expires in %s, refreshing...", prefix, remaining.Round(time.Hour))
+		}
+		newToken, newExpiresAt, refreshErr := auth.RefreshSession(consoleURL, token)
+		if refreshErr != nil {
+			// Another process may have refreshed already — re-read from disk.
+			if tok2, _, _, exp2, loadErr := auth.LoadSession(serverFlag); loadErr == nil && tok2 != "" && tok2 != token && !auth.NeedsRefresh(exp2) {
+				token = tok2
+				log.Printf("%s: token was refreshed by another process", prefix)
+			} else if remaining < 0 {
+				return "", "", "", fmt.Errorf("session expired and refresh failed: %w; run `ssetunnel login` to re-authenticate", refreshErr)
+			} else {
+				log.Printf("%s: warning: token refresh failed: %v (continuing with current token)", prefix, refreshErr)
+			}
+		} else {
+			log.Printf("%s: session token refreshed (expires %s)", prefix, newExpiresAt.Format("2006-01-02"))
+			// Update only token + expiry, preserving username/role/consoleURL.
+			if saveErr := auth.UpdateSessionToken(url, newToken, newExpiresAt); saveErr != nil {
+				log.Printf("%s: warning: failed to save refreshed session: %v", prefix, saveErr)
+			}
+			token = newToken
+		}
+	}
+
+	return url, token, consoleURL, nil
 }
 
 // deriveTunnelURL maps a console URL (default port 8081) to the tunnel
@@ -572,12 +641,19 @@ func runLogin(_ context.Context, args []string) error {
 	}
 
 	var result struct {
-		Token    string `json:"token"`
-		Username string `json:"username"`
-		Role     string `json:"role"`
+		Token     string `json:"token"`
+		Username  string `json:"username"`
+		Role      string `json:"role"`
+		ExpiresAt string `json:"expires_at"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	// Parse expiry for session file storage.
+	var expiresAt time.Time
+	if result.ExpiresAt != "" {
+		expiresAt, _ = time.Parse(time.RFC3339, result.ExpiresAt)
 	}
 
 	// Determine tunnel URL for session storage.
@@ -587,7 +663,7 @@ func runLogin(_ context.Context, args []string) error {
 	}
 	tunnelURL = strings.TrimRight(tunnelURL, "/")
 
-	if err := auth.SaveSession(tunnelURL, result.Token, result.Username, result.Role); err != nil {
+	if err := auth.SaveSession(tunnelURL, result.Token, result.Username, result.Role, *serverURL, expiresAt); err != nil {
 		return fmt.Errorf("failed to save session: %w", err)
 	}
 
