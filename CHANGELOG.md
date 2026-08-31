@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.8.0](https://github.com/wseternal/ssetunnel/compare/v1.7.1...v1.8.0) (2026-08-31)
+
+
+### Features
+
+* **auth:** add transparent session token refresh mechanism ([#55](https://github.com/wseternal/ssetunnel/issues/55)) ([a64433f](https://github.com/wseternal/ssetunnel/commit/a64433fecb175619ba85c3cfa0eff3b6770f9c0e))
+
+
+### Bug Fixes
+
+* stable sort order by agent_id for console API responses ([#53](https://github.com/wseternal/ssetunnel/issues/53)) ([eeb675e](https://github.com/wseternal/ssetunnel/commit/eeb675eb1e832856100d28edcd953f6a553e790d))
+
 ## [1.7.1](https://github.com/wseternal/ssetunnel/compare/v1.7.0...v1.7.1) (2026-08-13)
 
 
