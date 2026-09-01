@@ -272,7 +272,10 @@ export default function App() {
   const [shellPersistentId, setShellPersistentId] = useState<string>('');
   const [shellReattached, setShellReattached] = useState(false);
   const [isShellFullscreen, setIsShellFullscreen] = useState(false);
-  const [shellThemeKey, setShellThemeKey] = useState(() => localStorage.getItem('shellTheme') || 'dark');
+  const [shellThemeKey, setShellThemeKey] = useState(() => {
+    const stored = localStorage.getItem('shellTheme');
+    return stored && stored in SHELL_THEMES ? stored : 'dark';
+  });
   const termRef = useRef<HTMLDivElement>(null);
   const shellContainerRef = useRef<HTMLDivElement>(null);
   const shellLineBufRef = useRef<string>('');
