@@ -45,6 +45,7 @@ import DesktopWindowsIcon from '@mui/icons-material/DesktopWindows';
 import FullscreenIcon from '@mui/icons-material/Fullscreen';
 import FullscreenExitIcon from '@mui/icons-material/FullscreenExit';
 import ZoomInIcon from '@mui/icons-material/ZoomIn';
+import PaletteIcon from '@mui/icons-material/Palette';
 import { Terminal, type IDisposable } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
@@ -170,6 +171,50 @@ const SESSION_COLUMNS: AdminTableColumn<Session>[] = [
 const MAGNIFIER_ZOOM = 3;
 const MAGNIFIER_SIZE = 180;
 
+interface ShellTheme {
+  label: string;
+  background: string;
+  foreground: string;
+  cursor: string;
+  selectionBackground: string;
+  black: string;
+  red: string;
+  green: string;
+  yellow: string;
+  blue: string;
+  magenta: string;
+  cyan: string;
+  white: string;
+  brightBlack: string;
+  brightRed: string;
+  brightGreen: string;
+  brightYellow: string;
+  brightBlue: string;
+  brightMagenta: string;
+  brightCyan: string;
+  brightWhite: string;
+}
+
+const SHELL_THEMES: Record<string, ShellTheme> = {
+  dark: {
+    label: 'Dark',
+    background: '#1e1e2e', foreground: '#cdd6f4', cursor: '#f5c2e7', selectionBackground: '#585b7066',
+    black: '#45475a', red: '#f38ba8', green: '#a6e3a1', yellow: '#f9e2af',
+    blue: '#89b4fa', magenta: '#f5c2e7', cyan: '#94e2d5', white: '#bac2de',
+    brightBlack: '#585b70', brightRed: '#f38ba8', brightGreen: '#a6e3a1', brightYellow: '#f9e2af',
+    brightBlue: '#89b4fa', brightMagenta: '#f5c2e7', brightCyan: '#94e2d5', brightWhite: '#a6adc8',
+  },
+  solarizedLight: {
+    label: 'Solarized Light',
+    background: '#fdf6e3', foreground: '#657b83', cursor: '#cb4b16', selectionBackground: '#eee8d5',
+    black: '#073642', red: '#dc322f', green: '#859900', yellow: '#b58900',
+    blue: '#268bd2', magenta: '#d33682', cyan: '#2aa198', white: '#eee8d5',
+    brightBlack: '#002b36', brightRed: '#cb4b16', brightGreen: '#586e75', brightYellow: '#657b83',
+    brightBlue: '#839496', brightMagenta: '#6c71c4', brightCyan: '#93a1a1', brightWhite: '#fdf6e3',
+  },
+};
+const SHELL_THEME_KEYS = Object.keys(SHELL_THEMES);
+
 export default function App() {
   const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [sessionToken, setSessionToken] = useState(() => localStorage.getItem('sessionToken') || '');
@@ -230,6 +275,10 @@ export default function App() {
   const [shellPersistentId, setShellPersistentId] = useState<string>('');
   const [shellReattached, setShellReattached] = useState(false);
   const [isShellFullscreen, setIsShellFullscreen] = useState(false);
+  const [shellThemeKey, setShellThemeKey] = useState(() => {
+    const stored = localStorage.getItem('shellTheme');
+    return stored && stored in SHELL_THEMES ? stored : 'dark';
+  });
   const termRef = useRef<HTMLDivElement>(null);
   const shellContainerRef = useRef<HTMLDivElement>(null);
   const shellLineBufRef = useRef<string>('');
@@ -478,7 +527,7 @@ export default function App() {
         cursorBlink: true,
         fontSize: 14,
         fontFamily: '"JetBrains Mono", "Fira Code", "Cascadia Code", Menlo, Monaco, monospace',
-        theme: { background: '#1e1e2e', foreground: '#cdd6f4', cursor: '#f5c2e7' },
+        theme: SHELL_THEMES[shellThemeKey],
         allowTransparency: false,
         scrollback: 5000,
       });
@@ -691,7 +740,7 @@ export default function App() {
       if (shellAbortRef.current === abort) shellAbortRef.current = null;
       fetchShellSessions();
     }
-  }, [sessionToken, parseSSEFrames, fetchShellSessions]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [sessionToken, parseSSEFrames, fetchShellSessions, shellThemeKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // --- Remote Desktop ---
 
@@ -958,6 +1007,21 @@ export default function App() {
     }
   }, [isShellFullscreen]);
 
+  // Sync xterm theme when shell theme changes.
+  useEffect(() => {
+    if (xtermRef.current) {
+      xtermRef.current.options.theme = SHELL_THEMES[shellThemeKey];
+    }
+    localStorage.setItem('shellTheme', shellThemeKey);
+  }, [shellThemeKey]);
+
+  const cycleShellTheme = useCallback(() => {
+    setShellThemeKey((prev) => {
+      const idx = SHELL_THEME_KEYS.indexOf(prev);
+      return SHELL_THEME_KEYS[(idx + 1) % SHELL_THEME_KEYS.length];
+    });
+  }, []);
+
   // Shared shell panel UI — rendered in both admin and non-admin tab layouts
   // with different tabIndex values. The outer Box stays mounted (CSS-hidden)
   // so the xterm instance and SSE read loop survive tab switches.
@@ -997,6 +1061,15 @@ export default function App() {
                     Connect
                   </Button>
                 )}
+                <Tooltip title={`Theme: ${SHELL_THEMES[shellThemeKey].label}`}>
+                  <IconButton
+                    size="small"
+                    onClick={cycleShellTheme}
+                    tabIndex={-1}
+                  >
+                    <PaletteIcon fontSize="small" />
+                  </IconButton>
+                </Tooltip>
                 <Tooltip title={isShellFullscreen ? 'Exit fullscreen' : 'Fullscreen'}>
                   <IconButton
                     size="small"
@@ -1017,7 +1090,7 @@ export default function App() {
       <Paper
         ref={shellContainerRef}
         sx={{
-          bgcolor: '#1e1e2e',
+          bgcolor: SHELL_THEMES[shellThemeKey].background,
           p: 0.5,
           borderRadius: 2,
           minHeight: 400,
