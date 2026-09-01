@@ -277,7 +277,7 @@ export default function App() {
   const [isShellFullscreen, setIsShellFullscreen] = useState(false);
   const [shellThemeKey, setShellThemeKey] = useState(() => {
     const stored = localStorage.getItem('shellTheme');
-    return stored && stored in SHELL_THEMES ? stored : 'dark';
+    return stored && stored in SHELL_THEMES ? stored : 'solarizedLight';
   });
   const termRef = useRef<HTMLDivElement>(null);
   const shellContainerRef = useRef<HTMLDivElement>(null);
@@ -1089,13 +1089,15 @@ export default function App() {
       )}
       <Paper
         ref={shellContainerRef}
+        elevation={0}
         sx={{
           bgcolor: SHELL_THEMES[shellThemeKey].background,
+          border: 'none',
           p: 0.5,
           borderRadius: 2,
           minHeight: 400,
           '& .xterm': { p: 1 },
-          '& .xterm-viewport': { borderRadius: 1 },
+          '& .xterm-viewport': { borderRadius: 1, bgcolor: SHELL_THEMES[shellThemeKey].background },
           ...(isShellFullscreen && { height: '100vh', borderRadius: 0 }),
         }}
       >
