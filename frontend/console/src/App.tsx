@@ -172,6 +172,7 @@ const MAGNIFIER_ZOOM = 3;
 const MAGNIFIER_SIZE = 180;
 
 interface ShellTheme {
+  label: string;
   background: string;
   foreground: string;
   cursor: string;
@@ -196,6 +197,7 @@ interface ShellTheme {
 
 const SHELL_THEMES: Record<string, ShellTheme> = {
   dark: {
+    label: 'Dark',
     background: '#1e1e2e', foreground: '#cdd6f4', cursor: '#f5c2e7', selectionBackground: '#585b7066',
     black: '#45475a', red: '#f38ba8', green: '#a6e3a1', yellow: '#f9e2af',
     blue: '#89b4fa', magenta: '#f5c2e7', cyan: '#94e2d5', white: '#bac2de',
@@ -203,6 +205,7 @@ const SHELL_THEMES: Record<string, ShellTheme> = {
     brightBlue: '#89b4fa', brightMagenta: '#f5c2e7', brightCyan: '#94e2d5', brightWhite: '#a6adc8',
   },
   solarizedLight: {
+    label: 'Solarized Light',
     background: '#fdf6e3', foreground: '#657b83', cursor: '#cb4b16', selectionBackground: '#eee8d5',
     black: '#073642', red: '#dc322f', green: '#859900', yellow: '#b58900',
     blue: '#268bd2', magenta: '#d33682', cyan: '#2aa198', white: '#eee8d5',
@@ -1058,7 +1061,7 @@ export default function App() {
                     Connect
                   </Button>
                 )}
-                <Tooltip title={`Theme: ${shellThemeKey === 'dark' ? 'Dark' : 'Solarized Light'}`}>
+                <Tooltip title={`Theme: ${SHELL_THEMES[shellThemeKey].label}`}>
                   <IconButton
                     size="small"
                     onClick={cycleShellTheme}
