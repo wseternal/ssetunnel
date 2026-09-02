@@ -3,26 +3,26 @@
 **Autonomy rule:** Proceed autonomously to the next iteration/task without stopping to ask for confirmation.
 
 - **Goal file:** docs/as-goals/metrics-console-tweaks.md
-- **Current phase:** 4
+- **Current phase:** DONE
 - **Iteration:** 1/10
 
 ## Gate Dashboard
 
 | Gate | Status | Last Evaluated |
 |------|--------|----------------|
-| Gate 1: Default 1-hour view | Pending | - |
-| Gate 2: Duration range selector | Pending | - |
-| Gate 3: Manual refresh, no auto-poll | Pending | - |
+| Gate 1: Default 1-hour view | ✅ Pass | Iteration 1 |
+| Gate 2: Duration range selector | ✅ Pass | Iteration 1 |
+| Gate 3: Manual refresh, no auto-poll | ✅ Pass | Iteration 1 |
 
 ## Iteration Log
 
 | Iteration | Decision | Gates | Commits | Artifacts |
-|-----------|----------|-------|---------|-----------|
+|-----------|----------|-------|---------|----------|
+| 1 | DONE | 3/3 | `ddebd884`, `48716175` | [plan](1/plan.md) / [review](1/review.md) / [manifest](1/evidence-manifest.md) |
 
 ## Open Defects
 
-(none yet)
+(none)
 
 ## Next Actions
-- [ ] Phase 3: Define exit gates
-- [ ] Phase 4: Begin Iteration 1
+- [x] All gates passed — DONE
