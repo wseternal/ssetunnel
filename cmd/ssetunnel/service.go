@@ -92,6 +92,11 @@ func dispatchServiceAction(subcommand string, args []string) (handled bool, err 
 	}
 	action := args[0]
 
+	// Connect services do not support reload (no reloadable config).
+	if subcommand == "connect" && action == "reload" {
+		return true, fmt.Errorf("connect services do not support reload")
+	}
+
 	// Extract --service-user before passing args to buildServiceArgs.
 	// This flag is consumed by the service installer, not the runtime.
 	serviceUser, filteredArgs := extractFlag(args, "--service-user")
@@ -102,7 +107,7 @@ func dispatchServiceAction(subcommand string, args []string) (handled bool, err 
 	// users. When running as root, --service-user must be specified.
 	// Only auto-detect for actions that create or run the service;
 	// stop/restart/status/uninstall identify the service by name alone.
-	if serviceUser == "" && (action == "start" || action == "run") {
+	if serviceUser == "" && (action == "start" || action == "run") && subcommand != "connect" {
 		if os.Getuid() == 0 {
 			return true, fmt.Errorf("running as root is not supported (embedded postgres initdb restriction); "+
 				"specify --service-user <name> to run the daemon as a non-root user")
@@ -121,6 +126,18 @@ func dispatchServiceAction(subcommand string, args []string) (handled bool, err 
 	// - Root without --service-user → error (handled above).
 	userService := os.Getuid() != 0
 
+	// Extract --name for connect services (mandatory: identifies the
+	// named daemon instance so multiple connections can coexist).
+	var connectName string
+	if subcommand == "connect" {
+		var nameArgs []string
+		connectName, nameArgs = extractFlag(filteredArgs, "--name")
+		if connectName == "" {
+			return true, fmt.Errorf("--name is required for connect service commands (e.g. --name my-ssh)")
+		}
+		filteredArgs = nameArgs
+	}
+
 	// Runtime flags are everything after the action verb, excluding
 	// --service-user which was already extracted above.
 	runtimeFlags := filteredArgs[1:]
@@ -132,18 +149,36 @@ func dispatchServiceAction(subcommand string, args []string) (handled bool, err 
 		runtimeFlags = append([]string{"--service-user", serviceUser}, runtimeFlags...)
 	}
 
+	// For connect services, strip --name from runtime flags (it is a
+	// service-layer flag, not a runtime flag for runConnect).
+	if subcommand == "connect" {
+		runtimeFlags = stripFlag(runtimeFlags, "--name")
+	}
+
+	// Reject stdio mode (--local -) for connect daemon services:
+	// a background service cannot use stdin/stdout pipes.
+	if subcommand == "connect" {
+		if localVal, _ := extractFlag(runtimeFlags, "--local"); localVal == "-" {
+			return true, fmt.Errorf("stdio mode (--local -) is not supported for service commands; use a local TCP address instead")
+		}
+	}
+
 	// When "start" is invoked without runtime flags, load persisted
 	// flags from the previous "start" (if any) so the user doesn't
 	// have to re-specify --base, --db-url, etc. every time.
+	svcName := "ssetunnel-" + subcommand
+	if connectName != "" {
+		svcName = "ssetunnel-connect-" + connectName
+	}
 	if action == "start" && len(runtimeFlags) == 0 {
-		if saved, loadErr := loadServiceArgs("ssetunnel-" + subcommand); loadErr == nil && len(saved) > 0 {
+		if saved, loadErr := loadServiceArgs(svcName); loadErr == nil && len(saved) > 0 {
 			runtimeFlags = saved
 			fmt.Println("Using saved service args: " + strings.Join(saved, " "))
 		}
 	}
 
 	svcConfig := &service.Config{
-		Name:        "ssetunnel-" + subcommand,
+		Name:        svcName,
 		DisplayName: "ssetunnel " + subcommand,
 		Description: "ssetunnel " + subcommand + " daemon",
 		Arguments:   buildServiceArgs(subcommand, append([]string{action}, runtimeFlags...)),
@@ -258,6 +293,8 @@ func buildRunFn(subcommand string, args []string) func(context.Context) error {
 		return func(ctx context.Context) error { return runServer(ctx, filtered) }
 	case "agent":
 		return func(ctx context.Context) error { return runAgent(ctx, filtered) }
+	case "connect":
+		return func(ctx context.Context) error { return runConnect(ctx, filtered) }
 	default:
 		return func(context.Context) error {
 			return fmt.Errorf("unsupported subcommand for service: %s", subcommand)

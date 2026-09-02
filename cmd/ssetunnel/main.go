@@ -41,6 +41,7 @@ commands:
   agent     run the agent inside the restricted network
             service actions: run, start, stop, restart, status, reload, uninstall
   connect   run the user connect client wrapper
+            service actions: run, start, stop, restart, status, uninstall
   login     authenticate and store a session for agent/connect
   probe     measure a server's POST path (body cap, throttling)
   version   print the build version and git revision
@@ -77,6 +78,14 @@ func main() {
 		}
 		err = runAgent(ctx, os.Args[2:])
 	case "connect":
+		if len(os.Args) > 2 && serviceActions[os.Args[2]] {
+			if handled, err := dispatchServiceAction("connect", os.Args[2:]); handled {
+				if err != nil {
+					log.Fatal(err)
+				}
+				return
+			}
+		}
 		err = runConnect(ctx, os.Args[2:])
 	case "login":
 		err = runLogin(ctx, os.Args[2:])
