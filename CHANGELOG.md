@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.9.0](https://github.com/wseternal/ssetunnel/compare/v1.8.0...v1.9.0) (2026-09-02)
+
+
+### Features
+
+* add service commands (start/stop/restart/status/uninstall) for connect sub-command ([#59](https://github.com/wseternal/ssetunnel/issues/59)) ([46e1c59](https://github.com/wseternal/ssetunnel/commit/46e1c596ddabc240dac78eadb4429d97fcd3c351))
+* **frontend:** add duration selector and manual refresh to metrics page ([#60](https://github.com/wseternal/ssetunnel/issues/60)) ([97f29f0](https://github.com/wseternal/ssetunnel/commit/97f29f002183d9da7e16d56dff83f093000de529))
+
+
+### Bug Fixes
+
+* add solarized light theme support for cloud shell terminal ([#56](https://github.com/wseternal/ssetunnel/issues/56)) ([ed360b4](https://github.com/wseternal/ssetunnel/commit/ed360b484df43c9c888236a8a46ea0df99b5f43c))
+* remove black border in solarized light theme, default to solarized light ([#58](https://github.com/wseternal/ssetunnel/issues/58)) ([e124e1d](https://github.com/wseternal/ssetunnel/commit/e124e1d3d27ecbb6f14f052b6f659f69699fdc24))
+
 ## [1.8.0](https://github.com/wseternal/ssetunnel/compare/v1.7.1...v1.8.0) (2026-08-31)
 
 
