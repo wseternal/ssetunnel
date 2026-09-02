@@ -2125,7 +2125,7 @@ export default function App() {
                         {selectedAgentSamples.length > 0 ? (
                           <Card sx={{ mb: 2 }}>
                             <CardContent>
-                              <Typography variant="subtitle2" sx={{ mb: 1 }}>Throughput (last 24h)</Typography>
+                              <Typography variant="subtitle2" sx={{ mb: 1 }}>Throughput (last {metricsDuration})</Typography>
                               <ResponsiveContainer width="100%" height={200}>
                                 <LineChart data={selectedAgentSamples}>
                                   <CartesianGrid strokeDasharray="3 3" />
@@ -2322,7 +2322,7 @@ export default function App() {
                         {selectedAgentSamples.length > 0 ? (
                           <Card sx={{ mb: 2 }}>
                             <CardContent>
-                              <Typography variant="subtitle2" sx={{ mb: 1 }}>Throughput (last 24h)</Typography>
+                              <Typography variant="subtitle2" sx={{ mb: 1 }}>Throughput (last {metricsDuration})</Typography>
                               <ResponsiveContainer width="100%" height={200}>
                                 <LineChart data={selectedAgentSamples}>
                                   <CartesianGrid strokeDasharray="3 3" />
