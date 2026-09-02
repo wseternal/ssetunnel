@@ -1,6 +1,6 @@
 # CLI Entry Point
 
-Multi-command CLI binary. Dispatches to server, agent, connect, login, or probe subcommands. Supports OS service management (start/stop/restart/status/reload) via `kardianos/service`.
+Multi-command CLI binary. Dispatches to server, agent, connect, login, or probe subcommands. Supports OS service management (start/stop/restart/status/reload/uninstall) via `kardianos/service`. Server and agent support `reload` (SIGHUP); connect does not.
 
 ## Commands
 
@@ -28,6 +28,8 @@ ssetunnel connect --local -  # Stdio mode for SSH ProxyCommand
 ```
 User-side connection wrapper. Uses HTTP transport (SSE-down + POST-up) to connect to the server. `--server` is optional (default: from saved session). `--local -` enables stdio mode (stdin/stdout pipes for SSH ProxyCommand). `--agent` routes to a specific agent. `--target` enables dynamic target mode. `--batch-size` sets the upstream batch ceiling (0 = 256 KiB default; clamped to 1024..1048576).
 
+Connect also supports service commands for running named daemon connections (see Service Management below). `--name` is mandatory for connect service commands to uniquely identify each connection instance.
+
 ### `login`
 ```bash
 ssetunnel login [--server http://127.0.0.1:8081] [--tunnel-server <URL>]
@@ -42,7 +44,9 @@ Network diagnostics — outputs plain-text report with `--batch-size` / `--concu
 
 ## Service Management
 
-Server and agent support OS service actions via `kardianos/service`:
+Server and agent support full OS service actions via `kardianos/service`. Connect supports service actions with a mandatory `--name` flag for multi-instance support (no `reload`):
+
+**Server / Agent:**
 ```bash
 ssetunnel server start [--service-user ssetunnel]  # install + start as OS service
 ssetunnel server stop                               # stop the service
@@ -51,6 +55,17 @@ ssetunnel server status                             # check status
 ssetunnel server reload                             # send SIGHUP for config reload
 ssetunnel server run                                # run in foreground (service mode)
 ```
+
+**Connect (named instances):**
+```bash
+ssetunnel connect start --name my-ssh --agent office --target 127.0.0.1:22 --local 127.0.0.1:2222
+ssetunnel connect stop --name my-ssh                # stop the named connection
+ssetunnel connect restart --name my-ssh             # restart the named connection
+ssetunnel connect status --name my-ssh              # check status
+ssetunnel connect run --name my-ssh [flags...]      # run in foreground (service mode)
+```
+
+Each named connect service gets a unique OS service name (`ssetunnel-connect-<name>`), PID file, and saved args file, so multiple connections can run simultaneously as daemons. Stdio mode (`--local -`) is not supported for service commands. `reload` is not supported for connect (no reloadable config).
 
 Service user: non-root users get user-level services (systemd --user / LaunchAgents). Root requires `--service-user`. PID files are stored in `~/.ssetunnel/<name>.pid` for the reload action.
 
@@ -73,4 +88,6 @@ Session tokens are proactively refreshed when the remaining TTL falls below 7 da
 * Git short SHA is embedded in the binary via ldflags and printed by `version` command.
 * `--base` must start with `/` (validated by `validateBasePath`).
 * Embedded postgres cannot run as root (initdb restriction).
-* SIGHUP handler is installed for server and agent (placeholder for config reload).
+* SIGHUP handler is installed for server and agent (placeholder for config reload). Connect services do not support reload.
+* Connect service commands require `--name` to uniquely identify each daemon instance (service name: `ssetunnel-connect-<name>`).
+* Connect service commands reject stdio mode (`--local -`); use a local TCP address instead.
