@@ -26,6 +26,8 @@ import {
   InputLabel,
   Checkbox,
   FormControlLabel,
+  ToggleButton,
+  ToggleButtonGroup,
 } from '@mui/material';
 import DeleteIcon from '@mui/icons-material/Delete';
 import RefreshIcon from '@mui/icons-material/Refresh';
@@ -266,6 +268,15 @@ export default function App() {
   const [selectedAgentSamples, setSelectedAgentSamples] = useState<MetricSample[]>([]);
   const [selectedAgentDecisions, setSelectedAgentDecisions] = useState<TuningDecision[]>([]);
   const [selectedStatsAgent, setSelectedStatsAgent] = useState<string>('');
+  const [metricsDuration, setMetricsDuration] = useState<string>('1h');
+
+  const durationToRange = (d: string): { from: string; to: string } => {
+    const now = new Date();
+    const hours: Record<string, number> = { '1h': 1, '6h': 6, '12h': 12, '1d': 24, '7d': 168 };
+    const h = hours[d] ?? 1;
+    const from = new Date(now.getTime() - h * 3600 * 1000);
+    return { from: from.toISOString(), to: now.toISOString() };
+  };
 
   // Cloud Shell
   const [connectedAgents, setConnectedAgents] = useState<ConnectedAgent[]>([]);
@@ -417,9 +428,11 @@ export default function App() {
     }
   };
 
-  const fetchAgentSamples = async (agentID: string) => {
+  const fetchAgentSamples = async (agentID: string, duration?: string) => {
     try {
-      const res = await fetch(`/console/api/v1/metrics/agents/${encodeURIComponent(agentID)}/samples`, { headers: authHeaders() });
+      const { from, to } = durationToRange(duration ?? metricsDuration);
+      const params = new URLSearchParams({ from, to });
+      const res = await fetch(`/console/api/v1/metrics/agents/${encodeURIComponent(agentID)}/samples?${params}`, { headers: authHeaders() });
       if (checkAuth(res) && res.ok) setSelectedAgentSamples(await res.json());
     } catch (e) {
       console.error(e);
@@ -445,6 +458,13 @@ export default function App() {
       setSelectedAgentDecisions([]);
     }
   };
+
+  // Re-fetch samples when duration changes.
+  useEffect(() => {
+    if (selectedStatsAgent) {
+      fetchAgentSamples(selectedStatsAgent, metricsDuration);
+    }
+  }, [metricsDuration]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // --- Cloud Shell ---
 
@@ -1263,8 +1283,7 @@ export default function App() {
       const sessionInterval = setInterval(fetchSessions, 3000);
       const agentInterval = setInterval(fetchAgents, 10000);
       const connectedInterval = setInterval(fetchConnectedAgents, 3000);
-      const metricsInterval = setInterval(() => { fetchMetricsOverview(); fetchAgentMetrics(); }, 10000);
-      return () => { clearInterval(sessionInterval); clearInterval(agentInterval); clearInterval(connectedInterval); clearInterval(metricsInterval); };
+      return () => { clearInterval(sessionInterval); clearInterval(agentInterval); clearInterval(connectedInterval); };
     }
   }, [isLoggedIn, isAdmin, roleConfirmed]);
 
@@ -2048,7 +2067,27 @@ export default function App() {
                       </CardContent></Card>
                     </Box>
 
-                    <Typography variant="h6" sx={{ mb: 1 }}>Per-Agent Metrics</Typography>
+                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
+                      <Typography variant="h6">Per-Agent Metrics</Typography>
+                      <Box sx={{ flexGrow: 1 }} />
+                      <ToggleButtonGroup
+                        value={metricsDuration}
+                        exclusive
+                        onChange={(_, v) => { if (v) setMetricsDuration(v); }}
+                        size="small"
+                      >
+                        <ToggleButton value="1h">1h</ToggleButton>
+                        <ToggleButton value="6h">6h</ToggleButton>
+                        <ToggleButton value="12h">12h</ToggleButton>
+                        <ToggleButton value="1d">1d</ToggleButton>
+                        <ToggleButton value="7d">7d</ToggleButton>
+                      </ToggleButtonGroup>
+                      <Tooltip title="Refresh metrics">
+                        <IconButton size="small" onClick={() => { fetchMetricsOverview(); fetchAgentMetrics(); if (selectedStatsAgent) fetchAgentSamples(selectedStatsAgent); }}>
+                          <RefreshIcon fontSize="small" />
+                        </IconButton>
+                      </Tooltip>
+                    </Box>
                     {agentMetrics.length === 0 ? (
                       <Alert severity="info" sx={{ mb: 3 }}>No metrics data yet. Enable metrics with <code>--metrics-dir</code>.</Alert>
                     ) : (
@@ -2233,7 +2272,27 @@ export default function App() {
                       </CardContent></Card>
                     </Box>
 
-                    <Typography variant="h6" sx={{ mb: 1 }}>Per-Agent Metrics</Typography>
+                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
+                      <Typography variant="h6">Per-Agent Metrics</Typography>
+                      <Box sx={{ flexGrow: 1 }} />
+                      <ToggleButtonGroup
+                        value={metricsDuration}
+                        exclusive
+                        onChange={(_, v) => { if (v) setMetricsDuration(v); }}
+                        size="small"
+                      >
+                        <ToggleButton value="1h">1h</ToggleButton>
+                        <ToggleButton value="6h">6h</ToggleButton>
+                        <ToggleButton value="12h">12h</ToggleButton>
+                        <ToggleButton value="1d">1d</ToggleButton>
+                        <ToggleButton value="7d">7d</ToggleButton>
+                      </ToggleButtonGroup>
+                      <Tooltip title="Refresh metrics">
+                        <IconButton size="small" onClick={() => { fetchMetricsOverview(); fetchAgentMetrics(); if (selectedStatsAgent) fetchAgentSamples(selectedStatsAgent); }}>
+                          <RefreshIcon fontSize="small" />
+                        </IconButton>
+                      </Tooltip>
+                    </Box>
                     {agentMetrics.length === 0 ? (
                       <Alert severity="info" sx={{ mb: 3 }}>No metrics data yet.</Alert>
                     ) : (
