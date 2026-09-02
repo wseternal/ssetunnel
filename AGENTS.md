@@ -41,7 +41,7 @@ User (SSH, DB client, ...)
 ## Sub-Module Architecture & Directory Guides
 
 ### 1. [CLI Entry Point](cmd/ssetunnel/AGENTS.md)
-* **Responsibility**: Multi-command CLI (`server`, `agent`, `connect`, `probe`) with flag parsing and lifecycle management.
+* **Responsibility**: Multi-command CLI (`server`, `agent`, `connect`, `probe`) with flag parsing and lifecycle management. Server and agent support full OS service management (start/stop/restart/status/reload/uninstall). Connect supports named daemon instances via `--name` (start/stop/restart/status/uninstall, no reload).
 * **Path**: `cmd/ssetunnel/`
 
 ### 2. [Server](internal/server/AGENTS.md)
@@ -118,6 +118,11 @@ ssetunnel server start --target 127.0.0.1:22      # install + start as OS servic
 ssetunnel server stop                              # stop the service
 ssetunnel server status                            # check service status
 ssetunnel server reload                            # send SIGHUP for config reload
+
+# Named connect daemon instances (--name mandatory)
+ssetunnel connect start --name my-ssh --agent office --target 127.0.0.1:22 --local 127.0.0.1:2222
+ssetunnel connect stop --name my-ssh               # stop the named connection
+ssetunnel connect status --name my-ssh             # check status
 ```
 
 ### Key Conventions

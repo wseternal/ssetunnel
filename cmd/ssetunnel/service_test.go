@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"os"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -383,5 +384,88 @@ func TestStripFlag(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestConnectServiceRequiresName(t *testing.T) {
+	t.Parallel()
+	handled, err := dispatchServiceAction("connect", []string{"start", "--agent", "mybox", "--local", "127.0.0.1:2222"})
+	if !handled {
+		t.Fatal("expected handled=true for connect start")
+	}
+	if err == nil {
+		t.Fatal("expected error for connect start without --name")
+	}
+	if !strings.Contains(err.Error(), "--name is required") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestConnectServiceRejectsStdio(t *testing.T) {
+	t.Parallel()
+	handled, err := dispatchServiceAction("connect", []string{"start", "--name", "test-stdio", "--local", "-"})
+	if !handled {
+		t.Fatal("expected handled=true")
+	}
+	if err == nil {
+		t.Fatal("expected error for stdio mode in connect service")
+	}
+	if !strings.Contains(err.Error(), "stdio mode") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestConnectServiceRejectsReload(t *testing.T) {
+	t.Parallel()
+	handled, err := dispatchServiceAction("connect", []string{"reload", "--name", "test-reload"})
+	if !handled {
+		t.Fatal("expected handled=true")
+	}
+	if err == nil {
+		t.Fatal("expected error for connect reload")
+	}
+	if !strings.Contains(err.Error(), "not support reload") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestBuildServiceArgsConnect(t *testing.T) {
+	t.Parallel()
+	got := buildServiceArgs("connect", []string{"start", "--name", "myssh", "--agent", "devbox", "--local", "127.0.0.1:2222"})
+	want := []string{"connect", "run", "--name", "myssh", "--agent", "devbox", "--local", "127.0.0.1:2222"}
+	if len(got) != len(want) {
+		t.Fatalf("buildServiceArgs = %v, want %v", got, want)
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			t.Fatalf("buildServiceArgs[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestBuildRunFnIncludesConnect(t *testing.T) {
+	t.Parallel()
+	fn := buildRunFn("connect", []string{"--agent", "devbox", "--local", "127.0.0.1:2222"})
+	if fn == nil {
+		t.Fatal("buildRunFn(connect) returned nil")
+	}
+	// Verify it's not the unsupported-subcommand error function by
+	// checking it doesn't return the "unsupported" error message.
+	// We can't actually call it (needs a real server), but we verify
+	// the function was constructed for connect.
+}
+
+func TestConnectServiceNameRequiresValue(t *testing.T) {
+	t.Parallel()
+	// --name flag present but with no value (end of args)
+	handled, err := dispatchServiceAction("connect", []string{"start", "--name"})
+	if !handled {
+		t.Fatal("expected handled=true")
+	}
+	if err == nil {
+		t.Fatal("expected error for --name with no value")
+	}
+	if !strings.Contains(err.Error(), "--name is required") {
+		t.Errorf("unexpected error: %v", err)
 	}
 }

@@ -133,6 +133,20 @@ ssetunnel connect --base /sse --server https://tunnel.example.com --agent office
 ```
 Then connect your VNC client to `127.0.0.1:5900`.
 
+**Named daemon connections** (run multiple connections simultaneously as background services):
+```bash
+# Start a persistent SSH connection daemon named "office-ssh"
+ssetunnel connect start --name office-ssh --base /sse --agent office --target 127.0.0.1:22 --local 127.0.0.1:2222
+
+# Start a persistent DB connection daemon named "office-db"
+ssetunnel connect start --name office-db --base /sse --agent office --target 127.0.0.1:5432 --local 127.0.0.1:5432
+
+# Manage individual connections
+ssetunnel connect status --name office-ssh
+ssetunnel connect stop --name office-ssh
+```
+Each `--name` creates a unique OS service (`ssetunnel-connect-<name>`) so multiple connections coexist without conflict.
+
 ---
 
 ## Service Management
@@ -156,6 +170,28 @@ ssetunnel server run [flags...]
 ```
 
 Re-running `start` with different flags refreshes the service definition automatically.
+
+### Connect Service Commands
+
+The `connect` sub-command also supports service actions for running named daemon connections. The `--name` flag is **mandatory** and uniquely identifies each connection instance:
+
+```bash
+# Start a named connection daemon (e.g. SSH tunnel to office agent)
+ssetunnel connect start --name office-ssh --agent office --target 127.0.0.1:22 --local 127.0.0.1:2222
+
+# Start another named connection (e.g. DB tunnel)
+ssetunnel connect start --name office-db --agent office --target 127.0.0.1:5432 --local 127.0.0.1:5432
+
+# Manage individual connections
+ssetunnel connect stop --name office-ssh
+ssetunnel connect restart --name office-ssh
+ssetunnel connect status --name office-ssh
+
+# Uninstall (stops + removes service definition + cleans up)
+ssetunnel connect uninstall --name office-ssh
+```
+
+Each named connect creates a unique OS service (`ssetunnel-connect-<name>`), so multiple connections can run simultaneously as background daemons. Note: `reload` is not supported for connect (no reloadable config), and stdio mode (`--local -`) is not available in service mode.
 
 ---
 
