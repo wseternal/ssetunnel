@@ -1102,18 +1102,6 @@ export default function App() {
     }
   }, [textEditorContent, desktopSessionId, sendDesktopInput]);
 
-  // Shell command palette action handler
-  const handleShellPaletteAction = useCallback((actionId: string) => {
-    if (!shellConnected) return; // guard against double-disconnect
-    setShellPaletteOpen(false);
-    console.debug('[shell-palette] action:', actionId);
-    switch (actionId) {
-      case 'toggle-theme': cycleShellTheme(); break;
-      case 'toggle-fullscreen': toggleShellFullscreen(); break;
-      case 'disconnect': disconnectShell(); break;
-    }
-  }, [cycleShellTheme, toggleShellFullscreen, disconnectShell, shellConnected]);
-
   // Attach/detach keyboard listeners for desktop (includes command palette handling)
   useEffect(() => {
     if (!desktopConnected || !desktopSessionId) return;
@@ -1177,6 +1165,61 @@ export default function App() {
     };
   }, [desktopConnected, desktopSessionId, handleDesktopKey, handlePaletteAction]);
 
+  // Sync fullscreen state with the browser Fullscreen API.
+  // Check which element is fullscreen to avoid coupling desktop and shell state.
+  useEffect(() => {
+    const handler = () => {
+      const el = document.fullscreenElement;
+      setIsFullscreen(el === desktopContainerRef.current);
+      setIsShellFullscreen(el === shellContainerRef.current);
+    };
+    document.addEventListener('fullscreenchange', handler);
+    return () => document.removeEventListener('fullscreenchange', handler);
+  }, []);
+
+  const toggleShellFullscreen = useCallback(() => {
+    if (document.fullscreenElement) {
+      document.exitFullscreen();
+    } else {
+      shellContainerRef.current?.requestFullscreen().catch(() => {});
+    }
+  }, []);
+
+  // Re-fit xterm terminal when shell fullscreen toggles (container height changes).
+  useEffect(() => {
+    if (xtermRef.current && fitAddonRef.current) {
+      const timer = setTimeout(() => fitAddonRef.current?.fit(), 50);
+      return () => clearTimeout(timer);
+    }
+  }, [isShellFullscreen]);
+
+  // Sync xterm theme when shell theme changes.
+  useEffect(() => {
+    if (xtermRef.current) {
+      xtermRef.current.options.theme = SHELL_THEMES[shellThemeKey];
+    }
+    localStorage.setItem('shellTheme', shellThemeKey);
+  }, [shellThemeKey]);
+
+  const cycleShellTheme = useCallback(() => {
+    setShellThemeKey((prev) => {
+      const idx = SHELL_THEME_KEYS.indexOf(prev);
+      return SHELL_THEME_KEYS[(idx + 1) % SHELL_THEME_KEYS.length];
+    });
+  }, []);
+
+  // Shell command palette action handler
+  const handleShellPaletteAction = useCallback((actionId: string) => {
+    if (!shellConnected) return; // guard against double-disconnect
+    setShellPaletteOpen(false);
+    console.debug('[shell-palette] action:', actionId);
+    switch (actionId) {
+      case 'toggle-theme': cycleShellTheme(); break;
+      case 'toggle-fullscreen': toggleShellFullscreen(); break;
+      case 'disconnect': disconnectShell(); break;
+    }
+  }, [cycleShellTheme, toggleShellFullscreen, disconnectShell, shellConnected]);
+
   // Shell command palette keyboard handler
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -1228,49 +1271,6 @@ export default function App() {
       metaDownRef.current = false;
     };
   }, [shellConnected, handleShellPaletteAction, isAdmin]);
-
-  // Sync fullscreen state with the browser Fullscreen API.
-  // Check which element is fullscreen to avoid coupling desktop and shell state.
-  useEffect(() => {
-    const handler = () => {
-      const el = document.fullscreenElement;
-      setIsFullscreen(el === desktopContainerRef.current);
-      setIsShellFullscreen(el === shellContainerRef.current);
-    };
-    document.addEventListener('fullscreenchange', handler);
-    return () => document.removeEventListener('fullscreenchange', handler);
-  }, []);
-
-  const toggleShellFullscreen = useCallback(() => {
-    if (document.fullscreenElement) {
-      document.exitFullscreen();
-    } else {
-      shellContainerRef.current?.requestFullscreen().catch(() => {});
-    }
-  }, []);
-
-  // Re-fit xterm terminal when shell fullscreen toggles (container height changes).
-  useEffect(() => {
-    if (xtermRef.current && fitAddonRef.current) {
-      const timer = setTimeout(() => fitAddonRef.current?.fit(), 50);
-      return () => clearTimeout(timer);
-    }
-  }, [isShellFullscreen]);
-
-  // Sync xterm theme when shell theme changes.
-  useEffect(() => {
-    if (xtermRef.current) {
-      xtermRef.current.options.theme = SHELL_THEMES[shellThemeKey];
-    }
-    localStorage.setItem('shellTheme', shellThemeKey);
-  }, [shellThemeKey]);
-
-  const cycleShellTheme = useCallback(() => {
-    setShellThemeKey((prev) => {
-      const idx = SHELL_THEME_KEYS.indexOf(prev);
-      return SHELL_THEME_KEYS[(idx + 1) % SHELL_THEME_KEYS.length];
-    });
-  }, []);
 
   // Close shell palette when switching tabs (prevents stale palette state)
   useEffect(() => { setShellPaletteOpen(false); }, [tabIndex]);
