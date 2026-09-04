@@ -991,6 +991,14 @@ export default function App() {
     }
   }, [sendDesktopInput, paletteOpen]);
 
+  const toggleFullscreen = useCallback(() => {
+    if (document.fullscreenElement) {
+      document.exitFullscreen();
+    } else {
+      desktopContainerRef.current?.requestFullscreen().catch(() => {});
+    }
+  }, []);
+
   // Palette action handler
   const handlePaletteAction = useCallback((action: string) => {
     setPaletteOpen(false);
@@ -1108,14 +1116,6 @@ export default function App() {
     };
     document.addEventListener('fullscreenchange', handler);
     return () => document.removeEventListener('fullscreenchange', handler);
-  }, []);
-
-  const toggleFullscreen = useCallback(() => {
-    if (document.fullscreenElement) {
-      document.exitFullscreen();
-    } else {
-      desktopContainerRef.current?.requestFullscreen().catch(() => {});
-    }
   }, []);
 
   const toggleShellFullscreen = useCallback(() => {

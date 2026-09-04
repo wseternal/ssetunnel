@@ -7,6 +7,7 @@ if [[ "$@" =~ (^|[[:space:]])(-l|--local)($|[[:space:]]) ]]; then
 fi
 
 GIT_SHA=$(git rev-parse --short HEAD 2>/dev/null || echo unknown)
-LDFLAGS="-X main.Version=0.1.0 -X main.GitSHA=${GIT_SHA}"
+GIT_RELEASE=$(git describe --tags --abbrev=0)
+LDFLAGS="-X main.Version=${GIT_RELEASE} -X main.GitSHA=${GIT_SHA}"
 
 $LOCALDB go run -ldflags "${LDFLAGS}" ./cmd/ssetunnel "$@"
