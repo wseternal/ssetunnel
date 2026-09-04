@@ -42,3 +42,6 @@ go.work.sum
 
 # TLS certificates (dev)
 *.pem
+
+# Development planning artifacts
+tasks/
