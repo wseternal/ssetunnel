@@ -318,6 +318,11 @@ export default function App() {
   // Command palette state
   const [paletteOpen, setPaletteOpen] = useState(false);
   const metaDownRef = useRef(false);
+  const paletteOpenRef = useRef(false);
+
+  // Keep paletteOpenRef in sync so the keyboard handler can read
+  // palette state without re-attaching listeners on every toggle.
+  useEffect(() => { paletteOpenRef.current = paletteOpen; }, [paletteOpen]);
 
   // Text editor state (Send Text command palette action)
   const [textEditorOpen, setTextEditorOpen] = useState(false);
@@ -1022,27 +1027,49 @@ export default function App() {
     }
   }, [desktopSessionId, sendDesktopInput, toggleFullscreen, disconnectDesktop]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Close text editor and restore focus to the desktop container.
+  const closeTextEditor = useCallback(() => {
+    setTextEditorOpen(false);
+    desktopContainerRef.current?.focus();
+  }, []);
+
   // Send multi-line text to remote desktop by splitting into type_text + enter events.
-  // Lines longer than 256 bytes are chunked to fit ValidateText's limit.
-  const sendTextToDesktop = useCallback(() => {
-    const text = textEditorContent;
+  // Lines longer than 256 UTF-8 bytes are chunked to fit ValidateText's limit.
+  // Sends are sequential (awaited) to preserve ordering on the wire.
+  const sendTextToDesktop = useCallback(async () => {
+    const raw = textEditorContent;
     setTextEditorOpen(false);
     setTextEditorContent('');
+    desktopContainerRef.current?.focus();
     const sid = desktopSessionId;
     const abort = desktopAbortRef.current;
-    if (!sid || !abort || !text) return;
+    if (!sid || !abort || !raw) return;
 
-    const lines = text.split('\n');
+    // Normalize line endings and cap total size
+    const text = raw.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+    const MAX_SEND_TEXT_LENGTH = 4096;
+    if (text.length > MAX_SEND_TEXT_LENGTH) {
+      console.warn(`sendTextToDesktop: text truncated from ${text.length} to ${MAX_SEND_TEXT_LENGTH} chars`);
+    }
+    const capped = text.slice(0, MAX_SEND_TEXT_LENGTH);
+
+    const encoder = new TextEncoder();
+    const decoder = new TextDecoder();
+    const lines = capped.split('\n');
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i];
-      // Chunk long lines to fit ValidateText's 256-byte limit
-      for (let j = 0; j < line.length; j += 256) {
-        const chunk = line.slice(j, j + 256);
-        sendDesktopInput(sid, { type: 'type_text', text: chunk }, abort.signal);
+      if (line.length > 0) {
+        // Chunk by UTF-8 byte length to fit ValidateText's 256-byte limit
+        const encoded = encoder.encode(line);
+        for (let j = 0; j < encoded.length; j += 256) {
+          const chunkBytes = encoded.slice(j, Math.min(j + 256, encoded.length));
+          const chunk = decoder.decode(chunkBytes, { stream: true });
+          await sendDesktopInput(sid, { type: 'type_text', text: chunk }, abort.signal);
+        }
       }
       // Send Enter between lines (not after the last line)
       if (i < lines.length - 1) {
-        sendDesktopInput(sid, { type: 'key_tap', key: 'enter' }, abort.signal);
+        await sendDesktopInput(sid, { type: 'key_tap', key: 'enter' }, abort.signal);
       }
     }
   }, [textEditorContent, desktopSessionId, sendDesktopInput]);
@@ -1072,7 +1099,7 @@ export default function App() {
       }
 
       // When palette is open, handle shortcut keys
-      if (paletteOpen) {
+      if (paletteOpenRef.current) {
         e.preventDefault();
         if (e.key === 'Escape') {
           setPaletteOpen(false);
@@ -1104,7 +1131,7 @@ export default function App() {
       window.removeEventListener('keyup', keyUpHandler);
       metaDownRef.current = false;
     };
-  }, [desktopConnected, desktopSessionId, handleDesktopKey, paletteOpen, handlePaletteAction]);
+  }, [desktopConnected, desktopSessionId, handleDesktopKey, handlePaletteAction]);
 
   // Sync fullscreen state with the browser Fullscreen API.
   // Check which element is fullscreen to avoid coupling desktop and shell state.
@@ -1974,7 +2001,7 @@ export default function App() {
               justifyContent: 'center',
               bgcolor: 'rgba(0, 0, 0, 0.5)',
             }}
-            onClick={() => setTextEditorOpen(false)}
+            onClick={closeTextEditor}
           >
             <Paper
               elevation={8}
@@ -1999,7 +2026,7 @@ export default function App() {
                   onKeyDown={(e) => {
                     if (e.key === 'Escape') {
                       e.preventDefault();
-                      setTextEditorOpen(false);
+                      closeTextEditor();
                     }
                   }}
                   placeholder="Type text to send to the remote desktop..."
@@ -2029,7 +2056,7 @@ export default function App() {
               <Box sx={{ px: 2, py: 1.5, borderTop: 1, borderColor: 'divider', display: 'flex', justifyContent: 'flex-end', gap: 1 }}>
                 <Button
                   size="small"
-                  onClick={() => setTextEditorOpen(false)}
+                  onClick={closeTextEditor}
                 >
                   Cancel
                 </Button>
