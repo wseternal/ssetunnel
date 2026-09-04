@@ -319,6 +319,10 @@ export default function App() {
   const [paletteOpen, setPaletteOpen] = useState(false);
   const metaDownRef = useRef(false);
 
+  // Text editor state (Send Text command palette action)
+  const [textEditorOpen, setTextEditorOpen] = useState(false);
+  const [textEditorContent, setTextEditorContent] = useState('');
+
   // Magnifier lens state
   const [magnifierOn, setMagnifierOn] = useState(false);
   const magnifierPosRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
@@ -810,6 +814,8 @@ export default function App() {
     }
     setPaletteOpen(false);
     metaDownRef.current = false;
+    setTextEditorOpen(false);
+    setTextEditorContent('');
   }, []);
 
   const disconnectDesktop = useCallback(() => {
@@ -995,6 +1001,10 @@ export default function App() {
       case 'refresh-screenshot':
         sendDesktopInput(sid, { type: 'refresh_screenshot' }, abort.signal);
         break;
+      case 'send-text':
+        setTextEditorContent('');
+        setTextEditorOpen(true);
+        break;
       case 'toggle-fullscreen':
         toggleFullscreen();
         break;
@@ -1003,6 +1013,31 @@ export default function App() {
         break;
     }
   }, [desktopSessionId, sendDesktopInput, toggleFullscreen, disconnectDesktop]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Send multi-line text to remote desktop by splitting into type_text + enter events.
+  // Lines longer than 256 bytes are chunked to fit ValidateText's limit.
+  const sendTextToDesktop = useCallback(() => {
+    const text = textEditorContent;
+    setTextEditorOpen(false);
+    setTextEditorContent('');
+    const sid = desktopSessionId;
+    const abort = desktopAbortRef.current;
+    if (!sid || !abort || !text) return;
+
+    const lines = text.split('\n');
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      // Chunk long lines to fit ValidateText's 256-byte limit
+      for (let j = 0; j < line.length; j += 256) {
+        const chunk = line.slice(j, j + 256);
+        sendDesktopInput(sid, { type: 'type_text', text: chunk }, abort.signal);
+      }
+      // Send Enter between lines (not after the last line)
+      if (i < lines.length - 1) {
+        sendDesktopInput(sid, { type: 'key_tap', key: 'enter' }, abort.signal);
+      }
+    }
+  }, [textEditorContent, desktopSessionId, sendDesktopInput]);
 
   // Attach/detach keyboard listeners for desktop (includes command palette handling)
   useEffect(() => {
@@ -1037,6 +1072,7 @@ export default function App() {
         }
         switch (e.key.toLowerCase()) {
           case 'r': handlePaletteAction('refresh-screenshot'); return;
+          case 't': handlePaletteAction('send-text'); return;
           case 'f': handlePaletteAction('toggle-fullscreen'); return;
           case 'q': handlePaletteAction('disconnect'); return;
         }
@@ -1886,6 +1922,7 @@ export default function App() {
               </Box>
               {[
                 { id: 'refresh-screenshot', label: 'Refresh Screenshot', shortcut: 'R' },
+                { id: 'send-text', label: 'Send Text', shortcut: 'T' },
                 { id: 'toggle-fullscreen', label: 'Toggle Fullscreen', shortcut: 'F' },
                 { id: 'disconnect', label: 'Disconnect', shortcut: 'Q' },
               ].map((item) => (
@@ -1921,6 +1958,89 @@ export default function App() {
                 <Typography variant="caption" color="text.secondary">
                   Press <strong>Esc</strong> to close • <strong>{navigator.platform.includes('Mac') ? '⌘' : 'Ctrl'}</strong> to toggle
                 </Typography>
+              </Box>
+            </Paper>
+          </Box>
+        )}
+        {/* Text editor overlay (Send Text command palette action) */}
+        {textEditorOpen && desktopConnected && (
+          <Box
+            sx={{
+              position: 'absolute',
+              inset: 0,
+              zIndex: 20,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              bgcolor: 'rgba(0, 0, 0, 0.5)',
+            }}
+            onClick={() => setTextEditorOpen(false)}
+          >
+            <Paper
+              elevation={8}
+              sx={{
+                width: 400,
+                borderRadius: 2,
+                overflow: 'hidden',
+                bgcolor: 'background.paper',
+              }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <Box sx={{ px: 2, py: 1.25, borderBottom: 1, borderColor: 'divider' }}>
+                <Typography variant="overline" color="text.secondary" sx={{ letterSpacing: 1.5 }}>
+                  Send Text
+                </Typography>
+              </Box>
+              <Box sx={{ p: 2 }}>
+                <textarea
+                  autoFocus
+                  value={textEditorContent}
+                  onChange={(e) => setTextEditorContent(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Escape') {
+                      e.preventDefault();
+                      setTextEditorOpen(false);
+                    }
+                  }}
+                  placeholder="Type text to send to the remote desktop..."
+                  style={{
+                    width: '100%',
+                    minHeight: 150,
+                    padding: '8px 12px',
+                    fontFamily: 'monospace',
+                    fontSize: '0.875rem',
+                    lineHeight: 1.5,
+                    border: '1px solid',
+                    borderColor: 'rgba(0, 0, 0, 0.23)',
+                    borderRadius: 4,
+                    resize: 'vertical',
+                    outline: 'none',
+                    boxSizing: 'border-box',
+                    backgroundColor: '#1e1e2e',
+                    color: '#cdd6f4',
+                  }}
+                  onFocus={(e) => { e.target.style.borderColor = '#1976d2'; }}
+                  onBlur={(e) => { e.target.style.borderColor = 'rgba(0, 0, 0, 0.23)'; }}
+                />
+                <Typography variant="caption" color="text.secondary" sx={{ mt: 0.5, display: 'block' }}>
+                  Enter adds a new line. Click Send to type the text on the remote desktop.
+                </Typography>
+              </Box>
+              <Box sx={{ px: 2, py: 1.5, borderTop: 1, borderColor: 'divider', display: 'flex', justifyContent: 'flex-end', gap: 1 }}>
+                <Button
+                  size="small"
+                  onClick={() => setTextEditorOpen(false)}
+                >
+                  Cancel
+                </Button>
+                <Button
+                  size="small"
+                  variant="contained"
+                  disabled={!textEditorContent.trim()}
+                  onClick={sendTextToDesktop}
+                >
+                  Send
+                </Button>
               </Box>
             </Paper>
           </Box>
