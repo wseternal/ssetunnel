@@ -91,6 +91,10 @@ func DispatchInput(event InputEvent, screenWidth, screenHeight int) error {
 			robotgo.Type(event.Text)
 		}
 
+	case "refresh_screenshot":
+		// Control event: handled by the proxy before dispatch.
+		// No-op if dispatched directly.
+
 	default:
 		log.Printf("remoteapp: unknown input event type: %s", event.Type)
 	}

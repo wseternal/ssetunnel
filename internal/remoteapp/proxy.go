@@ -127,6 +127,7 @@ func ProxyRemoteApp(stream net.Conn) {
 			// Control events: protocol-level actions that do not
 			// dispatch to robotgo.
 			if event.Type == "refresh_screenshot" {
+				log.Printf("remoteapp: refresh_screenshot received")
 				signalForceCapture()
 				if werr := lw.writeInputAck(InputAck{Type: event.Type, Detail: "refresh"}); werr != nil {
 					log.Printf("remoteapp: writeInputAck: %v", werr)
