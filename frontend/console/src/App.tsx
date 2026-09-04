@@ -29,6 +29,7 @@ import {
   ToggleButton,
   ToggleButtonGroup,
 } from '@mui/material';
+import { useTheme } from '@mui/material/styles';
 import DeleteIcon from '@mui/icons-material/Delete';
 import RefreshIcon from '@mui/icons-material/Refresh';
 import LockOutlinedIcon from '@mui/icons-material/LockOutlined';
@@ -47,7 +48,7 @@ import DesktopWindowsIcon from '@mui/icons-material/DesktopWindows';
 import FullscreenIcon from '@mui/icons-material/Fullscreen';
 import FullscreenExitIcon from '@mui/icons-material/FullscreenExit';
 import ZoomInIcon from '@mui/icons-material/ZoomIn';
-import PaletteIcon from '@mui/icons-material/Palette';
+import KeyboardIcon from '@mui/icons-material/Keyboard';
 import { Terminal, type IDisposable } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
@@ -218,6 +219,7 @@ const SHELL_THEMES: Record<string, ShellTheme> = {
 const SHELL_THEME_KEYS = Object.keys(SHELL_THEMES);
 
 export default function App() {
+  const theme = useTheme();
   const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [sessionToken, setSessionToken] = useState(() => localStorage.getItem('sessionToken') || '');
   const [userRole, setUserRole] = useState(() => localStorage.getItem('userRole') || '');
@@ -229,6 +231,7 @@ export default function App() {
   const [password, setPassword] = useState('');
   const [totpCode, setTotpCode] = useState('');
   const [tabIndex, setTabIndex] = useState(0);
+  const tabIndexRef = useRef(0); // tracks active tab for keyboard handlers (avoids stale closures)
   const [sessions, setSessions] = useState<Session[]>([]);
   const [users, setUsers] = useState<User[]>([]);
   const [agents, setAgents] = useState<AgentConfig[]>([]);
@@ -314,6 +317,27 @@ export default function App() {
   const desktopContainerRef = useRef<HTMLDivElement | null>(null);
   const desktopMouseMoveRef = useRef<number>(0); // throttle: last mouse_move timestamp
   const [desktopMetrics, setDesktopMetrics] = useState<MetricSnapshot | null>(null);
+
+  // Command palette state
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const metaDownRef = useRef(false);
+  const paletteOpenRef = useRef(false);
+
+  // Keep paletteOpenRef in sync so the keyboard handler can read
+  // palette state without re-attaching listeners on every toggle.
+  useEffect(() => { paletteOpenRef.current = paletteOpen; }, [paletteOpen]);
+
+  // Shell command palette state
+  const [shellPaletteOpen, setShellPaletteOpen] = useState(false);
+  const shellPaletteOpenRef = useRef(false);
+  useEffect(() => { shellPaletteOpenRef.current = shellPaletteOpen; }, [shellPaletteOpen]);
+
+  // Keep tabIndexRef in sync so keyboard handlers can check active tab without re-registering.
+  useEffect(() => { tabIndexRef.current = tabIndex; }, [tabIndex]);
+
+  // Text editor state (Send Text command palette action)
+  const [textEditorOpen, setTextEditorOpen] = useState(false);
+  const [textEditorContent, setTextEditorContent] = useState('');
 
   // Magnifier lens state
   const [magnifierOn, setMagnifierOn] = useState(false);
@@ -516,6 +540,7 @@ export default function App() {
     if (xtermRef.current) {
       xtermRef.current.writeln('\r\n\x1b[33m[Disconnected]\x1b[0m');
     }
+    setShellPaletteOpen(false);
     setShellConnected(false);
     setShellSessionId('');
     setShellPersistentId('');
@@ -526,6 +551,7 @@ export default function App() {
 
   const connectShell = useCallback(async (agentID: string, reattachId?: string) => {
     if (!agentID) return;
+    setShellPaletteOpen(false); // defensive: ensure palette closed before new connection
 
     // Disconnect any existing shell first.
     if (shellAbortRef.current) {
@@ -753,6 +779,7 @@ export default function App() {
         resizeDisposableRef.current.dispose();
         resizeDisposableRef.current = null;
       }
+      setShellPaletteOpen(false);
       setShellConnected(false);
       setShellSessionId('');
       setShellPersistentId('');
@@ -804,6 +831,10 @@ export default function App() {
       clearTimeout(desktopTooltipTimerRef.current);
       desktopTooltipTimerRef.current = null;
     }
+    setPaletteOpen(false);
+    metaDownRef.current = false;
+    setTextEditorOpen(false);
+    setTextEditorContent('');
   }, []);
 
   const disconnectDesktop = useCallback(() => {
@@ -915,6 +946,8 @@ export default function App() {
   // Uses refs for screen dimensions to avoid stale-closure issues when the
   // screeninfo SSE event arrives after the handler was created.
   const handleDesktopMouse = useCallback((e: React.MouseEvent<HTMLDivElement>, sid: string, signal: AbortSignal) => {
+    // Intercept all mouse events when command palette is open.
+    if (paletteOpenRef.current) return;
     const container = desktopContainerRef.current;
     const img = desktopImgRef.current;
     const sw = screenWidthRef.current;
@@ -946,6 +979,8 @@ export default function App() {
 
   // Desktop keyboard handler
   const handleDesktopKey = useCallback((e: KeyboardEvent, sid: string, signal: AbortSignal) => {
+    // Intercept all keyboard events when command palette is open.
+    if (paletteOpenRef.current) return;
     e.preventDefault();
     const modifiers: string[] = [];
     if (e.ctrlKey) modifiers.push('ctrl');
@@ -975,21 +1010,224 @@ export default function App() {
     }
   }, [sendDesktopInput]);
 
-  // Attach/detach keyboard listeners for desktop
+  const toggleFullscreen = useCallback(() => {
+    if (document.fullscreenElement) {
+      document.exitFullscreen();
+    } else {
+      desktopContainerRef.current?.requestFullscreen().catch(() => {});
+    }
+  }, []);
+
+  // Palette action handler
+  const handlePaletteAction = useCallback((action: string) => {
+    setPaletteOpen(false);
+    const sid = desktopSessionId;
+    const abort = desktopAbortRef.current;
+    if (!sid || !abort) return;
+    switch (action) {
+      case 'refresh-screenshot':
+        sendDesktopInput(sid, { type: 'refresh_screenshot' }, abort.signal);
+        break;
+      case 'send-text':
+        setTextEditorContent('');
+        setTextEditorOpen(true);
+        break;
+      case 'toggle-fullscreen':
+        toggleFullscreen();
+        break;
+      case 'disconnect':
+        disconnectDesktop();
+        break;
+    }
+  }, [desktopSessionId, sendDesktopInput, toggleFullscreen, disconnectDesktop]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Close text editor and restore focus to the desktop container.
+  const closeTextEditor = useCallback(() => {
+    setTextEditorOpen(false);
+    desktopContainerRef.current?.focus();
+  }, []);
+
+  // Send multi-line text to remote desktop by splitting into type_text + enter events.
+  // Lines longer than 256 UTF-8 bytes are chunked to fit ValidateText's limit.
+  // Sends are sequential (awaited) to preserve ordering on the wire.
+  const sendTextToDesktop = useCallback(async () => {
+    const raw = textEditorContent;
+    setTextEditorOpen(false);
+    setTextEditorContent('');
+    desktopContainerRef.current?.focus();
+    const sid = desktopSessionId;
+    const abort = desktopAbortRef.current;
+    if (!sid || !abort || !raw) return;
+
+    // Normalize line endings and cap total size
+    const text = raw.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+    const MAX_SEND_TEXT_CHARS = 4096;
+    if (text.length > MAX_SEND_TEXT_CHARS) {
+      console.warn(`sendTextToDesktop: text truncated from ${text.length} to ${MAX_SEND_TEXT_CHARS} chars`);
+    }
+    const capped = text.slice(0, MAX_SEND_TEXT_CHARS);
+
+    const encoder = new TextEncoder();
+    const lines = capped.split('\n');
+    for (let i = 0; i < lines.length; i++) {
+      if (abort.signal.aborted) break;
+      const line = lines[i];
+      if (line.length > 0) {
+        // Chunk by UTF-8 byte length to fit ValidateText's 256-byte limit.
+        // Use 252-byte chunks (not 256) to leave headroom for TextDecoder's
+        // stream buffering: an incomplete multi-byte sequence at a chunk
+        // boundary is prepended to the next chunk's decoded output, which
+        // could otherwise push the re-encoded length above 256 bytes.
+        // Fresh decoder per line to avoid cross-line state leakage.
+        const decoder = new TextDecoder();
+        const encoded = encoder.encode(line);
+        for (let j = 0; j < encoded.length; j += 252) {
+          const chunkBytes = encoded.slice(j, Math.min(j + 252, encoded.length));
+          const chunk = decoder.decode(chunkBytes, { stream: true });
+          if (chunk) {
+            await sendDesktopInput(sid, { type: 'type_text', text: chunk }, abort.signal);
+          }
+        }
+        // Flush any remaining bytes from an incomplete multi-byte
+        // sequence at the end of the last chunk.
+        const remaining = decoder.decode();
+        if (remaining) {
+          await sendDesktopInput(sid, { type: 'type_text', text: remaining }, abort.signal);
+        }
+      }
+      // Send Enter between lines (not after the last line)
+      if (i < lines.length - 1) {
+        await sendDesktopInput(sid, { type: 'key_tap', key: 'enter' }, abort.signal);
+      }
+    }
+  }, [textEditorContent, desktopSessionId, sendDesktopInput]);
+
+  // Shell command palette action handler
+  const handleShellPaletteAction = useCallback((actionId: string) => {
+    if (!shellConnected) return; // guard against double-disconnect
+    setShellPaletteOpen(false);
+    console.debug('[shell-palette] action:', actionId);
+    switch (actionId) {
+      case 'toggle-theme': cycleShellTheme(); break;
+      case 'toggle-fullscreen': toggleShellFullscreen(); break;
+      case 'disconnect': disconnectShell(); break;
+    }
+  }, [cycleShellTheme, toggleShellFullscreen, disconnectShell, shellConnected]);
+
+  // Attach/detach keyboard listeners for desktop (includes command palette handling)
   useEffect(() => {
     if (!desktopConnected || !desktopSessionId) return;
     const abort = desktopAbortRef.current;
     if (!abort) return;
     const sid = desktopSessionId;
+
     const handler = (e: KeyboardEvent) => {
+      // Only handle when desktop tab is active (prevents conflict with shell handler)
+      const desktopTabIdx = isAdmin ? 5 : 4;
+      if (tabIndexRef.current !== desktopTabIdx) return;
+
       // Skip if focus is on an input, textarea, or select element
       const target = e.target as HTMLElement;
       if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT') return;
+
+      // Command palette: meta key toggle (Cmd on macOS, Ctrl on non-Mac)
+      const isMac = navigator.platform.includes('Mac');
+      const isMetaKey = e.key === 'Meta' || (e.key === 'Control' && !isMac);
+      if (isMetaKey) {
+        e.preventDefault();
+        if (!metaDownRef.current) {
+          metaDownRef.current = true;
+          setPaletteOpen(prev => !prev);
+        }
+        return;
+      }
+
+      // When palette is open, handle shortcut keys
+      if (paletteOpenRef.current) {
+        e.preventDefault();
+        if (e.key === 'Escape') {
+          setPaletteOpen(false);
+          return;
+        }
+        switch (e.key.toLowerCase()) {
+          case 'r': handlePaletteAction('refresh-screenshot'); return;
+          case 't': handlePaletteAction('send-text'); return;
+          case 'f': handlePaletteAction('toggle-fullscreen'); return;
+          case 'q': handlePaletteAction('disconnect'); return;
+        }
+        return; // swallow all other keys while palette is open
+      }
+
       handleDesktopKey(e, sid, abort.signal);
     };
+
+    const keyUpHandler = (e: KeyboardEvent) => {
+      const isMac = navigator.platform.includes('Mac');
+      if (e.key === 'Meta' || (e.key === 'Control' && !isMac)) {
+        metaDownRef.current = false;
+      }
+    };
+
     window.addEventListener('keydown', handler);
-    return () => window.removeEventListener('keydown', handler);
-  }, [desktopConnected, desktopSessionId, handleDesktopKey]);
+    window.addEventListener('keyup', keyUpHandler);
+    return () => {
+      window.removeEventListener('keydown', handler);
+      window.removeEventListener('keyup', keyUpHandler);
+      metaDownRef.current = false;
+    };
+  }, [desktopConnected, desktopSessionId, handleDesktopKey, handlePaletteAction]);
+
+  // Shell command palette keyboard handler
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      // Only handle when shell tab is active (prevents conflict with desktop handler)
+      const shellTabIdx = isAdmin ? 4 : 3;
+      if (tabIndexRef.current !== shellTabIdx || !shellConnected) return;
+
+      const target = e.target as HTMLElement;
+      if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT') return;
+
+      const isMac = navigator.platform.includes('Mac');
+      const isMetaKey = e.key === 'Meta' || (e.key === 'Control' && !isMac);
+      if (isMetaKey) {
+        e.preventDefault();
+        if (!metaDownRef.current) {
+          metaDownRef.current = true;
+          setShellPaletteOpen(prev => !prev);
+        }
+        return;
+      }
+
+      if (shellPaletteOpenRef.current) {
+        e.preventDefault();
+        if (e.key === 'Escape') {
+          setShellPaletteOpen(false);
+          return;
+        }
+        switch (e.key.toLowerCase()) {
+          case 't': handleShellPaletteAction('toggle-theme'); return;
+          case 'f': handleShellPaletteAction('toggle-fullscreen'); return;
+          case 'q': handleShellPaletteAction('disconnect'); return;
+        }
+        return;
+      }
+    };
+
+    const keyUpHandler = (e: KeyboardEvent) => {
+      const isMac = navigator.platform.includes('Mac');
+      if (e.key === 'Meta' || (e.key === 'Control' && !isMac)) {
+        metaDownRef.current = false;
+      }
+    };
+
+    window.addEventListener('keydown', handler);
+    window.addEventListener('keyup', keyUpHandler);
+    return () => {
+      window.removeEventListener('keydown', handler);
+      window.removeEventListener('keyup', keyUpHandler);
+      metaDownRef.current = false;
+    };
+  }, [shellConnected, handleShellPaletteAction, isAdmin]);
 
   // Sync fullscreen state with the browser Fullscreen API.
   // Check which element is fullscreen to avoid coupling desktop and shell state.
@@ -1001,14 +1239,6 @@ export default function App() {
     };
     document.addEventListener('fullscreenchange', handler);
     return () => document.removeEventListener('fullscreenchange', handler);
-  }, []);
-
-  const toggleFullscreen = useCallback(() => {
-    if (document.fullscreenElement) {
-      document.exitFullscreen();
-    } else {
-      desktopContainerRef.current?.requestFullscreen().catch(() => {});
-    }
   }, []);
 
   const toggleShellFullscreen = useCallback(() => {
@@ -1041,6 +1271,9 @@ export default function App() {
       return SHELL_THEME_KEYS[(idx + 1) % SHELL_THEME_KEYS.length];
     });
   }, []);
+
+  // Close shell palette when switching tabs (prevents stale palette state)
+  useEffect(() => { setShellPaletteOpen(false); }, [tabIndex]);
 
   // Shared shell panel UI — rendered in both admin and non-admin tab layouts
   // with different tabIndex values. The outer Box stays mounted (CSS-hidden)
@@ -1081,24 +1314,17 @@ export default function App() {
                     Connect
                   </Button>
                 )}
-                <Tooltip title={`Theme: ${SHELL_THEMES[shellThemeKey].label}`}>
-                  <IconButton
-                    size="small"
-                    onClick={cycleShellTheme}
-                    tabIndex={-1}
-                  >
-                    <PaletteIcon fontSize="small" />
-                  </IconButton>
-                </Tooltip>
-                <Tooltip title={isShellFullscreen ? 'Exit fullscreen' : 'Fullscreen'}>
-                  <IconButton
-                    size="small"
-                    onClick={toggleShellFullscreen}
-                    tabIndex={-1}
-                  >
-                    {isShellFullscreen ? <FullscreenExitIcon fontSize="small" /> : <FullscreenIcon fontSize="small" />}
-                  </IconButton>
-                </Tooltip>
+                {shellConnected && (
+                  <Tooltip title={`Press ${navigator.platform.includes('Mac') ? '⌘' : 'Ctrl'} to open command palette`}>
+                    <IconButton
+                      size="small"
+                      onClick={() => setShellPaletteOpen(true)}
+                      tabIndex={-1}
+                    >
+                      <KeyboardIcon fontSize="small" />
+                    </IconButton>
+                  </Tooltip>
+                )}
               </Box>
             }
           />
@@ -1127,6 +1353,76 @@ export default function App() {
         <Typography variant="caption" color="text.secondary" sx={{ mt: 1, display: 'block' }}>
           Session: {shellSessionId} | Agent: {shellAgent}{shellReattached ? ' (reattached)' : ''}
         </Typography>
+      )}
+      {/* Shell command palette overlay */}
+      {shellPaletteOpen && shellConnected && (
+        <Box
+          sx={{
+            position: 'absolute',
+            inset: 0,
+            zIndex: 20,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            bgcolor: 'rgba(0, 0, 0, 0.5)',
+          }}
+          onClick={() => setShellPaletteOpen(false)}
+        >
+          <Paper
+            elevation={8}
+            sx={{
+              minWidth: 260,
+              borderRadius: 2,
+              overflow: 'hidden',
+              bgcolor: 'background.paper',
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <Box sx={{ px: 2, py: 1.25, borderBottom: 1, borderColor: 'divider' }}>
+              <Typography variant="overline" color="text.secondary" sx={{ letterSpacing: 1.5 }}>
+                Command Palette
+              </Typography>
+            </Box>
+            {[
+              { id: 'toggle-theme', label: 'Toggle Theme', shortcut: 'T' },
+              { id: 'toggle-fullscreen', label: 'Toggle Fullscreen', shortcut: 'F' },
+              { id: 'disconnect', label: 'Disconnect', shortcut: 'Q' },
+            ].map((item) => (
+              <Box
+                key={item.id}
+                onClick={() => handleShellPaletteAction(item.id)}
+                sx={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  px: 2,
+                  py: 1.25,
+                  cursor: 'pointer',
+                  '&:hover': { bgcolor: 'action.hover' },
+                  transition: 'background-color 0.1s',
+                }}
+              >
+                <Typography variant="body2">{item.label}</Typography>
+                <Chip
+                  label={item.shortcut}
+                  size="small"
+                  sx={{
+                    fontFamily: 'monospace',
+                    fontWeight: 600,
+                    minWidth: 28,
+                    height: 22,
+                    fontSize: '0.75rem',
+                  }}
+                />
+              </Box>
+            ))}
+            <Box sx={{ px: 2, py: 1, borderTop: 1, borderColor: 'divider' }}>
+              <Typography variant="caption" color="text.secondary">
+                Press <strong>Esc</strong> to close • <strong>{navigator.platform.includes('Mac') ? '⌘' : 'Ctrl'}</strong> to toggle
+              </Typography>
+            </Box>
+          </Paper>
+        </Box>
       )}
     </Box>
   );
@@ -1784,6 +2080,163 @@ export default function App() {
           draggable={false}
         />
         <style>{`.remote-desktop-img { image-rendering: crisp-edges; image-rendering: -webkit-optimize-contrast; }`}</style>
+        {/* Command palette overlay */}
+        {paletteOpen && desktopConnected && (
+          <Box
+            sx={{
+              position: 'absolute',
+              inset: 0,
+              zIndex: 20,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              bgcolor: 'rgba(0, 0, 0, 0.5)',
+            }}
+            onClick={() => setPaletteOpen(false)}
+          >
+            <Paper
+              elevation={8}
+              sx={{
+                minWidth: 260,
+                borderRadius: 2,
+                overflow: 'hidden',
+                bgcolor: 'background.paper',
+              }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <Box sx={{ px: 2, py: 1.25, borderBottom: 1, borderColor: 'divider' }}>
+                <Typography variant="overline" color="text.secondary" sx={{ letterSpacing: 1.5 }}>
+                  Command Palette
+                </Typography>
+              </Box>
+              {[
+                { id: 'refresh-screenshot', label: 'Refresh Screenshot', shortcut: 'R' },
+                { id: 'send-text', label: 'Send Text', shortcut: 'T' },
+                { id: 'toggle-fullscreen', label: 'Toggle Fullscreen', shortcut: 'F' },
+                { id: 'disconnect', label: 'Disconnect', shortcut: 'Q' },
+              ].map((item) => (
+                <Box
+                  key={item.id}
+                  onClick={() => handlePaletteAction(item.id)}
+                  sx={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    px: 2,
+                    py: 1.25,
+                    cursor: 'pointer',
+                    '&:hover': { bgcolor: 'action.hover' },
+                    transition: 'background-color 0.1s',
+                  }}
+                >
+                  <Typography variant="body2">{item.label}</Typography>
+                  <Chip
+                    label={item.shortcut}
+                    size="small"
+                    sx={{
+                      fontFamily: 'monospace',
+                      fontWeight: 600,
+                      minWidth: 28,
+                      height: 22,
+                      fontSize: '0.75rem',
+                    }}
+                  />
+                </Box>
+              ))}
+              <Box sx={{ px: 2, py: 1, borderTop: 1, borderColor: 'divider' }}>
+                <Typography variant="caption" color="text.secondary">
+                  Press <strong>Esc</strong> to close • <strong>{navigator.platform.includes('Mac') ? '⌘' : 'Ctrl'}</strong> to toggle
+                </Typography>
+              </Box>
+            </Paper>
+          </Box>
+        )}
+        {/* Text editor overlay (Send Text command palette action) */}
+        {textEditorOpen && desktopConnected && (
+          <Box
+            sx={{
+              position: 'absolute',
+              inset: 0,
+              zIndex: 20,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              bgcolor: 'rgba(0, 0, 0, 0.5)',
+            }}
+            onClick={closeTextEditor}
+          >
+            <Paper
+              elevation={8}
+              sx={{
+                width: 400,
+                borderRadius: 2,
+                overflow: 'hidden',
+                bgcolor: 'background.paper',
+              }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <Box sx={{ px: 2, py: 1.25, borderBottom: 1, borderColor: 'divider' }}>
+                <Typography variant="overline" color="text.secondary" sx={{ letterSpacing: 1.5 }}>
+                  Send Text
+                </Typography>
+              </Box>
+              <Box sx={{ p: 2 }}>
+                <textarea
+                  autoFocus
+                  value={textEditorContent}
+                  onChange={(e) => setTextEditorContent(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Escape') {
+                      e.preventDefault();
+                      closeTextEditor();
+                    } else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+                      e.preventDefault();
+                      sendTextToDesktop();
+                    }
+                  }}
+                  placeholder="Type text to send to the remote desktop..."
+                  style={{
+                    width: '100%',
+                    minHeight: 150,
+                    padding: '8px 12px',
+                    fontFamily: 'monospace',
+                    fontSize: '0.875rem',
+                    lineHeight: 1.5,
+                    border: '1px solid',
+                    borderColor: theme.palette.divider,
+                    borderRadius: 4,
+                    resize: 'vertical',
+                    outline: 'none',
+                    boxSizing: 'border-box',
+                    backgroundColor: theme.palette.background.default,
+                    color: theme.palette.text.primary,
+                  }}
+                  onFocus={(e) => { e.target.style.borderColor = theme.palette.primary.main; }}
+                  onBlur={(e) => { e.target.style.borderColor = theme.palette.divider; }}
+                />
+                <Typography variant="caption" color="text.secondary" sx={{ mt: 0.5, display: 'block' }}>
+                  ⌘/Ctrl+Enter to send • Enter for new line • <strong>Esc</strong> to close
+                </Typography>
+              </Box>
+              <Box sx={{ px: 2, py: 1.5, borderTop: 1, borderColor: 'divider', display: 'flex', justifyContent: 'flex-end', gap: 1 }}>
+                <Button
+                  size="small"
+                  onClick={closeTextEditor}
+                >
+                  Cancel
+                </Button>
+                <Button
+                  size="small"
+                  variant="contained"
+                  disabled={!textEditorContent.trim()}
+                  onClick={sendTextToDesktop}
+                >
+                  Send
+                </Button>
+              </Box>
+            </Paper>
+          </Box>
+        )}
       </Paper>
       {desktopConnected && (
         <Typography variant="caption" color="text.secondary" sx={{ mt: 1, display: 'block' }}>

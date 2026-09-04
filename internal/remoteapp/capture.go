@@ -46,12 +46,16 @@ const displayOffBackoff = 30 * time.Second
 // avoids uploading screenshots that will be immediately stale while the
 // user is actively interacting.
 //
+// The forceCapture channel triggers an immediate capture when signaled,
+// bypassing the defer timer. This supports client-initiated "refresh"
+// actions from the command palette.
+//
 // An initial capture is performed on startup so the frontend receives the
 // first frame immediately.
 //
 // If w is a *lockedWriter (as used by ProxyRemoteApp), all frame and log
 // writes are mutex-guarded for concurrent safety.
-func CaptureLoop(ctx context.Context, w io.Writer, inputReceived <-chan struct{}) error {
+func CaptureLoop(ctx context.Context, w io.Writer, inputReceived <-chan struct{}, forceCapture <-chan struct{}) error {
 	// Detect lockedWriter for mutex-guarded writes.
 	lw, _ := w.(*lockedWriter)
 
@@ -172,6 +176,27 @@ func CaptureLoop(ctx context.Context, w io.Writer, inputReceived <-chan struct{}
 			drainTimer(deferTimer)
 			backoffDeadline = time.Time{} // cancel any active backoff
 			deferTimer.Reset(deferDelay)
+		case <-forceCapture:
+			// Immediate capture requested (e.g. command palette
+			// "Refresh Screenshot"). Capture now regardless of
+			// the defer timer, then reset the timer so the
+			// normal deferred strategy continues.
+			if !time.Now().Before(backoffDeadline) {
+				writeLog("info", "force capture requested")
+				transient, err := captureAndSend()
+				if err != nil {
+					return err
+				}
+				if transient {
+					backoffDeadline = time.Now().Add(displayOffBackoff)
+					drainTimer(deferTimer)
+					deferTimer.Reset(displayOffBackoff)
+				} else {
+					backoffDeadline = time.Time{}
+					drainTimer(deferTimer)
+					deferTimer.Reset(deferDelay)
+				}
+			}
 		case <-deferTimer.C:
 			// Timer fired: check whether we should capture now or
 			// wait longer due to display-unavailable backoff.

@@ -246,6 +246,34 @@ func TestHandleRemoteAppUp_InvalidInputType(t *testing.T) {
 	}
 }
 
+func TestHandleRemoteAppUp_RefreshScreenshotAccepted(t *testing.T) {
+	t.Parallel()
+	h := NewHandler(NewRegistry(), time.Hour)
+	cs := newTestConnectSession(t, h, "sess1", "agent1", 0)
+
+	body := []byte(`{"type":"refresh_screenshot"}`)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/remoteapp/connect-up", bytes.NewReader(body))
+	req.Header.Set("X-SSET-Session", "sess1")
+	req = injectUserSession(req, adminSession())
+	h.handleRemoteAppUp(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want %d", rec.Code, http.StatusOK)
+	}
+	// Verify the control event was written as a FrameInput to the pipe.
+	cs.up.SetReadDeadline(time.Now().Add(time.Second))
+	frameType, data, err := remoteapp.ReadFrame(cs.up)
+	if err != nil {
+		t.Fatalf("ReadFrame: %v", err)
+	}
+	if frameType != remoteapp.FrameInput {
+		t.Errorf("frame type: got 0x%02x, want 0x%02x", frameType, remoteapp.FrameInput)
+	}
+	if !bytes.Equal(data, body) {
+		t.Errorf("data: got %q, want %q", data, body)
+	}
+}
+
 func TestScreenshotTimestampStripAndAckRoundTrip(t *testing.T) {
 	t.Parallel()
 	// Build a synthetic FrameScreenshot payload: [8-byte BE timestamp][JPEG].

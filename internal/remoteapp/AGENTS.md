@@ -40,9 +40,10 @@ Max frame size: 4 MiB (`maxFrameSize`). `WriteFrame` constructs the header and p
 
 ## Capture Loop
 
-`CaptureLoop(ctx, w, inputReceived <-chan struct{})` captures the primary display and writes timestamped JPEG screenshots as typed frames. It uses a **deferred-capture strategy**:
+`CaptureLoop(ctx, w, inputReceived <-chan struct{}, forceCapture <-chan struct{})` captures the primary display and writes timestamped JPEG screenshots as typed frames. It uses a **deferred-capture strategy**:
 
 - **`inputReceived` channel**: Every input event signals this channel, resetting a 3-second deferral timer. Buffered 1 for coalescing.
+- **`forceCapture` channel**: Triggers an immediate capture, bypassing the defer timer. Used by the command palette "Refresh Screenshot" action. Buffered 1; extra signals coalesce via non-blocking send.
 - **3-second deferral timer (`deferDelay`)**: Capture only fires after no input events have been received for 3 seconds. While the user is actively interacting, screenshots are suppressed to avoid uploading immediately-stale frames.
 - **Initial capture**: One screenshot on startup before entering the select loop, so the frontend receives the first frame immediately.
 - **Buffer reuse**: Single `bytes.Buffer` reused across frames (~150 KB/frame savings).
@@ -88,8 +89,8 @@ Typed error types: `InvalidKeyError`, `InvalidModifierError`, `TextTooLongError`
 `ProxyRemoteApp(stream net.Conn)` orchestrates:
 1. Wrap stream in a `lockedWriter` for concurrent-safe frame writes
 2. Send `FrameScreenInfo` with initial screen dimensions
-3. Create `inputReceived` channel (buffered 1) and start `CaptureLoop` goroutine
-4. Main loop: `ReadFrame` → dispatch input events; for every `FrameInput`, send `FrameInputAck` back with event type and detail; signal `inputReceived` on all input events (deferring capture); handle `FrameScreenshotAck` from server
+3. Create `inputReceived` channel (buffered 1) and `forceCapture` channel (buffered 1), start `CaptureLoop` goroutine
+4. Main loop: `ReadFrame` → dispatch input events; for every `FrameInput`, send `FrameInputAck` back with event type and detail; signal `inputReceived` on all input events (deferring capture); intercept `refresh_screenshot` control events to signal `forceCapture` and send `InputAck` without dispatching to robotgo; handle `FrameScreenshotAck` from server
 5. On stream close: cancel capture, `ReleaseAllInputs`, wait for capture goroutine, emit "session ended" log event, close `lockedWriter`, close stream
 
 ## Concurrency Model

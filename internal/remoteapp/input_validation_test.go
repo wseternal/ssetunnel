@@ -201,6 +201,7 @@ func TestValidateInputEventType(t *testing.T) {
 		{"key_tap", true},
 		{"key_toggle", true},
 		{"type_text", true},
+		{"refresh_screenshot", true},
 		{"", false},
 		{"unknown", false},
 		{"MOUSE_MOVE", false}, // case-sensitive
