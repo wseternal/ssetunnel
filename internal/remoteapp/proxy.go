@@ -66,6 +66,11 @@ func ProxyRemoteApp(stream net.Conn) {
 	// blocks on send; extra signals are coalesced.
 	inputReceived := make(chan struct{}, 1)
 
+	// forceCapture signals the capture loop to immediately capture a
+	// screenshot, bypassing the defer timer. Used by the command palette
+	// "Refresh Screenshot" action. Buffered 1; extra signals coalesce.
+	forceCapture := make(chan struct{}, 1)
+
 	// lastAckUnixMilli tracks the latest server-ACK'd screenshot timestamp
 	// for observability. Loaded at session teardown for the final log line.
 	var lastAckUnixMilli atomic.Int64
@@ -76,7 +81,7 @@ func ProxyRemoteApp(stream net.Conn) {
 	// Goroutine: capture screenshots → yamux stream.
 	go func() {
 		defer wg.Done()
-		if err := CaptureLoop(ctx, lw, inputReceived); err != nil && err != context.Canceled {
+		if err := CaptureLoop(ctx, lw, inputReceived, forceCapture); err != nil && err != context.Canceled {
 			log.Printf("remoteapp: capture loop: %v", err)
 			if werr := lw.writeLogEvent("error", fmt.Sprintf("capture loop exited: %v", err)); werr != nil {
 				log.Printf("remoteapp: writeLogEvent: %v", werr)
@@ -89,6 +94,15 @@ func ProxyRemoteApp(stream net.Conn) {
 	signalInput := func() {
 		select {
 		case inputReceived <- struct{}{}:
+		default: // already pending; coalesce
+		}
+	}
+
+	// signalForceCapture requests an immediate capture from the capture
+	// loop, bypassing the defer timer. Non-blocking.
+	signalForceCapture := func() {
+		select {
+		case forceCapture <- struct{}{}:
 		default: // already pending; coalesce
 		}
 	}
@@ -106,6 +120,19 @@ func ProxyRemoteApp(stream net.Conn) {
 				log.Printf("remoteapp: bad input JSON: %v", err)
 				if werr := lw.writeLogEvent("warn", fmt.Sprintf("bad input JSON: %v", err)); werr != nil {
 					log.Printf("remoteapp: writeLogEvent: %v", werr)
+				}
+				continue
+			}
+
+			// Control events: protocol-level actions that do not
+			// dispatch to robotgo.
+			if event.Type == "refresh_screenshot" {
+				signalForceCapture()
+				if werr := lw.writeInputAck(InputAck{Type: event.Type, Detail: "refresh"}); werr != nil {
+					log.Printf("remoteapp: writeInputAck: %v", werr)
+					if errors.Is(werr, ErrWriterClosed) {
+						break
+					}
 				}
 				continue
 			}
@@ -183,6 +210,8 @@ func ackDetail(event InputEvent) string {
 		return event.Text
 	case "mouse_move":
 		return ""
+	case "refresh_screenshot":
+		return "refresh"
 	default:
 		return ""
 	}

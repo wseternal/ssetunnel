@@ -315,6 +315,10 @@ export default function App() {
   const desktopMouseMoveRef = useRef<number>(0); // throttle: last mouse_move timestamp
   const [desktopMetrics, setDesktopMetrics] = useState<MetricSnapshot | null>(null);
 
+  // Command palette state
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const metaDownRef = useRef(false);
+
   // Magnifier lens state
   const [magnifierOn, setMagnifierOn] = useState(false);
   const magnifierPosRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
@@ -915,6 +919,8 @@ export default function App() {
   // Uses refs for screen dimensions to avoid stale-closure issues when the
   // screeninfo SSE event arrives after the handler was created.
   const handleDesktopMouse = useCallback((e: React.MouseEvent<HTMLDivElement>, sid: string, signal: AbortSignal) => {
+    // Intercept all mouse events when command palette is open.
+    if (paletteOpen) return;
     const container = desktopContainerRef.current;
     const img = desktopImgRef.current;
     const sw = screenWidthRef.current;
@@ -942,10 +948,12 @@ export default function App() {
       desktopMouseMoveRef.current = now;
       sendDesktopInput(sid, { type: 'mouse_move', x, y }, signal);
     }
-  }, [sendDesktopInput]);
+  }, [sendDesktopInput, paletteOpen]);
 
   // Desktop keyboard handler
   const handleDesktopKey = useCallback((e: KeyboardEvent, sid: string, signal: AbortSignal) => {
+    // Intercept all keyboard events when command palette is open.
+    if (paletteOpen) return;
     e.preventDefault();
     const modifiers: string[] = [];
     if (e.ctrlKey) modifiers.push('ctrl');
@@ -973,23 +981,82 @@ export default function App() {
         sendDesktopInput(sid, { type: 'key_tap', key, modifiers }, signal);
       }
     }
-  }, [sendDesktopInput]);
+  }, [sendDesktopInput, paletteOpen]);
 
-  // Attach/detach keyboard listeners for desktop
+  // Palette action handler
+  const handlePaletteAction = useCallback((action: string) => {
+    setPaletteOpen(false);
+    const sid = desktopSessionId;
+    const abort = desktopAbortRef.current;
+    if (!sid || !abort) return;
+    switch (action) {
+      case 'refresh-screenshot':
+        sendDesktopInput(sid, { type: 'refresh_screenshot' }, abort.signal);
+        break;
+      case 'toggle-fullscreen':
+        toggleFullscreen();
+        break;
+      case 'disconnect':
+        disconnectDesktop();
+        break;
+    }
+  }, [desktopSessionId, sendDesktopInput, toggleFullscreen, disconnectDesktop]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Attach/detach keyboard listeners for desktop (includes command palette handling)
   useEffect(() => {
     if (!desktopConnected || !desktopSessionId) return;
     const abort = desktopAbortRef.current;
     if (!abort) return;
     const sid = desktopSessionId;
+
     const handler = (e: KeyboardEvent) => {
       // Skip if focus is on an input, textarea, or select element
       const target = e.target as HTMLElement;
       if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT') return;
+
+      // Command palette: meta key toggle (Cmd on macOS, Ctrl on others)
+      const isMetaKey = e.key === 'Meta' || (e.key === 'Control' && !e.metaKey);
+      if (isMetaKey) {
+        e.preventDefault();
+        if (!metaDownRef.current) {
+          metaDownRef.current = true;
+          setPaletteOpen(prev => !prev);
+        }
+        return;
+      }
+
+      // When palette is open, handle shortcut keys
+      if (paletteOpen) {
+        e.preventDefault();
+        if (e.key === 'Escape') {
+          setPaletteOpen(false);
+          return;
+        }
+        switch (e.key.toLowerCase()) {
+          case 'r': handlePaletteAction('refresh-screenshot'); return;
+          case 'f': handlePaletteAction('toggle-fullscreen'); return;
+          case 'q': handlePaletteAction('disconnect'); return;
+        }
+        return; // swallow all other keys while palette is open
+      }
+
       handleDesktopKey(e, sid, abort.signal);
     };
+
+    const keyUpHandler = (e: KeyboardEvent) => {
+      if (e.key === 'Meta' || e.key === 'Control') {
+        metaDownRef.current = false;
+      }
+    };
+
     window.addEventListener('keydown', handler);
-    return () => window.removeEventListener('keydown', handler);
-  }, [desktopConnected, desktopSessionId, handleDesktopKey]);
+    window.addEventListener('keyup', keyUpHandler);
+    return () => {
+      window.removeEventListener('keydown', handler);
+      window.removeEventListener('keyup', keyUpHandler);
+      metaDownRef.current = false;
+    };
+  }, [desktopConnected, desktopSessionId, handleDesktopKey, paletteOpen, handlePaletteAction]);
 
   // Sync fullscreen state with the browser Fullscreen API.
   // Check which element is fullscreen to avoid coupling desktop and shell state.
@@ -1784,6 +1851,76 @@ export default function App() {
           draggable={false}
         />
         <style>{`.remote-desktop-img { image-rendering: crisp-edges; image-rendering: -webkit-optimize-contrast; }`}</style>
+        {/* Command palette overlay */}
+        {paletteOpen && desktopConnected && (
+          <Box
+            sx={{
+              position: 'absolute',
+              inset: 0,
+              zIndex: 20,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              bgcolor: 'rgba(0, 0, 0, 0.5)',
+            }}
+            onClick={() => setPaletteOpen(false)}
+          >
+            <Paper
+              elevation={8}
+              sx={{
+                minWidth: 260,
+                borderRadius: 2,
+                overflow: 'hidden',
+                bgcolor: 'background.paper',
+              }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <Box sx={{ px: 2, py: 1.25, borderBottom: 1, borderColor: 'divider' }}>
+                <Typography variant="overline" color="text.secondary" sx={{ letterSpacing: 1.5 }}>
+                  Command Palette
+                </Typography>
+              </Box>
+              {[
+                { id: 'refresh-screenshot', label: 'Refresh Screenshot', shortcut: 'R' },
+                { id: 'toggle-fullscreen', label: 'Toggle Fullscreen', shortcut: 'F' },
+                { id: 'disconnect', label: 'Disconnect', shortcut: 'Q' },
+              ].map((item) => (
+                <Box
+                  key={item.id}
+                  onClick={() => handlePaletteAction(item.id)}
+                  sx={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    px: 2,
+                    py: 1.25,
+                    cursor: 'pointer',
+                    '&:hover': { bgcolor: 'action.hover' },
+                    transition: 'background-color 0.1s',
+                  }}
+                >
+                  <Typography variant="body2">{item.label}</Typography>
+                  <Chip
+                    label={item.shortcut}
+                    size="small"
+                    sx={{
+                      fontFamily: 'monospace',
+                      fontWeight: 600,
+                      minWidth: 28,
+                      height: 22,
+                      fontSize: '0.75rem',
+                    }}
+                  />
+                </Box>
+              ))}
+              <Box sx={{ px: 2, py: 1, borderTop: 1, borderColor: 'divider' }}>
+                <Typography variant="caption" color="text.secondary">
+                  Press <strong>Esc</strong> to close • <strong>{navigator.platform.includes('Mac') ? '⌘' : 'Ctrl'}</strong> to toggle
+                </Typography>
+              </Box>
+            </Paper>
+          </Box>
+        )}
       </Paper>
       {desktopConnected && (
         <Typography variant="caption" color="text.secondary" sx={{ mt: 1, display: 'block' }}>

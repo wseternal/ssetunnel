@@ -182,13 +182,14 @@ func (e *InvalidStateError) Error() string { return "invalid key_toggle state: "
 
 // validInputTypes is the whitelist of recognized input event type strings.
 var validInputTypes = map[string]bool{
-	"mouse_move":   true,
-	"mouse_click":  true,
-	"mouse_scroll": true,
-	"mouse_drag":   true,
-	"key_tap":      true,
-	"key_toggle":   true,
-	"type_text":    true,
+	"mouse_move":         true,
+	"mouse_click":        true,
+	"mouse_scroll":       true,
+	"mouse_drag":         true,
+	"key_tap":            true,
+	"key_toggle":         true,
+	"type_text":          true,
+	"refresh_screenshot": true, // control event: force immediate capture (no robotgo dispatch)
 }
 
 // ValidateInputEventType checks whether an InputEvent type string is recognized.

@@ -377,6 +377,7 @@ func TestInputAckRoundTrip(t *testing.T) {
 		{"type_text", InputAck{Type: "type_text", Detail: "hello"}},
 		{"mouse_move no detail", InputAck{Type: "mouse_move"}},
 		{"scroll", InputAck{Type: "mouse_scroll", Detail: "down"}},
+		{"refresh_screenshot", InputAck{Type: "refresh_screenshot", Detail: "refresh"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -461,6 +462,7 @@ func TestAckDetail(t *testing.T) {
 		{"type_text unicode", InputEvent{Type: "type_text", Text: "\u4f60\u597d\u4e16\u754c"}, "\u4f60\u597d\u4e16\u754c"},
 		{"type_text long unicode", InputEvent{Type: "type_text", Text: "\u4f60\u597d\u4e16\u754c\u4f60\u597d\u4e16\u754c\u4f60\u597d\u4e16\u754c"}, "\u4f60\u597d\u4e16\u754c\u4f60\u597d\u4e16\u754c\u4f60\u597d..."},
 		{"mouse_move", InputEvent{Type: "mouse_move"}, ""},
+		{"refresh_screenshot", InputEvent{Type: "refresh_screenshot"}, "refresh"},
 		{"unknown", InputEvent{Type: "unknown_type"}, ""},
 	}
 	for _, tt := range tests {
