@@ -29,6 +29,7 @@ import {
   ToggleButton,
   ToggleButtonGroup,
 } from '@mui/material';
+import { useTheme } from '@mui/material/styles';
 import DeleteIcon from '@mui/icons-material/Delete';
 import RefreshIcon from '@mui/icons-material/Refresh';
 import LockOutlinedIcon from '@mui/icons-material/LockOutlined';
@@ -218,6 +219,7 @@ const SHELL_THEMES: Record<string, ShellTheme> = {
 const SHELL_THEME_KEYS = Object.keys(SHELL_THEMES);
 
 export default function App() {
+  const theme = useTheme();
   const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [sessionToken, setSessionToken] = useState(() => localStorage.getItem('sessionToken') || '');
   const [userRole, setUserRole] = useState(() => localStorage.getItem('userRole') || '');
@@ -933,7 +935,7 @@ export default function App() {
   // screeninfo SSE event arrives after the handler was created.
   const handleDesktopMouse = useCallback((e: React.MouseEvent<HTMLDivElement>, sid: string, signal: AbortSignal) => {
     // Intercept all mouse events when command palette is open.
-    if (paletteOpen) return;
+    if (paletteOpenRef.current) return;
     const container = desktopContainerRef.current;
     const img = desktopImgRef.current;
     const sw = screenWidthRef.current;
@@ -961,12 +963,12 @@ export default function App() {
       desktopMouseMoveRef.current = now;
       sendDesktopInput(sid, { type: 'mouse_move', x, y }, signal);
     }
-  }, [sendDesktopInput, paletteOpen]);
+  }, [sendDesktopInput]);
 
   // Desktop keyboard handler
   const handleDesktopKey = useCallback((e: KeyboardEvent, sid: string, signal: AbortSignal) => {
     // Intercept all keyboard events when command palette is open.
-    if (paletteOpen) return;
+    if (paletteOpenRef.current) return;
     e.preventDefault();
     const modifiers: string[] = [];
     if (e.ctrlKey) modifiers.push('ctrl');
@@ -994,7 +996,7 @@ export default function App() {
         sendDesktopInput(sid, { type: 'key_tap', key, modifiers }, signal);
       }
     }
-  }, [sendDesktopInput, paletteOpen]);
+  }, [sendDesktopInput]);
 
   const toggleFullscreen = useCallback(() => {
     if (document.fullscreenElement) {
@@ -2036,6 +2038,9 @@ export default function App() {
                     if (e.key === 'Escape') {
                       e.preventDefault();
                       closeTextEditor();
+                    } else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+                      e.preventDefault();
+                      sendTextToDesktop();
                     }
                   }}
                   placeholder="Type text to send to the remote desktop..."
@@ -2047,19 +2052,19 @@ export default function App() {
                     fontSize: '0.875rem',
                     lineHeight: 1.5,
                     border: '1px solid',
-                    borderColor: 'rgba(0, 0, 0, 0.23)',
+                    borderColor: theme.palette.divider,
                     borderRadius: 4,
                     resize: 'vertical',
                     outline: 'none',
                     boxSizing: 'border-box',
-                    backgroundColor: '#1e1e2e',
-                    color: '#cdd6f4',
+                    backgroundColor: theme.palette.background.default,
+                    color: theme.palette.text.primary,
                   }}
-                  onFocus={(e) => { e.target.style.borderColor = '#1976d2'; }}
-                  onBlur={(e) => { e.target.style.borderColor = 'rgba(0, 0, 0, 0.23)'; }}
+                  onFocus={(e) => { e.target.style.borderColor = theme.palette.primary.main; }}
+                  onBlur={(e) => { e.target.style.borderColor = theme.palette.divider; }}
                 />
                 <Typography variant="caption" color="text.secondary" sx={{ mt: 0.5, display: 'block' }}>
-                  Enter adds a new line. Click Send to type the text on the remote desktop.
+                  ⌘/Ctrl+Enter to send • Enter for new line • <strong>Esc</strong> to close
                 </Typography>
               </Box>
               <Box sx={{ px: 2, py: 1.5, borderTop: 1, borderColor: 'divider', display: 'flex', justifyContent: 'flex-end', gap: 1 }}>
