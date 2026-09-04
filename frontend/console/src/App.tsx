@@ -1049,23 +1049,28 @@ export default function App() {
 
     // Normalize line endings and cap total size
     const text = raw.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
-    const MAX_SEND_TEXT_LENGTH = 4096;
-    if (text.length > MAX_SEND_TEXT_LENGTH) {
-      console.warn(`sendTextToDesktop: text truncated from ${text.length} to ${MAX_SEND_TEXT_LENGTH} chars`);
+    const MAX_SEND_TEXT_CHARS = 4096;
+    if (text.length > MAX_SEND_TEXT_CHARS) {
+      console.warn(`sendTextToDesktop: text truncated from ${text.length} to ${MAX_SEND_TEXT_CHARS} chars`);
     }
-    const capped = text.slice(0, MAX_SEND_TEXT_LENGTH);
+    const capped = text.slice(0, MAX_SEND_TEXT_CHARS);
 
     const encoder = new TextEncoder();
     const lines = capped.split('\n');
     for (let i = 0; i < lines.length; i++) {
+      if (abort.signal.aborted) break;
       const line = lines[i];
       if (line.length > 0) {
         // Chunk by UTF-8 byte length to fit ValidateText's 256-byte limit.
+        // Use 252-byte chunks (not 256) to leave headroom for TextDecoder's
+        // stream buffering: an incomplete multi-byte sequence at a chunk
+        // boundary is prepended to the next chunk's decoded output, which
+        // could otherwise push the re-encoded length above 256 bytes.
         // Fresh decoder per line to avoid cross-line state leakage.
         const decoder = new TextDecoder();
         const encoded = encoder.encode(line);
-        for (let j = 0; j < encoded.length; j += 256) {
-          const chunkBytes = encoded.slice(j, Math.min(j + 256, encoded.length));
+        for (let j = 0; j < encoded.length; j += 252) {
+          const chunkBytes = encoded.slice(j, Math.min(j + 252, encoded.length));
           const chunk = decoder.decode(chunkBytes, { stream: true });
           if (chunk) {
             await sendDesktopInput(sid, { type: 'type_text', text: chunk }, abort.signal);
