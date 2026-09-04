@@ -808,6 +808,8 @@ export default function App() {
       clearTimeout(desktopTooltipTimerRef.current);
       desktopTooltipTimerRef.current = null;
     }
+    setPaletteOpen(false);
+    metaDownRef.current = false;
   }, []);
 
   const disconnectDesktop = useCallback(() => {
@@ -1014,8 +1016,9 @@ export default function App() {
       const target = e.target as HTMLElement;
       if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT') return;
 
-      // Command palette: meta key toggle (Cmd on macOS, Ctrl on others)
-      const isMetaKey = e.key === 'Meta' || (e.key === 'Control' && !e.metaKey);
+      // Command palette: meta key toggle (Cmd on macOS, Ctrl on non-Mac)
+      const isMac = navigator.platform.includes('Mac');
+      const isMetaKey = e.key === 'Meta' || (e.key === 'Control' && !isMac);
       if (isMetaKey) {
         e.preventDefault();
         if (!metaDownRef.current) {
@@ -1044,7 +1047,8 @@ export default function App() {
     };
 
     const keyUpHandler = (e: KeyboardEvent) => {
-      if (e.key === 'Meta' || e.key === 'Control') {
+      const isMac = navigator.platform.includes('Mac');
+      if (e.key === 'Meta' || (e.key === 'Control' && !isMac)) {
         metaDownRef.current = false;
       }
     };
