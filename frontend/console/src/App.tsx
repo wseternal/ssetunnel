@@ -48,6 +48,7 @@ import DesktopWindowsIcon from '@mui/icons-material/DesktopWindows';
 import FullscreenIcon from '@mui/icons-material/Fullscreen';
 import FullscreenExitIcon from '@mui/icons-material/FullscreenExit';
 import ZoomInIcon from '@mui/icons-material/ZoomIn';
+import KeyboardIcon from '@mui/icons-material/Keyboard';
 import { Terminal, type IDisposable } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
@@ -550,6 +551,7 @@ export default function App() {
 
   const connectShell = useCallback(async (agentID: string, reattachId?: string) => {
     if (!agentID) return;
+    setShellPaletteOpen(false); // defensive: ensure palette closed before new connection
 
     // Disconnect any existing shell first.
     if (shellAbortRef.current) {
@@ -1100,6 +1102,18 @@ export default function App() {
     }
   }, [textEditorContent, desktopSessionId, sendDesktopInput]);
 
+  // Shell command palette action handler
+  const handleShellPaletteAction = useCallback((actionId: string) => {
+    if (!shellConnected) return; // guard against double-disconnect
+    setShellPaletteOpen(false);
+    console.debug('[shell-palette] action:', actionId);
+    switch (actionId) {
+      case 'toggle-theme': cycleShellTheme(); break;
+      case 'toggle-fullscreen': toggleShellFullscreen(); break;
+      case 'disconnect': disconnectShell(); break;
+    }
+  }, [cycleShellTheme, toggleShellFullscreen, disconnectShell, shellConnected]);
+
   // Attach/detach keyboard listeners for desktop (includes command palette handling)
   useEffect(() => {
     if (!desktopConnected || !desktopSessionId) return;
@@ -1108,6 +1122,10 @@ export default function App() {
     const sid = desktopSessionId;
 
     const handler = (e: KeyboardEvent) => {
+      // Only handle when desktop tab is active (prevents conflict with shell handler)
+      const desktopTabIdx = isAdmin ? 5 : 4;
+      if (tabIndexRef.current !== desktopTabIdx) return;
+
       // Skip if focus is on an input, textarea, or select element
       const target = e.target as HTMLElement;
       if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT') return;
@@ -1207,8 +1225,9 @@ export default function App() {
     return () => {
       window.removeEventListener('keydown', handler);
       window.removeEventListener('keyup', keyUpHandler);
+      metaDownRef.current = false;
     };
-  }, [shellConnected, handleShellPaletteAction]);
+  }, [shellConnected, handleShellPaletteAction, isAdmin]);
 
   // Sync fullscreen state with the browser Fullscreen API.
   // Check which element is fullscreen to avoid coupling desktop and shell state.
@@ -1253,15 +1272,8 @@ export default function App() {
     });
   }, []);
 
-  // Shell command palette action handler
-  const handleShellPaletteAction = useCallback((actionId: string) => {
-    setShellPaletteOpen(false);
-    switch (actionId) {
-      case 'toggle-theme': cycleShellTheme(); break;
-      case 'toggle-fullscreen': toggleShellFullscreen(); break;
-      case 'disconnect': disconnectShell(); break;
-    }
-  }, [cycleShellTheme, toggleShellFullscreen, disconnectShell]);
+  // Close shell palette when switching tabs (prevents stale palette state)
+  useEffect(() => { setShellPaletteOpen(false); }, [tabIndex]);
 
   // Shared shell panel UI — rendered in both admin and non-admin tab layouts
   // with different tabIndex values. The outer Box stays mounted (CSS-hidden)
@@ -1301,6 +1313,17 @@ export default function App() {
                   >
                     Connect
                   </Button>
+                )}
+                {shellConnected && (
+                  <Tooltip title={`Press ${navigator.platform.includes('Mac') ? '⌘' : 'Ctrl'} to open command palette`}>
+                    <IconButton
+                      size="small"
+                      onClick={() => setShellPaletteOpen(true)}
+                      tabIndex={-1}
+                    >
+                      <KeyboardIcon fontSize="small" />
+                    </IconButton>
+                  </Tooltip>
                 )}
               </Box>
             }
