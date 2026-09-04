@@ -1220,20 +1220,24 @@ export default function App() {
     }
   }, [cycleShellTheme, toggleShellFullscreen, disconnectShell, shellConnected]);
 
-  // Shell command palette keyboard handler
+  // Shell command palette keyboard handler.
+  // Registered in capture phase on window so it fires BEFORE xterm.js's
+  // capture-phase keydown listener on its hidden textarea. xterm calls
+  // stopPropagation() on modifier keys (Meta, Ctrl), which blocks our
+  // bubble-phase listeners on window from ever seeing the event. By using
+  // capture phase here, we intercept meta/palette keys early and call
+  // stopPropagation() to also prevent xterm from processing them.
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       // Only handle when shell tab is active (prevents conflict with desktop handler)
       const shellTabIdx = isAdmin ? 4 : 3;
       if (tabIndexRef.current !== shellTabIdx || !shellConnected) return;
 
-      const target = e.target as HTMLElement;
-      if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT') return;
-
       const isMac = navigator.platform.includes('Mac');
       const isMetaKey = e.key === 'Meta' || (e.key === 'Control' && !isMac);
       if (isMetaKey) {
         e.preventDefault();
+        e.stopPropagation(); // prevent xterm from receiving the meta key
         if (!metaDownRef.current) {
           metaDownRef.current = true;
           setShellPaletteOpen(prev => !prev);
@@ -1243,6 +1247,7 @@ export default function App() {
 
       if (shellPaletteOpenRef.current) {
         e.preventDefault();
+        e.stopPropagation(); // prevent xterm from processing palette shortcuts
         if (e.key === 'Escape') {
           setShellPaletteOpen(false);
           return;
@@ -1254,6 +1259,7 @@ export default function App() {
         }
         return;
       }
+      // Non-meta, non-palette keys: let the event propagate to xterm normally.
     };
 
     const keyUpHandler = (e: KeyboardEvent) => {
@@ -1263,11 +1269,12 @@ export default function App() {
       }
     };
 
-    window.addEventListener('keydown', handler);
-    window.addEventListener('keyup', keyUpHandler);
+    // Capture phase: fires before xterm's capture listener on the textarea.
+    window.addEventListener('keydown', handler, true);
+    window.addEventListener('keyup', keyUpHandler, true);
     return () => {
-      window.removeEventListener('keydown', handler);
-      window.removeEventListener('keyup', keyUpHandler);
+      window.removeEventListener('keydown', handler, true);
+      window.removeEventListener('keyup', keyUpHandler, true);
       metaDownRef.current = false;
     };
   }, [shellConnected, handleShellPaletteAction, isAdmin]);
