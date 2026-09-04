@@ -48,7 +48,6 @@ import DesktopWindowsIcon from '@mui/icons-material/DesktopWindows';
 import FullscreenIcon from '@mui/icons-material/Fullscreen';
 import FullscreenExitIcon from '@mui/icons-material/FullscreenExit';
 import ZoomInIcon from '@mui/icons-material/ZoomIn';
-import PaletteIcon from '@mui/icons-material/Palette';
 import { Terminal, type IDisposable } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
@@ -231,6 +230,7 @@ export default function App() {
   const [password, setPassword] = useState('');
   const [totpCode, setTotpCode] = useState('');
   const [tabIndex, setTabIndex] = useState(0);
+  const tabIndexRef = useRef(0); // tracks active tab for keyboard handlers (avoids stale closures)
   const [sessions, setSessions] = useState<Session[]>([]);
   const [users, setUsers] = useState<User[]>([]);
   const [agents, setAgents] = useState<AgentConfig[]>([]);
@@ -325,6 +325,14 @@ export default function App() {
   // Keep paletteOpenRef in sync so the keyboard handler can read
   // palette state without re-attaching listeners on every toggle.
   useEffect(() => { paletteOpenRef.current = paletteOpen; }, [paletteOpen]);
+
+  // Shell command palette state
+  const [shellPaletteOpen, setShellPaletteOpen] = useState(false);
+  const shellPaletteOpenRef = useRef(false);
+  useEffect(() => { shellPaletteOpenRef.current = shellPaletteOpen; }, [shellPaletteOpen]);
+
+  // Keep tabIndexRef in sync so keyboard handlers can check active tab without re-registering.
+  useEffect(() => { tabIndexRef.current = tabIndex; }, [tabIndex]);
 
   // Text editor state (Send Text command palette action)
   const [textEditorOpen, setTextEditorOpen] = useState(false);
@@ -531,6 +539,7 @@ export default function App() {
     if (xtermRef.current) {
       xtermRef.current.writeln('\r\n\x1b[33m[Disconnected]\x1b[0m');
     }
+    setShellPaletteOpen(false);
     setShellConnected(false);
     setShellSessionId('');
     setShellPersistentId('');
@@ -768,6 +777,7 @@ export default function App() {
         resizeDisposableRef.current.dispose();
         resizeDisposableRef.current = null;
       }
+      setShellPaletteOpen(false);
       setShellConnected(false);
       setShellSessionId('');
       setShellPersistentId('');
@@ -1149,6 +1159,57 @@ export default function App() {
     };
   }, [desktopConnected, desktopSessionId, handleDesktopKey, handlePaletteAction]);
 
+  // Shell command palette keyboard handler
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      // Only handle when shell tab is active (prevents conflict with desktop handler)
+      const shellTabIdx = isAdmin ? 4 : 3;
+      if (tabIndexRef.current !== shellTabIdx || !shellConnected) return;
+
+      const target = e.target as HTMLElement;
+      if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT') return;
+
+      const isMac = navigator.platform.includes('Mac');
+      const isMetaKey = e.key === 'Meta' || (e.key === 'Control' && !isMac);
+      if (isMetaKey) {
+        e.preventDefault();
+        if (!metaDownRef.current) {
+          metaDownRef.current = true;
+          setShellPaletteOpen(prev => !prev);
+        }
+        return;
+      }
+
+      if (shellPaletteOpenRef.current) {
+        e.preventDefault();
+        if (e.key === 'Escape') {
+          setShellPaletteOpen(false);
+          return;
+        }
+        switch (e.key.toLowerCase()) {
+          case 't': handleShellPaletteAction('toggle-theme'); return;
+          case 'f': handleShellPaletteAction('toggle-fullscreen'); return;
+          case 'q': handleShellPaletteAction('disconnect'); return;
+        }
+        return;
+      }
+    };
+
+    const keyUpHandler = (e: KeyboardEvent) => {
+      const isMac = navigator.platform.includes('Mac');
+      if (e.key === 'Meta' || (e.key === 'Control' && !isMac)) {
+        metaDownRef.current = false;
+      }
+    };
+
+    window.addEventListener('keydown', handler);
+    window.addEventListener('keyup', keyUpHandler);
+    return () => {
+      window.removeEventListener('keydown', handler);
+      window.removeEventListener('keyup', keyUpHandler);
+    };
+  }, [shellConnected, handleShellPaletteAction]);
+
   // Sync fullscreen state with the browser Fullscreen API.
   // Check which element is fullscreen to avoid coupling desktop and shell state.
   useEffect(() => {
@@ -1192,6 +1253,16 @@ export default function App() {
     });
   }, []);
 
+  // Shell command palette action handler
+  const handleShellPaletteAction = useCallback((actionId: string) => {
+    setShellPaletteOpen(false);
+    switch (actionId) {
+      case 'toggle-theme': cycleShellTheme(); break;
+      case 'toggle-fullscreen': toggleShellFullscreen(); break;
+      case 'disconnect': disconnectShell(); break;
+    }
+  }, [cycleShellTheme, toggleShellFullscreen, disconnectShell]);
+
   // Shared shell panel UI — rendered in both admin and non-admin tab layouts
   // with different tabIndex values. The outer Box stays mounted (CSS-hidden)
   // so the xterm instance and SSE read loop survive tab switches.
@@ -1231,24 +1302,6 @@ export default function App() {
                     Connect
                   </Button>
                 )}
-                <Tooltip title={`Theme: ${SHELL_THEMES[shellThemeKey].label}`}>
-                  <IconButton
-                    size="small"
-                    onClick={cycleShellTheme}
-                    tabIndex={-1}
-                  >
-                    <PaletteIcon fontSize="small" />
-                  </IconButton>
-                </Tooltip>
-                <Tooltip title={isShellFullscreen ? 'Exit fullscreen' : 'Fullscreen'}>
-                  <IconButton
-                    size="small"
-                    onClick={toggleShellFullscreen}
-                    tabIndex={-1}
-                  >
-                    {isShellFullscreen ? <FullscreenExitIcon fontSize="small" /> : <FullscreenIcon fontSize="small" />}
-                  </IconButton>
-                </Tooltip>
               </Box>
             }
           />
@@ -1277,6 +1330,76 @@ export default function App() {
         <Typography variant="caption" color="text.secondary" sx={{ mt: 1, display: 'block' }}>
           Session: {shellSessionId} | Agent: {shellAgent}{shellReattached ? ' (reattached)' : ''}
         </Typography>
+      )}
+      {/* Shell command palette overlay */}
+      {shellPaletteOpen && shellConnected && (
+        <Box
+          sx={{
+            position: 'absolute',
+            inset: 0,
+            zIndex: 20,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            bgcolor: 'rgba(0, 0, 0, 0.5)',
+          }}
+          onClick={() => setShellPaletteOpen(false)}
+        >
+          <Paper
+            elevation={8}
+            sx={{
+              minWidth: 260,
+              borderRadius: 2,
+              overflow: 'hidden',
+              bgcolor: 'background.paper',
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <Box sx={{ px: 2, py: 1.25, borderBottom: 1, borderColor: 'divider' }}>
+              <Typography variant="overline" color="text.secondary" sx={{ letterSpacing: 1.5 }}>
+                Command Palette
+              </Typography>
+            </Box>
+            {[
+              { id: 'toggle-theme', label: 'Toggle Theme', shortcut: 'T' },
+              { id: 'toggle-fullscreen', label: 'Toggle Fullscreen', shortcut: 'F' },
+              { id: 'disconnect', label: 'Disconnect', shortcut: 'Q' },
+            ].map((item) => (
+              <Box
+                key={item.id}
+                onClick={() => handleShellPaletteAction(item.id)}
+                sx={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  px: 2,
+                  py: 1.25,
+                  cursor: 'pointer',
+                  '&:hover': { bgcolor: 'action.hover' },
+                  transition: 'background-color 0.1s',
+                }}
+              >
+                <Typography variant="body2">{item.label}</Typography>
+                <Chip
+                  label={item.shortcut}
+                  size="small"
+                  sx={{
+                    fontFamily: 'monospace',
+                    fontWeight: 600,
+                    minWidth: 28,
+                    height: 22,
+                    fontSize: '0.75rem',
+                  }}
+                />
+              </Box>
+            ))}
+            <Box sx={{ px: 2, py: 1, borderTop: 1, borderColor: 'divider' }}>
+              <Typography variant="caption" color="text.secondary">
+                Press <strong>Esc</strong> to close • <strong>{navigator.platform.includes('Mac') ? '⌘' : 'Ctrl'}</strong> to toggle
+              </Typography>
+            </Box>
+          </Paper>
+        </Box>
       )}
     </Box>
   );
