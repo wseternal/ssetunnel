@@ -1054,17 +1054,26 @@ export default function App() {
     const capped = text.slice(0, MAX_SEND_TEXT_LENGTH);
 
     const encoder = new TextEncoder();
-    const decoder = new TextDecoder();
     const lines = capped.split('\n');
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i];
       if (line.length > 0) {
-        // Chunk by UTF-8 byte length to fit ValidateText's 256-byte limit
+        // Chunk by UTF-8 byte length to fit ValidateText's 256-byte limit.
+        // Fresh decoder per line to avoid cross-line state leakage.
+        const decoder = new TextDecoder();
         const encoded = encoder.encode(line);
         for (let j = 0; j < encoded.length; j += 256) {
           const chunkBytes = encoded.slice(j, Math.min(j + 256, encoded.length));
           const chunk = decoder.decode(chunkBytes, { stream: true });
-          await sendDesktopInput(sid, { type: 'type_text', text: chunk }, abort.signal);
+          if (chunk) {
+            await sendDesktopInput(sid, { type: 'type_text', text: chunk }, abort.signal);
+          }
+        }
+        // Flush any remaining bytes from an incomplete multi-byte
+        // sequence at the end of the last chunk.
+        const remaining = decoder.decode();
+        if (remaining) {
+          await sendDesktopInput(sid, { type: 'type_text', text: remaining }, abort.signal);
         }
       }
       // Send Enter between lines (not after the last line)
