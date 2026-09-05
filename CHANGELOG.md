@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.10.0](https://github.com/wseternal/ssetunnel/compare/v1.9.0...v1.10.0) (2026-09-05)
+
+
+### Features
+
+* **remoteapp:** add command palette with meta key trigger and refresh screenshot ([#61](https://github.com/wseternal/ssetunnel/issues/61)) ([7269082](https://github.com/wseternal/ssetunnel/commit/7269082edb5ea400dcce16f1bea5edb1a7cce5ad))
+
+
+### Bug Fixes
+
+* **console:** fix meta key not working in cloud shell when xterm has … ([#64](https://github.com/wseternal/ssetunnel/issues/64)) ([17b230d](https://github.com/wseternal/ssetunnel/commit/17b230d4378c961c2a0dd2522fbb8a1707da0b3c))
+* **console:** fix TDZ error by moving handleShellPaletteAction after its dependencies ([#63](https://github.com/wseternal/ssetunnel/issues/63)) ([ecaa324](https://github.com/wseternal/ssetunnel/commit/ecaa324bdfc3c0e2d72cabbd422a76144c95ef50))
+* **remoteapp:** add log when refresh_screenshot received at proxy ([7269082](https://github.com/wseternal/ssetunnel/commit/7269082edb5ea400dcce16f1bea5edb1a7cce5ad))
+* **remoteapp:** add refresh_screenshot no-op case in DispatchInput ([7269082](https://github.com/wseternal/ssetunnel/commit/7269082edb5ea400dcce16f1bea5edb1a7cce5ad))
+
 ## [1.9.0](https://github.com/wseternal/ssetunnel/compare/v1.8.0...v1.9.0) (2026-09-02)
 
 
