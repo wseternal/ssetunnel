@@ -1102,7 +1102,9 @@ export default function App() {
     }
   }, [textEditorContent, desktopSessionId, sendDesktopInput]);
 
-  // Attach/detach keyboard listeners for desktop (includes command palette handling)
+  // Attach/detach keyboard listeners for desktop (includes command palette handling).
+  // Uses capture phase on window for consistency with the shell handler and to
+  // future-proof against capture-phase listeners on child elements.
   useEffect(() => {
     if (!desktopConnected || !desktopSessionId) return;
     const abort = desktopAbortRef.current;
@@ -1123,6 +1125,7 @@ export default function App() {
       const isMetaKey = e.key === 'Meta' || (e.key === 'Control' && !isMac);
       if (isMetaKey) {
         e.preventDefault();
+        e.stopPropagation();
         if (!metaDownRef.current) {
           metaDownRef.current = true;
           setPaletteOpen(prev => !prev);
@@ -1133,6 +1136,7 @@ export default function App() {
       // When palette is open, handle shortcut keys
       if (paletteOpenRef.current) {
         e.preventDefault();
+        e.stopPropagation();
         if (e.key === 'Escape') {
           setPaletteOpen(false);
           return;
@@ -1156,11 +1160,11 @@ export default function App() {
       }
     };
 
-    window.addEventListener('keydown', handler);
-    window.addEventListener('keyup', keyUpHandler);
+    window.addEventListener('keydown', handler, true);
+    window.addEventListener('keyup', keyUpHandler, true);
     return () => {
-      window.removeEventListener('keydown', handler);
-      window.removeEventListener('keyup', keyUpHandler);
+      window.removeEventListener('keydown', handler, true);
+      window.removeEventListener('keyup', keyUpHandler, true);
       metaDownRef.current = false;
     };
   }, [desktopConnected, desktopSessionId, handleDesktopKey, handlePaletteAction]);
