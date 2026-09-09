@@ -296,6 +296,7 @@ export default function App() {
   const termRef = useRef<HTMLDivElement>(null);
   const shellContainerRef = useRef<HTMLDivElement>(null);
   const shellLineBufRef = useRef<string>('');
+  const shellInputPendingRef = useRef<string>('');
   const shellPersistentIdRef = useRef<string>('');
   const xtermRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
@@ -624,9 +625,14 @@ export default function App() {
       sseURL += `&reattach=${encodeURIComponent(effectiveReattachId)}`;
     }
 
-    // Set up input handler: send keystrokes via POST.
+    // Set up input handler: batch keystrokes via requestAnimationFrame
+    // and send via POST. Batching reduces HTTP request count (one flush
+    // per animation frame instead of one per onData event), preventing
+    // browser connection-pool saturation that starves TUI apps like vim
+    // of input during heavy terminal output (e.g. full-screen redraws).
     shellLineBufRef.current = '';
-    const sendInput = async (data: string) => {
+    shellInputPendingRef.current = '';
+    const trackLineInput = (data: string) => {
       // Track typed line to detect exit/logout commands.
       // Reset on line-cancel controls (Ctrl-U/Ctrl-C/etc.) so stale
       // buffer content doesn't trigger a false disconnect.
@@ -650,22 +656,41 @@ export default function App() {
           shellLineBufRef.current += ch;
         }
       }
+    };
+    const flushShellInput = async () => {
+      const data = shellInputPendingRef.current;
+      if (!data) return;
+      shellInputPendingRef.current = '';
       try {
-        await fetch('/console/api/v1/shell/connect-up', {
+        const resp = await fetch('/console/api/v1/shell/connect-up', {
           method: 'POST',
           headers: { ...authHeaders(), 'X-SSET-Session': sid },
           body: data,
           signal: abort.signal,
         });
+        if (!resp.ok && !abort.signal.aborted) {
+          term.writeln(`\x1b[31m[Input send error: ${resp.status}]\x1b[0m`);
+        }
       } catch (e) {
         if (!abort.signal.aborted) {
           term.writeln('\x1b[31m[Send error]\x1b[0m');
         }
       }
+      // Schedule next flush if more input accumulated during the POST.
+      if (shellInputPendingRef.current) {
+        requestAnimationFrame(flushShellInput);
+      }
+    };
+    const sendInput = (data: string) => {
+      trackLineInput(data);
+      shellInputPendingRef.current += data;
+      // Schedule flush on next animation frame if not already pending.
+      if (shellInputPendingRef.current === data) {
+        requestAnimationFrame(flushShellInput);
+      }
     };
 
-    // Set up input handler: send keystrokes via POST. Dispose previous
-    // handler if any (e.g., from a prior connection that wasn't cleaned up).
+    // Dispose previous handler if any (e.g., from a prior connection that wasn't cleaned up).
     if (inputDisposableRef.current) {
       inputDisposableRef.current.dispose();
     }
@@ -711,6 +736,7 @@ export default function App() {
       } else {
         term.writeln('\x1b[32m[Connected]\x1b[0m\r\n');
       }
+      term.focus();
 
       // Set up resize handler: forward xterm.js dimensions to the PTY.
       if (resizeDisposableRef.current) {
@@ -779,6 +805,7 @@ export default function App() {
         resizeDisposableRef.current.dispose();
         resizeDisposableRef.current = null;
       }
+      shellInputPendingRef.current = '';
       setShellPaletteOpen(false);
       setShellConnected(false);
       setShellSessionId('');
