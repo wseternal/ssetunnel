@@ -367,6 +367,7 @@ export default function App() {
       case 'key_toggle': return d ? `Toggle ${d}` : 'Toggle';
       case 'type_text': return d ? `Type "${d}"` : 'Type';
       case 'mouse_drag': return d ? `Drag ${d}` : 'Drag';
+      case 'refresh_screenshot': return '⟳ Refreshing…';
       default: return t;
     }
   };

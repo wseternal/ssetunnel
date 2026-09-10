@@ -43,7 +43,7 @@ Max frame size: 4 MiB (`maxFrameSize`). `WriteFrame` constructs the header and p
 `CaptureLoop(ctx, w, inputReceived <-chan struct{}, forceCapture <-chan struct{})` captures the primary display and writes timestamped JPEG screenshots as typed frames. It uses a **deferred-capture strategy**:
 
 - **`inputReceived` channel**: Every input event signals this channel, resetting a 3-second deferral timer. Buffered 1 for coalescing.
-- **`forceCapture` channel**: Triggers an immediate capture, bypassing the defer timer. Used by the command palette "Refresh Screenshot" action. Buffered 1; extra signals coalesce via non-blocking send.
+- **`forceCapture` channel**: Triggers an immediate capture, bypassing the defer timer and display-unavailable backoff. Used by the command palette "Refresh Screenshot" action. Buffered 1; extra signals coalesce via non-blocking send. A **priority pre-check** before the main select ensures forceCapture is always handled first, preventing Go's pseudo-random select from delaying it behind the defer timer.
 - **3-second deferral timer (`deferDelay`)**: Capture only fires after no input events have been received for 3 seconds. While the user is actively interacting, screenshots are suppressed to avoid uploading immediately-stale frames.
 - **Initial capture**: One screenshot on startup before entering the select loop, so the frontend receives the first frame immediately.
 - **Buffer reuse**: Single `bytes.Buffer` reused across frames (~150 KB/frame savings).
