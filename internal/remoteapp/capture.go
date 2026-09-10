@@ -165,6 +165,30 @@ func CaptureLoop(ctx context.Context, w io.Writer, inputReceived <-chan struct{}
 	}()
 
 	for {
+		// Priority: force capture bypasses defer timer and backoff.
+		// This ensures client-initiated "Refresh Screenshot" is handled
+		// immediately, even when the defer timer fires simultaneously
+		// (Go's select picks pseudo-randomly among ready cases).
+		select {
+		case <-forceCapture:
+			writeLog("info", "force capture requested")
+			transient, err := captureAndSend()
+			if err != nil {
+				return err
+			}
+			if transient {
+				backoffDeadline = time.Now().Add(displayOffBackoff)
+				drainTimer(deferTimer)
+				deferTimer.Reset(displayOffBackoff)
+			} else {
+				backoffDeadline = time.Time{}
+				drainTimer(deferTimer)
+				deferTimer.Reset(deferDelay)
+			}
+			continue
+		default:
+		}
+
 		select {
 		case <-ctx.Done():
 			writeLog("info", "capture stopped (context canceled)")
@@ -176,27 +200,6 @@ func CaptureLoop(ctx context.Context, w io.Writer, inputReceived <-chan struct{}
 			drainTimer(deferTimer)
 			backoffDeadline = time.Time{} // cancel any active backoff
 			deferTimer.Reset(deferDelay)
-		case <-forceCapture:
-			// Immediate capture requested (e.g. command palette
-			// "Refresh Screenshot"). Capture now regardless of
-			// the defer timer, then reset the timer so the
-			// normal deferred strategy continues.
-			if !time.Now().Before(backoffDeadline) {
-				writeLog("info", "force capture requested")
-				transient, err := captureAndSend()
-				if err != nil {
-					return err
-				}
-				if transient {
-					backoffDeadline = time.Now().Add(displayOffBackoff)
-					drainTimer(deferTimer)
-					deferTimer.Reset(displayOffBackoff)
-				} else {
-					backoffDeadline = time.Time{}
-					drainTimer(deferTimer)
-					deferTimer.Reset(deferDelay)
-				}
-			}
 		case <-deferTimer.C:
 			// Timer fired: check whether we should capture now or
 			// wait longer due to display-unavailable backoff.
