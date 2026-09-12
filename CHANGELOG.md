@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.10.1](https://github.com/wseternal/ssetunnel/compare/v1.10.0...v1.10.1) (2026-09-12)
+
+
+### Bug Fixes
+
+* **console:** batch shell input via rAF and detect HTTP errors ([#67](https://github.com/wseternal/ssetunnel/issues/67)) ([2fcc0c5](https://github.com/wseternal/ssetunnel/commit/2fcc0c535256aeda73b40f5deb651d343d5b3c72))
+* **console:** remove Google Fonts link to fix startup in China ([#65](https://github.com/wseternal/ssetunnel/issues/65)) ([1552b5e](https://github.com/wseternal/ssetunnel/commit/1552b5eec7f71b8dd723e336987ac1bf382fbb1d))
+* **remoteapp:** prioritize force capture and add refresh tooltip ([#68](https://github.com/wseternal/ssetunnel/issues/68)) ([ac2c5f1](https://github.com/wseternal/ssetunnel/commit/ac2c5f120752fcebae599e8b8f229f6681387343))
+
 ## [1.10.0](https://github.com/wseternal/ssetunnel/compare/v1.9.0...v1.10.0) (2026-09-05)
 
 
