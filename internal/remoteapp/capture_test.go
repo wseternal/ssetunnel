@@ -4,7 +4,6 @@ package remoteapp
 
 import (
 	"testing"
-	"time"
 )
 
 // TestForceCaptureChannelCoalescing verifies that a buffered-1 channel
@@ -55,65 +54,49 @@ func TestForceCaptureChannelCoalescing(t *testing.T) {
 	}
 }
 
-// TestForceCapturePriorityOverDeferTimer verifies that the priority
-// pre-check pattern used in CaptureLoop ensures forceCapture is always
-// handled before the defer timer, even when both channels are ready
-// simultaneously. This prevents the pseudo-random select from delaying
-// a client-initiated "Refresh Screenshot" behind a deferred capture.
-func TestForceCapturePriorityOverDeferTimer(t *testing.T) {
+// TestForceCaptureDrainsImmediately verifies that the forceCapture channel
+// can be drained immediately by a select, matching the simplified
+// CaptureLoop pattern where forceCapture is the only non-ctx channel.
+func TestForceCaptureDrainsImmediately(t *testing.T) {
 	t.Parallel()
 
 	forceCapture := make(chan struct{}, 1)
-	deferCh := make(chan struct{}, 1)
 
-	// Signal both channels so both are ready simultaneously.
+	// Signal forceCapture.
 	forceCapture <- struct{}{}
-	deferCh <- struct{}{}
 
-	// Priority pre-check (mirrors the CaptureLoop pattern).
-	forceHandled := false
+	// Should be immediately drainable.
 	select {
 	case <-forceCapture:
-		forceHandled = true
+		// ok
 	default:
+		t.Fatal("forceCapture should be immediately drainable")
 	}
 
-	if !forceHandled {
-		t.Fatal("priority pre-check should have drained forceCapture")
-	}
-
-	// After the pre-check, forceCapture is drained.
-	// The main select should NOT see forceCapture.
+	// After draining, channel should be empty.
 	select {
 	case <-forceCapture:
-		t.Fatal("forceCapture should have been drained by priority pre-check")
-	case <-deferCh:
-		// ok — defer channel is still available
+		t.Fatal("forceCapture should be empty after drain")
 	default:
-		t.Fatal("deferCh should still be ready")
+		// ok
 	}
 }
 
-// TestForceCapturePriorityDuringBackoff verifies that the priority
-// pre-check processes forceCapture even during display-unavailable
-// backoff, unlike the old code which silently dropped it.
-func TestForceCapturePriorityDuringBackoff(t *testing.T) {
+// TestForceCaptureAlwaysResponsive verifies that forceCapture is always
+// processed regardless of any prior state, matching the simplified
+// CaptureLoop where every forceCapture signal triggers an immediate
+// screenshot.
+func TestForceCaptureAlwaysResponsive(t *testing.T) {
 	t.Parallel()
 
 	forceCapture := make(chan struct{}, 1)
 	forceCapture <- struct{}{}
 
-	// Simulate active backoff deadline. In the old code, this would
-	// cause force capture to be silently skipped.
-	_ = time.Now().Add(time.Hour) // backoffDeadline
-
-	// The priority pre-check does NOT check backoffDeadline —
-	// it always processes force capture. This is the fix: the
-	// old code skipped force capture during backoff.
+	// forceCapture should always be processable.
 	select {
 	case <-forceCapture:
-		// ok — force capture processed despite active backoff
+		// ok — force capture processed
 	default:
-		t.Fatal("forceCapture should have been processed regardless of backoff")
+		t.Fatal("forceCapture should be processed regardless of state")
 	}
 }

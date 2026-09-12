@@ -40,17 +40,16 @@ Max frame size: 4 MiB (`maxFrameSize`). `WriteFrame` constructs the header and p
 
 ## Capture Loop
 
-`CaptureLoop(ctx, w, inputReceived <-chan struct{}, forceCapture <-chan struct{})` captures the primary display and writes timestamped JPEG screenshots as typed frames. It uses a **deferred-capture strategy**:
+`CaptureLoop(ctx, w, forceCapture <-chan struct{})` captures the primary display and writes timestamped JPEG screenshots as typed frames. Capture strategy:
 
-- **`inputReceived` channel**: Every input event signals this channel, resetting a 3-second deferral timer. Buffered 1 for coalescing.
-- **`forceCapture` channel**: Triggers an immediate capture, bypassing the defer timer and display-unavailable backoff. Used by the command palette "Refresh Screenshot" action. Buffered 1; extra signals coalesce via non-blocking send. A **priority pre-check** before the main select ensures forceCapture is always handled first, preventing Go's pseudo-random select from delaying it behind the defer timer.
-- **3-second deferral timer (`deferDelay`)**: Capture only fires after no input events have been received for 3 seconds. While the user is actively interacting, screenshots are suppressed to avoid uploading immediately-stale frames.
 - **Initial capture**: One screenshot on startup before entering the select loop, so the frontend receives the first frame immediately.
+- **`forceCapture` channel**: Triggers an immediate capture when signaled. Used by the command palette "Refresh Screenshot" action. Buffered 1; extra signals coalesce via non-blocking send.
+- **No automatic re-capture**: After the initial screenshot, captures only occur when `forceCapture` is signaled. No timers, no deferred capture.
 - **Buffer reuse**: Single `bytes.Buffer` reused across frames (~150 KB/frame savings).
 - **Circuit breaker**: After `maxConsecutiveCaptureFails` (10) consecutive non-transient failures, returns an error.
-- **Display-unavailable backoff**: When `isDisplayUnavailable()` returns true (monitor off/sleeping), the loop retries every 30 s (`displayOffBackoff`) instead of the 3 s deferral, resets `consecutiveFails`, and does NOT trip the circuit breaker. On macOS (CGO) this queries CoreGraphics `CGDisplayIsActive`; on other platforms (or darwin with `-tags purego`) it matches the robotgo error string (`robotgoCaptureErrSubstr`). Input events cancel active backoff.
+- **Display-unavailable handling**: When `isDisplayUnavailable()` returns true (monitor off/sleeping), `captureAndSend` returns `transient=true` and resets `consecutiveFails` without tripping the circuit breaker. On macOS (CGO) this queries CoreGraphics `CGDisplayIsActive`; on other platforms (or darwin with `-tags purego`) it matches the robotgo error string (`robotgoCaptureErrSubstr`). Transient failures are logged but do not schedule a retry — the next capture occurs on the next manual refresh.
 - **Pre-flight permission check**: `checkScreenAccess()` is called before the first capture. On macOS (CGO) it uses `CGPreflightScreenCaptureAccess()` and fails immediately with an actionable error directing the user to System Settings → Privacy & Security → Screen Recording. On other platforms and `-tags purego`, it is a no-op.
-- **JPEG quality**: 75 provides crisp text rendering at ~100–300 KB per 1080p frame. The deferred capture strategy (3 s idle) keeps aggregate bandwidth acceptable.
+- **JPEG quality**: 75 provides crisp text rendering at ~100–300 KB per 1080p frame.
 
 Each screenshot payload is prefixed with an 8-byte big-endian Unix-millisecond timestamp (`ScreenshotTimestampSize = 8`). The server parses and strips this prefix before forwarding JPEG to the frontend, and sends a `FrameScreenshotAck` back to the agent.
 
@@ -89,8 +88,8 @@ Typed error types: `InvalidKeyError`, `InvalidModifierError`, `TextTooLongError`
 `ProxyRemoteApp(stream net.Conn)` orchestrates:
 1. Wrap stream in a `lockedWriter` for concurrent-safe frame writes
 2. Send `FrameScreenInfo` with initial screen dimensions
-3. Create `inputReceived` channel (buffered 1) and `forceCapture` channel (buffered 1), start `CaptureLoop` goroutine
-4. Main loop: `ReadFrame` → dispatch input events; for every `FrameInput`, send `FrameInputAck` back with event type and detail; signal `inputReceived` on all input events (deferring capture); intercept `refresh_screenshot` control events to signal `forceCapture` and send `InputAck` without dispatching to robotgo; handle `FrameScreenshotAck` from server
+3. Create `forceCapture` channel (buffered 1), start `CaptureLoop` goroutine
+4. Main loop: `ReadFrame` → dispatch input events; for every `FrameInput`, send `FrameInputAck` back with event type and detail; intercept `refresh_screenshot` control events to signal `forceCapture` and send `InputAck` without dispatching to robotgo; handle `FrameScreenshotAck` from server
 5. On stream close: cancel capture, `ReleaseAllInputs`, wait for capture goroutine, emit "session ended" log event, close `lockedWriter`, close stream
 
 ## Concurrency Model
@@ -118,7 +117,7 @@ Agent-side `lockedWriter.writeLogEvent` and server-side `writeSSELogEvent` produ
 
 ## Input Acknowledgment Flow
 
-When the agent receives a `FrameInput` from the server, it sends a `FrameInputAck` back containing the event type and a brief detail string. The server forwards this as an SSE `event: inputack` named event to the console frontend, which displays a live tooltip overlay on the current screenshot. This provides immediate visual feedback that the agent received the user's input, even before the next screenshot arrives (which is deferred by 3 seconds while input is flowing).
+When the agent receives a `FrameInput` from the server, it sends a `FrameInputAck` back containing the event type and a brief detail string. The server forwards this as an SSE `event: inputack` named event to the console frontend, which displays a live tooltip overlay on the current screenshot. This provides immediate visual feedback that the agent received the user's input.
 
 ## Rules
 * **lockedWriter for concurrent writes**: All agent→server frame writes go through a `lockedWriter` that serializes access with a mutex. The capture goroutine and main goroutine share the same `lockedWriter`.
