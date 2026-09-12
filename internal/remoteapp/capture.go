@@ -61,8 +61,8 @@ func CaptureLoop(ctx context.Context, w io.Writer, forceCapture <-chan struct{})
 
 	// captureAndSend captures a screenshot and writes it as a JPEG frame.
 	// Returns (isTransient=true, err=nil) when capture fails due to the
-	// display being unavailable (monitor off/sleeping) — the caller should
-	// back off and retry without tripping the circuit breaker.
+	// display being unavailable (monitor off/sleeping) — the caller may
+	// log the event without tripping the circuit breaker.
 	// Returns (false, err) when the circuit breaker trips or a non-transient
 	// write/encode error occurs.
 	captureAndSend := func() (bool, error) {
@@ -71,7 +71,7 @@ func CaptureLoop(ctx context.Context, w io.Writer, forceCapture <-chan struct{})
 			if isDisplayUnavailable(err) {
 				consecutiveFails = 0 // display-off invalidates prior fail history
 				log.Printf("remoteapp: capture: display unavailable: %v", err)
-				writeLog("warn", fmt.Sprintf("display unavailable (will retry): %v", err))
+				writeLog("warn", fmt.Sprintf("display unavailable (refresh to retry): %v", err))
 				return true, nil
 			}
 			consecutiveFails++
