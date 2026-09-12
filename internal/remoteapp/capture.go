@@ -15,47 +15,29 @@ import (
 )
 
 // jpegQuality controls the JPEG encoding quality (1–100).
-// 75 provides crisp text rendering at ~100–300 KB per 1080p frame
-// (~1.5–2× the previous quality-50 baseline). The deferred capture
-// strategy (3 s idle) keeps aggregate bandwidth acceptable.
+// 75 provides crisp text rendering at ~100–300 KB per 1080p frame.
 const jpegQuality = 75
 
 // maxConsecutiveCaptureFails is the number of consecutive capture failures
 // before the loop gives up and returns an error (circuit breaker).
 const maxConsecutiveCaptureFails = 10
 
-// deferDelay is the minimum idle period before capturing. While input events
-// are flowing, each one resets this timer; capture only fires after the
-// stream has been quiet for deferDelay. This avoids uploading screenshots
-// that will be immediately stale because more input is in flight.
-const deferDelay = 3 * time.Second
-
-// displayOffBackoff is the retry interval when capture repeatedly fails due
-// to the display being unavailable (e.g. monitor off or sleeping). This is
-// longer than deferDelay to reduce log noise while remaining responsive
-// when the display comes back.
-const displayOffBackoff = 30 * time.Second
-
 // CaptureLoop captures the primary display and writes JPEG-encoded
 // screenshots as typed frames to w. It runs until ctx is canceled or w
 // returns an error. Log events are also written to w for observability.
 //
-// Capture uses a deferred-capture strategy: every input event signals the
-// inputReceived channel, which resets a deferDelay timer. A screenshot is
-// taken only after the timer expires (i.e., no input for deferDelay). This
-// avoids uploading screenshots that will be immediately stale while the
-// user is actively interacting.
+// Capture strategy: an initial screenshot is taken on startup so the
+// frontend receives the first frame immediately. After that, screenshots
+// are only taken when the forceCapture channel is signaled (manual
+// refresh from the command palette). No automatic re-capture occurs.
 //
-// The forceCapture channel triggers an immediate capture when signaled,
-// bypassing the defer timer. This supports client-initiated "refresh"
-// actions from the command palette.
-//
-// An initial capture is performed on startup so the frontend receives the
-// first frame immediately.
+// The forceCapture channel triggers an immediate capture when signaled.
+// This supports client-initiated "refresh" actions from the command
+// palette.
 //
 // If w is a *lockedWriter (as used by ProxyRemoteApp), all frame and log
 // writes are mutex-guarded for concurrent safety.
-func CaptureLoop(ctx context.Context, w io.Writer, inputReceived <-chan struct{}, forceCapture <-chan struct{}) error {
+func CaptureLoop(ctx context.Context, w io.Writer, forceCapture <-chan struct{}) error {
 	// Detect lockedWriter for mutex-guarded writes.
 	lw, _ := w.(*lockedWriter)
 
@@ -79,8 +61,8 @@ func CaptureLoop(ctx context.Context, w io.Writer, inputReceived <-chan struct{}
 
 	// captureAndSend captures a screenshot and writes it as a JPEG frame.
 	// Returns (isTransient=true, err=nil) when capture fails due to the
-	// display being unavailable (monitor off/sleeping) — the caller should
-	// back off and retry without tripping the circuit breaker.
+	// display being unavailable (monitor off/sleeping) — the caller may
+	// log the event without tripping the circuit breaker.
 	// Returns (false, err) when the circuit breaker trips or a non-transient
 	// write/encode error occurs.
 	captureAndSend := func() (bool, error) {
@@ -89,7 +71,7 @@ func CaptureLoop(ctx context.Context, w io.Writer, inputReceived <-chan struct{}
 			if isDisplayUnavailable(err) {
 				consecutiveFails = 0 // display-off invalidates prior fail history
 				log.Printf("remoteapp: capture: display unavailable: %v", err)
-				writeLog("warn", fmt.Sprintf("display unavailable (will retry): %v", err))
+				writeLog("warn", fmt.Sprintf("display unavailable (refresh to retry): %v", err))
 				return true, nil
 			}
 			consecutiveFails++
@@ -117,17 +99,6 @@ func CaptureLoop(ctx context.Context, w io.Writer, inputReceived <-chan struct{}
 		return false, writeScreenshot(buf.Bytes())
 	}
 
-	// drainTimer stops the timer and drains its channel if it already fired.
-	// Safe to call regardless of timer state.
-	drainTimer := func(t *time.Timer) {
-		if !t.Stop() {
-			select {
-			case <-t.C:
-			default:
-			}
-		}
-	}
-
 	// Pre-flight: verify screen recording permission on platforms that
 	// support the check. On macOS (CGO) this calls CGPreflightScreenCaptureAccess;
 	// on other platforms the hook is a no-op.
@@ -136,92 +107,24 @@ func CaptureLoop(ctx context.Context, w io.Writer, inputReceived <-chan struct{}
 		return err
 	}
 
-	writeLog("info", fmt.Sprintf("capture started (deferred, %v idle)", deferDelay))
-
-	// backoffDeadline tracks the earliest time the next retry is allowed
-	// when the display is unavailable. Zero value means no active backoff.
-	var backoffDeadline time.Time
+	writeLog("info", "capture started (manual refresh only)")
 
 	// Initial capture on startup so the frontend receives the first frame.
 	if transient, err := captureAndSend(); err != nil {
 		return err
 	} else if transient {
-		writeLog("info", "display unavailable at startup, will retry with backoff")
-		backoffDeadline = time.Now().Add(displayOffBackoff)
+		writeLog("info", "display unavailable at startup, will retry on next manual refresh")
 	}
-
-	initialDelay := deferDelay
-	if !backoffDeadline.IsZero() {
-		initialDelay = displayOffBackoff
-	}
-	deferTimer := time.NewTimer(initialDelay)
-	defer func() {
-		if !deferTimer.Stop() {
-			select {
-			case <-deferTimer.C:
-			default:
-			}
-		}
-	}()
 
 	for {
-		// Priority: force capture bypasses defer timer and backoff.
-		// This ensures client-initiated "Refresh Screenshot" is handled
-		// immediately, even when the defer timer fires simultaneously
-		// (Go's select picks pseudo-randomly among ready cases).
-		select {
-		case <-forceCapture:
-			writeLog("info", "force capture requested")
-			transient, err := captureAndSend()
-			if err != nil {
-				return err
-			}
-			if transient {
-				backoffDeadline = time.Now().Add(displayOffBackoff)
-				drainTimer(deferTimer)
-				deferTimer.Reset(displayOffBackoff)
-			} else {
-				backoffDeadline = time.Time{}
-				drainTimer(deferTimer)
-				deferTimer.Reset(deferDelay)
-			}
-			continue
-		default:
-		}
-
 		select {
 		case <-ctx.Done():
 			writeLog("info", "capture stopped (context canceled)")
 			return ctx.Err()
-		case <-inputReceived:
-			// Input event received: defer capture. Stop the running
-			// timer and restart it. Capture will fire only after the
-			// input stream has been quiet for deferDelay.
-			drainTimer(deferTimer)
-			backoffDeadline = time.Time{} // cancel any active backoff
-			deferTimer.Reset(deferDelay)
-		case <-deferTimer.C:
-			// Timer fired: check whether we should capture now or
-			// wait longer due to display-unavailable backoff.
-			if !time.Now().Before(backoffDeadline) {
-				writeLog("info", "deferred capture fired")
-				transient, err := captureAndSend()
-				if err != nil {
-					return err
-				}
-				if transient {
-					// Display unavailable: schedule retry with backoff
-					// instead of the normal short deferral.
-					backoffDeadline = time.Now().Add(displayOffBackoff)
-					deferTimer.Reset(displayOffBackoff)
-				} else {
-					backoffDeadline = time.Time{}
-					deferTimer.Reset(deferDelay)
-				}
-			} else {
-				// Still in backoff: re-arm timer for remaining wait.
-				remaining := time.Until(backoffDeadline)
-				deferTimer.Reset(remaining)
+		case <-forceCapture:
+			writeLog("info", "force capture requested")
+			if _, err := captureAndSend(); err != nil {
+				return err
 			}
 		}
 	}

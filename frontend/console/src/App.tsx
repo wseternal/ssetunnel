@@ -49,6 +49,8 @@ import FullscreenIcon from '@mui/icons-material/Fullscreen';
 import FullscreenExitIcon from '@mui/icons-material/FullscreenExit';
 import ZoomInIcon from '@mui/icons-material/ZoomIn';
 import KeyboardIcon from '@mui/icons-material/Keyboard';
+import KeyboardArrowDownIcon from '@mui/icons-material/KeyboardArrowDown';
+import KeyboardArrowUpIcon from '@mui/icons-material/KeyboardArrowUp';
 import { Terminal, type IDisposable } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
@@ -347,6 +349,7 @@ export default function App() {
   const magnifierLensRef = useRef<HTMLDivElement | null>(null);
   const magnifierLastSrcRef = useRef<string>('');
   const [desktopLogs, setDesktopLogs] = useState<DesktopLogEntry[]>([]);
+  const [desktopLogCollapsed, setDesktopLogCollapsed] = useState(false);
   const desktopLogRef = useRef<HTMLDivElement | null>(null);
   const MAX_DESKTOP_LOGS = 200;
   // Input ack tooltip: shows live feedback when the agent receives input events.
@@ -2276,6 +2279,76 @@ export default function App() {
             </Paper>
           </Box>
         )}
+        {/* Activity Log overlay (top-left) */}
+        {desktopLogs.length > 0 && (
+          <Box
+            sx={{
+              position: 'absolute',
+              top: 8,
+              left: 8,
+              zIndex: 12,
+              maxWidth: 400,
+              borderRadius: 1,
+              bgcolor: 'rgba(30, 30, 46, 0.85)',
+              overflow: 'hidden',
+            }}
+          >
+            <Box
+              sx={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                px: 1,
+                py: 0.25,
+                cursor: 'pointer',
+                '&:hover': { bgcolor: 'rgba(255,255,255,0.05)' },
+              }}
+              onClick={(e) => { e.stopPropagation(); setDesktopLogCollapsed(prev => !prev); }}
+            >
+              <Typography variant="caption" sx={{ color: '#e0e0e0', fontWeight: 600, letterSpacing: 0.5 }}>
+                Activity Log
+              </Typography>
+              <IconButton
+                size="small"
+                sx={{ color: '#e0e0e0', p: 0.25, '&:hover': { color: '#fff' } }}
+                onClick={(e) => { e.stopPropagation(); setDesktopLogCollapsed(prev => !prev); }}
+              >
+                {desktopLogCollapsed ? <KeyboardArrowDownIcon fontSize="small" /> : <KeyboardArrowUpIcon fontSize="small" />}
+              </IconButton>
+            </Box>
+            {!desktopLogCollapsed && (
+              <Box
+                ref={desktopLogRef}
+                sx={{
+                  px: 1,
+                  pb: 1,
+                  maxHeight: 200,
+                  overflow: 'auto',
+                  fontFamily: '"JetBrains Mono", "Fira Code", Menlo, Monaco, monospace',
+                  fontSize: '0.75rem',
+                  lineHeight: 1.6,
+                }}
+              >
+                {desktopLogs.map((entry, i) => {
+                  const sevColor = entry.sev === 'error' ? '#f44336' : entry.sev === 'warn' ? '#ffa726' : '#e0e0e0';
+                  const srcColor = entry.src === 'server' ? '#42a5f5' : '#66bb6a';
+                  const time = entry.ts ? new Date(entry.ts).toLocaleTimeString() : '';
+                  return (
+                    <Box key={`${entry.ts}-${i}`} sx={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                      <span style={{ color: '#666' }}>{time}</span>
+                      {' '}
+                      <span style={{ color: sevColor, fontWeight: 600, textTransform: 'uppercase', minWidth: 40, display: 'inline-block' }}>{entry.sev}</span>
+                      {' '}
+                      <span style={{ color: srcColor }}>[{entry.src}]</span>
+                      {' '}
+                      <span style={{ color: '#cdd6f4' }}>{entry.msg}</span>
+                    </Box>
+                  );
+                })}
+              </Box>
+            )}
+          </Box>
+        )}
       </Paper>
       {desktopConnected && (
         <Typography variant="caption" color="text.secondary" sx={{ mt: 1, display: 'block' }}>
@@ -2300,41 +2373,6 @@ export default function App() {
               </CardContent>
             </Card>
           ))}
-        </Box>
-      )}
-      {desktopLogs.length > 0 && (
-        <Box sx={{ mt: 1.5 }}>
-          <Typography variant="subtitle2" color="text.secondary" sx={{ mb: 0.5 }}>Activity Log</Typography>
-          <Paper
-            ref={desktopLogRef}
-            sx={{
-              bgcolor: '#1e1e2e',
-              p: 1,
-              borderRadius: 1,
-              maxHeight: 200,
-              overflow: 'auto',
-              fontFamily: '"JetBrains Mono", "Fira Code", Menlo, Monaco, monospace',
-              fontSize: '0.75rem',
-              lineHeight: 1.6,
-            }}
-          >
-            {desktopLogs.map((entry, i) => {
-              const sevColor = entry.sev === 'error' ? '#f44336' : entry.sev === 'warn' ? '#ffa726' : '#e0e0e0';
-              const srcColor = entry.src === 'server' ? '#42a5f5' : '#66bb6a';
-              const time = entry.ts ? new Date(entry.ts).toLocaleTimeString() : '';
-              return (
-                <Box key={`${entry.ts}-${i}`} sx={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                  <span style={{ color: '#666' }}>{time}</span>
-                  {' '}
-                  <span style={{ color: sevColor, fontWeight: 600, textTransform: 'uppercase', minWidth: 40, display: 'inline-block' }}>{entry.sev}</span>
-                  {' '}
-                  <span style={{ color: srcColor }}>[{entry.src}]</span>
-                  {' '}
-                  <span style={{ color: '#cdd6f4' }}>{entry.msg}</span>
-                </Box>
-              );
-            })}
-          </Paper>
         </Box>
       )}
     </Box>

@@ -16,10 +16,9 @@ import (
 // in one goroutine while reading frames from the stream in the main
 // goroutine. A lockedWriter serializes all writes to the stream.
 //
-// The capture loop uses deferred capture: every input event signals the
-// inputReceived channel, resetting a 3-second deferral timer. A screenshot
-// is taken only after the input stream has been quiet for 3 seconds. This
-// avoids uploading screenshots that will be immediately stale.
+// The capture loop takes an initial screenshot on session start and
+// subsequent screenshots only when the user triggers a manual refresh
+// via the command palette.
 //
 // For every input event received, the proxy sends a FrameInputAck back to
 // the server so the console UI can display live feedback tooltips.
@@ -61,14 +60,9 @@ func ProxyRemoteApp(stream net.Conn) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// inputReceived signals the capture loop that an input event arrived,
-	// resetting its 3-second deferral timer. Buffered 1 so the proxy never
-	// blocks on send; extra signals are coalesced.
-	inputReceived := make(chan struct{}, 1)
-
 	// forceCapture signals the capture loop to immediately capture a
-	// screenshot, bypassing the defer timer. Used by the command palette
-	// "Refresh Screenshot" action. Buffered 1; extra signals coalesce.
+	// screenshot. Used by the command palette "Refresh Screenshot" action.
+	// Buffered 1; extra signals coalesce.
 	forceCapture := make(chan struct{}, 1)
 
 	// lastAckUnixMilli tracks the latest server-ACK'd screenshot timestamp
@@ -81,7 +75,7 @@ func ProxyRemoteApp(stream net.Conn) {
 	// Goroutine: capture screenshots → yamux stream.
 	go func() {
 		defer wg.Done()
-		if err := CaptureLoop(ctx, lw, inputReceived, forceCapture); err != nil && err != context.Canceled {
+		if err := CaptureLoop(ctx, lw, forceCapture); err != nil && err != context.Canceled {
 			log.Printf("remoteapp: capture loop: %v", err)
 			if werr := lw.writeLogEvent("error", fmt.Sprintf("capture loop exited: %v", err)); werr != nil {
 				log.Printf("remoteapp: writeLogEvent: %v", werr)
@@ -89,17 +83,8 @@ func ProxyRemoteApp(stream net.Conn) {
 		}
 	}()
 
-	// signalInput notifies the capture loop that an input event arrived,
-	// resetting its deferral timer. Non-blocking; extra signals coalesce.
-	signalInput := func() {
-		select {
-		case inputReceived <- struct{}{}:
-		default: // already pending; coalesce
-		}
-	}
-
 	// signalForceCapture requests an immediate capture from the capture
-	// loop, bypassing the defer timer. Non-blocking.
+	// loop. Non-blocking.
 	signalForceCapture := func() {
 		select {
 		case forceCapture <- struct{}{}:
@@ -148,9 +133,6 @@ func ProxyRemoteApp(stream net.Conn) {
 					}
 				}
 			}
-
-			// Signal deferred capture: every input resets the 3s timer.
-			signalInput()
 
 			if err := DispatchInput(event, screenW, screenH); err != nil {
 				log.Printf("remoteapp: dispatch input: %v", err)
