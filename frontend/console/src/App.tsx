@@ -324,6 +324,7 @@ export default function App() {
   // Command palette state
   const [paletteOpen, setPaletteOpen] = useState(false);
   const metaDownRef = useRef(false);
+  const metaOtherKeyRef = useRef(false); // true if a non-meta key was pressed during the current meta hold
   const paletteOpenRef = useRef(false);
 
   // Keep paletteOpenRef in sync so the keyboard handler can read
@@ -1151,7 +1152,9 @@ export default function App() {
       const target = e.target as HTMLElement;
       if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT') return;
 
-      // Command palette: meta key toggle (Cmd on macOS, Ctrl on non-Mac)
+      // Command palette: meta key tap detection (Cmd on macOS, Ctrl on non-Mac).
+      // Palette toggles on keyup ONLY if no other key was pressed during the hold.
+      // This allows system shortcuts (Cmd+C, Cmd+V, etc.) to work normally.
       const isMac = navigator.platform.includes('Mac');
       const isMetaKey = e.key === 'Meta' || (e.key === 'Control' && !isMac);
       if (isMetaKey) {
@@ -1159,7 +1162,7 @@ export default function App() {
         e.stopPropagation();
         if (!metaDownRef.current) {
           metaDownRef.current = true;
-          setPaletteOpen(prev => !prev);
+          metaOtherKeyRef.current = false;
         }
         return;
       }
@@ -1181,13 +1184,23 @@ export default function App() {
         return; // swallow all other keys while palette is open
       }
 
+      // Meta held but palette closed: mark as non-tap, let handleDesktopKey send to remote.
+      if (metaDownRef.current) {
+        metaOtherKeyRef.current = true;
+      }
+
       handleDesktopKey(e, sid, abort.signal);
     };
 
     const keyUpHandler = (e: KeyboardEvent) => {
       const isMac = navigator.platform.includes('Mac');
       if (e.key === 'Meta' || (e.key === 'Control' && !isMac)) {
+        // Toggle palette on meta release only if no other key was pressed (tap gesture).
+        if (!metaOtherKeyRef.current) {
+          setPaletteOpen(prev => !prev);
+        }
         metaDownRef.current = false;
+        metaOtherKeyRef.current = false;
       }
     };
 
@@ -1197,6 +1210,7 @@ export default function App() {
       window.removeEventListener('keydown', handler, true);
       window.removeEventListener('keyup', keyUpHandler, true);
       metaDownRef.current = false;
+      metaOtherKeyRef.current = false;
     };
   }, [desktopConnected, desktopSessionId, handleDesktopKey, handlePaletteAction]);
 
@@ -1262,12 +1276,18 @@ export default function App() {
   // bubble-phase listeners on window from ever seeing the event. By using
   // capture phase here, we intercept meta/palette keys early and call
   // stopPropagation() to also prevent xterm from processing them.
+  // The palette uses a "tap" gesture: it toggles on meta keyup only if no
+  // other key was pressed during the hold, allowing system shortcuts like
+  // Cmd+C / Cmd+V to pass through to the browser.
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       // Only handle when shell tab is active (prevents conflict with desktop handler)
       const shellTabIdx = isAdmin ? 4 : 3;
       if (tabIndexRef.current !== shellTabIdx || !shellConnected) return;
 
+      // Command palette: meta key tap detection (Cmd on macOS, Ctrl on non-Mac).
+      // Palette toggles on keyup ONLY if no other key was pressed during the hold.
+      // This allows system shortcuts (Cmd+C, Cmd+V, etc.) to pass through to the browser.
       const isMac = navigator.platform.includes('Mac');
       const isMetaKey = e.key === 'Meta' || (e.key === 'Control' && !isMac);
       if (isMetaKey) {
@@ -1275,7 +1295,7 @@ export default function App() {
         e.stopPropagation(); // prevent xterm from receiving the meta key
         if (!metaDownRef.current) {
           metaDownRef.current = true;
-          setShellPaletteOpen(prev => !prev);
+          metaOtherKeyRef.current = false;
         }
         return;
       }
@@ -1294,13 +1314,25 @@ export default function App() {
         }
         return;
       }
+
+      // Meta held but palette closed: mark as non-tap and let the event
+      // propagate to xterm / browser normally (Cmd+C → browser copy, etc.).
+      if (metaDownRef.current) {
+        metaOtherKeyRef.current = true;
+        return;
+      }
       // Non-meta, non-palette keys: let the event propagate to xterm normally.
     };
 
     const keyUpHandler = (e: KeyboardEvent) => {
       const isMac = navigator.platform.includes('Mac');
       if (e.key === 'Meta' || (e.key === 'Control' && !isMac)) {
+        // Toggle palette on meta release only if no other key was pressed (tap gesture).
+        if (!metaOtherKeyRef.current) {
+          setShellPaletteOpen(prev => !prev);
+        }
         metaDownRef.current = false;
+        metaOtherKeyRef.current = false;
       }
     };
 
@@ -1311,6 +1343,7 @@ export default function App() {
       window.removeEventListener('keydown', handler, true);
       window.removeEventListener('keyup', keyUpHandler, true);
       metaDownRef.current = false;
+      metaOtherKeyRef.current = false;
     };
   }, [shellConnected, handleShellPaletteAction, isAdmin]);
 
