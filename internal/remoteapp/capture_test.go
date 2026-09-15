@@ -160,8 +160,6 @@ func TestWebPEncodeRoundTrip(t *testing.T) {
 // TestStreamingTickerCapsFPS verifies that the capture loop never sends
 // frames faster than the 5 FPS cap (200 ms interval) while streaming.
 func TestStreamingTickerCapsFPS(t *testing.T) {
-	t.Parallel()
-
 	// Substitute captureImg with a synthetic source.
 	origCapture := captureImg
 	defer func() { captureImg = origCapture }()
@@ -222,8 +220,6 @@ func TestStreamingTickerCapsFPS(t *testing.T) {
 // TestStreamingStopsCleanly verifies that stopping streaming halts
 // continuous capture with no further frames.
 func TestStreamingStopsCleanly(t *testing.T) {
-	t.Parallel()
-
 	origCapture := captureImg
 	defer func() { captureImg = origCapture }()
 	captureImg = func(args ...int) (image.Image, error) {
@@ -285,8 +281,6 @@ func TestStreamingStopsCleanly(t *testing.T) {
 // TestForceCaptureCoalescedDuringStreaming verifies that rapid force
 // signals during streaming do not burst above the FPS cap.
 func TestForceCaptureCoalescedDuringStreaming(t *testing.T) {
-	t.Parallel()
-
 	origCapture := captureImg
 	defer func() { captureImg = origCapture }()
 	captureImg = func(args ...int) (image.Image, error) {
@@ -341,8 +335,6 @@ func TestForceCaptureCoalescedDuringStreaming(t *testing.T) {
 // TestStreamingStopsOnContextCancel verifies that canceling the context
 // while streaming terminates the capture loop cleanly.
 func TestStreamingStopsOnContextCancel(t *testing.T) {
-	t.Parallel()
-
 	origCapture := captureImg
 	defer func() { captureImg = origCapture }()
 	captureImg = func(args ...int) (image.Image, error) {
