@@ -104,7 +104,7 @@ The agent→server direction has concurrent writers: the capture goroutine (scre
 - `Write(p []byte)` — mutex-guarded single write (satisfies `io.Writer` for non-aware callers like `WriteFrame`)
 - `writeFrame(frameType, data)` — mutex held across header+data `WriteFrame` (atomic frame construction)
 - `writeLogEvent(severity, message)` — build `LogEvent` JSON + `writeFrame` under mutex
-- `writeScreenshotWithTimestamp(jpegData, ts)` — build timestamped payload + `writeFrame` under mutex
+- `writeScreenshotWithTimestamp(webpData, ts)` — build timestamped payload + `writeFrame` under mutex
 - `writeInputAck(ack InputAck)` — marshal `InputAck` JSON + `writeFrame` under mutex
 - `close()` — set `closed=true` under mutex, preventing further writes
 

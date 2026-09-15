@@ -1060,7 +1060,7 @@ export default function App() {
   }, []);
 
   // Palette action handler
-  const handlePaletteAction = useCallback((action: string) => {
+  const handlePaletteAction = useCallback(async (action: string) => {
     setPaletteOpen(false);
     const sid = desktopSessionId;
     const abort = desktopAbortRef.current;
@@ -1069,10 +1069,17 @@ export default function App() {
       case 'refresh-screenshot':
         sendDesktopInput(sid, { type: 'refresh_screenshot' }, abort.signal);
         break;
-      case 'toggle-streaming':
-        sendDesktopInput(sid, { type: desktopStreamingRef.current ? 'stop_streaming' : 'start_streaming' }, abort.signal);
-        setDesktopStreaming(prev => !prev);
+      case 'toggle-streaming': {
+        const next = !desktopStreamingRef.current;
+        setDesktopStreaming(next);
+        try {
+          await sendDesktopInput(sid, { type: next ? 'start_streaming' : 'stop_streaming' }, abort.signal);
+        } catch {
+          // Rollback on failure
+          setDesktopStreaming(!next);
+        }
         break;
+      }
       case 'send-text':
         setTextEditorContent('');
         setTextEditorOpen(true);

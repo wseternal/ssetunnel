@@ -17,6 +17,10 @@ import (
 
 // Frame type identifiers for the yamux stream wire protocol.
 const (
+	// FrameScreenshot carries a timestamped WebP image from agent to server.
+	// Wire format: [8-byte BE UnixMilli timestamp][WebP data].
+	// Breaking change from JPEG: no format negotiation; agent and frontend
+	// must be co-deployed.
 	FrameScreenshot    byte = 0x01 // Agent → Server: [8-byte BE UnixMilli timestamp][WebP data]
 	FrameInput         byte = 0x02 // Server → Agent: JSON input event
 	FrameScreenInfo    byte = 0x03 // Agent → Server: JSON screen dimensions

@@ -463,6 +463,8 @@ func TestAckDetail(t *testing.T) {
 		{"type_text long unicode", InputEvent{Type: "type_text", Text: "\u4f60\u597d\u4e16\u754c\u4f60\u597d\u4e16\u754c\u4f60\u597d\u4e16\u754c"}, "\u4f60\u597d\u4e16\u754c\u4f60\u597d\u4e16\u754c\u4f60\u597d..."},
 		{"mouse_move", InputEvent{Type: "mouse_move"}, ""},
 		{"refresh_screenshot", InputEvent{Type: "refresh_screenshot"}, "refresh"},
+		{"start_streaming", InputEvent{Type: "start_streaming"}, "streaming started"},
+		{"stop_streaming", InputEvent{Type: "stop_streaming"}, "streaming stopped"},
 		{"unknown", InputEvent{Type: "unknown_type"}, ""},
 	}
 	for _, tt := range tests {

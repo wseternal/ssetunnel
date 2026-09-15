@@ -34,6 +34,14 @@ var checkScreenAccessFn = checkScreenAccess
 // before the loop gives up and returns an error (circuit breaker).
 const maxConsecutiveCaptureFails = 10
 
+// maxConsecutiveEncodeFails is the number of consecutive WebP encode failures
+// before the loop gives up and returns an error (independent of capture).
+const maxConsecutiveEncodeFails = 10
+
+// defaultEncoderOpts is the shared EncoderOptions used for every WebP encode.
+// Hoisted to avoid allocating a new struct on every frame.
+var defaultEncoderOpts = &webp.EncoderOptions{Quality: webpQuality, Method: 4}
+
 // CaptureLoop captures the primary display and writes WebP-encoded
 // screenshots as typed frames to w. It runs until ctx is canceled or w
 // returns an error. Log events are also written to w for observability.
@@ -47,7 +55,7 @@ const maxConsecutiveCaptureFails = 10
 // The streaming channel toggles continuous capture: true starts a ticker
 // at streamInterval (200 ms, 5 FPS hard cap); false stops it. The ticker
 // is created and destroyed inside the capture goroutine — no extra
-// goroutines or mutexes needed.
+// application-level goroutines or mutexes are needed.
 //
 // The forceCapture channel triggers an immediate capture when signaled.
 // During streaming, force signals are coalesced with the tick schedule:
@@ -63,7 +71,8 @@ func CaptureLoop(ctx context.Context, w io.Writer, forceCapture <-chan struct{},
 
 	// Reuse buffer across frames to avoid ~150 KB/frame allocation.
 	var buf bytes.Buffer
-	consecutiveFails := 0
+	captureFails := 0
+	encodeFails := 0
 	var lastFrameAt time.Time // tracks last frame send time for rate limiting
 
 	writeLog := func(severity, message string) {
@@ -90,35 +99,40 @@ func CaptureLoop(ctx context.Context, w io.Writer, forceCapture <-chan struct{},
 		captured, err := captureImg()
 		if err != nil {
 			if isDisplayUnavailable(err) {
-				consecutiveFails = 0 // display-off invalidates prior fail history
+				captureFails = 0 // display-off invalidates prior fail history
 				log.Printf("remoteapp: capture: display unavailable: %v", err)
 				writeLog("warn", fmt.Sprintf("display unavailable (refresh to retry): %v", err))
 				return true, nil
 			}
-			consecutiveFails++
-			if consecutiveFails >= maxConsecutiveCaptureFails {
-				writeLog("error", fmt.Sprintf("capture circuit breaker: %d consecutive failures: %v", consecutiveFails, err))
-				return false, fmt.Errorf("capture failed %d consecutive times: %w", consecutiveFails, err)
+			captureFails++
+			if captureFails >= maxConsecutiveCaptureFails {
+				writeLog("error", fmt.Sprintf("capture circuit breaker: %d consecutive failures: %v", captureFails, err))
+				return false, fmt.Errorf("capture failed %d consecutive times: %w", captureFails, err)
 			}
-			log.Printf("remoteapp: capture: %v (attempt %d/%d)", err, consecutiveFails, maxConsecutiveCaptureFails)
-			writeLog("warn", fmt.Sprintf("capture failed (attempt %d/%d): %v", consecutiveFails, maxConsecutiveCaptureFails, err))
+			log.Printf("remoteapp: capture: %v (attempt %d/%d)", err, captureFails, maxConsecutiveCaptureFails)
+			writeLog("warn", fmt.Sprintf("capture failed (attempt %d/%d): %v", captureFails, maxConsecutiveCaptureFails, err))
 			return false, nil // non-fatal
 		}
-		consecutiveFails = 0 // reset on success
+		captureFails = 0 // reset on success
 
 		buf.Reset()
-		if err := webp.Encode(&buf, captured, &webp.EncoderOptions{Quality: webpQuality, Method: 4}); err != nil {
-			consecutiveFails++
-			if consecutiveFails >= maxConsecutiveCaptureFails {
-				writeLog("error", fmt.Sprintf("webp encode circuit breaker: %d consecutive failures: %v", consecutiveFails, err))
-				return false, fmt.Errorf("webp encode failed %d consecutive times: %w", consecutiveFails, err)
+		if err := webp.Encode(&buf, captured, defaultEncoderOpts); err != nil {
+			encodeFails++
+			if encodeFails >= maxConsecutiveEncodeFails {
+				writeLog("error", fmt.Sprintf("webp encode circuit breaker: %d consecutive failures: %v", encodeFails, err))
+				return false, fmt.Errorf("webp encode failed %d consecutive times: %w", encodeFails, err)
 			}
-			log.Printf("remoteapp: webp encode: %v (attempt %d/%d)", err, consecutiveFails, maxConsecutiveCaptureFails)
-			writeLog("warn", fmt.Sprintf("webp encode failed (attempt %d/%d): %v", consecutiveFails, maxConsecutiveCaptureFails, err))
+			log.Printf("remoteapp: webp encode: %v (attempt %d/%d)", err, encodeFails, maxConsecutiveEncodeFails)
+			writeLog("warn", fmt.Sprintf("webp encode failed (attempt %d/%d): %v", encodeFails, maxConsecutiveEncodeFails, err))
 			return false, nil // non-fatal
 		}
+		encodeFails = 0 // reset on success
+
+		if err := writeScreenshot(buf.Bytes()); err != nil {
+			return false, err
+		}
 		lastFrameAt = time.Now()
-		return false, writeScreenshot(buf.Bytes())
+		return false, nil
 	}
 
 	// maybeCapture triggers a capture, respecting the streaming rate cap.
@@ -167,7 +181,14 @@ func CaptureLoop(ctx context.Context, w io.Writer, forceCapture <-chan struct{},
 			return ctx.Err()
 		case on, ok := <-streaming:
 			if !ok {
-				streaming = nil // channel closed; disable select case
+				// Channel closed: stop any active ticker before disabling the case.
+				if ticker != nil {
+					ticker.Stop()
+					ticker = nil
+					tickC = nil
+				}
+				isStreaming = false
+				streaming = nil // disable select case
 				continue
 			}
 			if on == isStreaming {

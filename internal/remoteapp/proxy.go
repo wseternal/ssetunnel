@@ -111,6 +111,7 @@ func ProxyRemoteApp(stream net.Conn) {
 	}
 
 	// Main goroutine: read frames from yamux stream → dispatch.
+readLoop:
 	for {
 		frameType, data, err := ReadFrame(stream)
 		if err != nil {
@@ -136,7 +137,7 @@ func ProxyRemoteApp(stream net.Conn) {
 				if werr := lw.writeInputAck(InputAck{Type: event.Type, Detail: "refresh"}); werr != nil {
 					log.Printf("remoteapp: writeInputAck: %v", werr)
 					if errors.Is(werr, ErrWriterClosed) {
-						break
+						break readLoop
 					}
 				}
 				continue
@@ -146,7 +147,7 @@ func ProxyRemoteApp(stream net.Conn) {
 				if werr := lw.writeInputAck(InputAck{Type: event.Type, Detail: "streaming started"}); werr != nil {
 					log.Printf("remoteapp: writeInputAck: %v", werr)
 					if errors.Is(werr, ErrWriterClosed) {
-						break
+						break readLoop
 					}
 				}
 				continue
@@ -156,7 +157,7 @@ func ProxyRemoteApp(stream net.Conn) {
 				if werr := lw.writeInputAck(InputAck{Type: event.Type, Detail: "streaming stopped"}); werr != nil {
 					log.Printf("remoteapp: writeInputAck: %v", werr)
 					if errors.Is(werr, ErrWriterClosed) {
-						break
+						break readLoop
 					}
 				}
 				continue
@@ -168,7 +169,7 @@ func ProxyRemoteApp(stream net.Conn) {
 				if werr := lw.writeInputAck(InputAck{Type: event.Type, Detail: ackDetail(event)}); werr != nil {
 					log.Printf("remoteapp: writeInputAck: %v", werr)
 					if errors.Is(werr, ErrWriterClosed) {
-						break // stream is dead, exit read loop
+						break readLoop // stream is dead, exit read loop
 					}
 				}
 			}
