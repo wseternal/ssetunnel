@@ -1071,11 +1071,20 @@ export default function App() {
         break;
       case 'toggle-streaming': {
         const next = !desktopStreamingRef.current;
+        desktopStreamingRef.current = next; // sync ref immediately (useEffect is async)
         setDesktopStreaming(next);
         try {
-          await sendDesktopInput(sid, { type: next ? 'start_streaming' : 'stop_streaming' }, abort.signal);
+          // Inline fetch instead of sendDesktopInput — sendDesktopInput
+          // swallows errors, so rollback would never trigger.
+          await fetch('/console/api/v1/remoteapp/connect-up', {
+            method: 'POST',
+            headers: { ...authHeaders(), 'X-SSET-Session': sid, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ type: next ? 'start_streaming' : 'stop_streaming' }),
+            signal: abort.signal,
+          });
         } catch {
           // Rollback on failure
+          desktopStreamingRef.current = !next;
           setDesktopStreaming(!next);
         }
         break;
