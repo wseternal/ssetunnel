@@ -2,7 +2,7 @@
 // via robotgo and input replay (mouse + keyboard) over a yamux stream.
 //
 // The wire protocol uses typed length-prefixed frames to safely carry
-// binary JPEG screenshots and JSON input events over the same stream.
+// binary WebP screenshots and JSON input events over the same stream.
 package remoteapp
 
 import (
@@ -17,7 +17,7 @@ import (
 
 // Frame type identifiers for the yamux stream wire protocol.
 const (
-	FrameScreenshot    byte = 0x01 // Agent → Server: [8-byte BE UnixMilli timestamp][JPEG data]
+	FrameScreenshot    byte = 0x01 // Agent → Server: [8-byte BE UnixMilli timestamp][WebP data]
 	FrameInput         byte = 0x02 // Server → Agent: JSON input event
 	FrameScreenInfo    byte = 0x03 // Agent → Server: JSON screen dimensions
 	FrameLogEvent      byte = 0x04 // Agent → Server: JSON log event for console observability
@@ -26,10 +26,10 @@ const (
 )
 
 // ScreenshotTimestampSize is the byte length of the Unix-millisecond timestamp
-// prepended to JPEG data inside a FrameScreenshot payload.
+// prepended to WebP data inside a FrameScreenshot payload.
 const ScreenshotTimestampSize = 8
 
-// maxFrameSize caps a single frame at 4 MiB. A 1920×1080 JPEG at quality 50
+// maxFrameSize caps a single frame at 4 MiB. A 1920×1080 WebP at quality 75
 // is typically 50–150 KB; 4 MiB provides ample headroom while preventing
 // runaway memory allocation from a misbehaving peer.
 const maxFrameSize = 4 << 20
@@ -203,15 +203,15 @@ func WriteLogEvent(w io.Writer, severity, message string) error {
 }
 
 // WriteScreenshotWithTimestamp writes a FrameScreenshot with an 8-byte
-// big-endian Unix-millisecond timestamp prepended to the JPEG payload.
-// Wire format: [FrameScreenshot header][8-byte BE UnixMilli][JPEG data].
-// Writes header, timestamp, and JPEG as three separate writes to avoid
+// big-endian Unix-millisecond timestamp prepended to the WebP payload.
+// Wire format: [FrameScreenshot header][8-byte BE UnixMilli][WebP data].
+// Writes header, timestamp, and WebP as three separate writes to avoid
 // allocating a combined ~150 KB payload buffer.
 //
 // Callers MUST ensure exclusive access to w for the duration of this call;
 // the three writes are NOT atomic. Use a lockedWriter for concurrent access.
-func WriteScreenshotWithTimestamp(w io.Writer, jpegData []byte, ts time.Time) error {
-	totalLen := ScreenshotTimestampSize + len(jpegData)
+func WriteScreenshotWithTimestamp(w io.Writer, webpData []byte, ts time.Time) error {
+	totalLen := ScreenshotTimestampSize + len(webpData)
 	if totalLen > maxFrameSize {
 		return fmt.Errorf("%w: %d bytes", ErrFrameTooLarge, totalLen)
 	}
@@ -229,16 +229,16 @@ func WriteScreenshotWithTimestamp(w io.Writer, jpegData []byte, ts time.Time) er
 	if _, err := w.Write(tsBuf[:]); err != nil {
 		return err
 	}
-	if len(jpegData) > 0 {
-		_, err = w.Write(jpegData)
+	if len(webpData) > 0 {
+		_, err = w.Write(webpData)
 	}
 	return err
 }
 
 // ParseScreenshotTimestamp splits a FrameScreenshot payload into the
-// 8-byte timestamp and the remaining JPEG data. Returns ok=false if the
+// 8-byte timestamp and the remaining WebP data. Returns ok=false if the
 // payload is too short to contain a valid timestamp.
-func ParseScreenshotTimestamp(data []byte) (ts time.Time, jpeg []byte, ok bool) {
+func ParseScreenshotTimestamp(data []byte) (ts time.Time, webp []byte, ok bool) {
 	if len(data) < ScreenshotTimestampSize {
 		return time.Time{}, nil, false
 	}
@@ -312,14 +312,14 @@ func (lw *lockedWriter) writeLogEvent(severity, message string) error {
 
 // writeScreenshotWithTimestamp writes a FrameScreenshot with an 8-byte
 // timestamp prefix under a single lock hold. Uses three separate writes
-// (header + timestamp + JPEG) to avoid allocating a combined payload buffer.
-func (lw *lockedWriter) writeScreenshotWithTimestamp(jpegData []byte, ts time.Time) error {
+// (header + timestamp + WebP) to avoid allocating a combined payload buffer.
+func (lw *lockedWriter) writeScreenshotWithTimestamp(webpData []byte, ts time.Time) error {
 	lw.mu.Lock()
 	defer lw.mu.Unlock()
 	if lw.closed {
 		return ErrWriterClosed
 	}
-	return WriteScreenshotWithTimestamp(lw.w, jpegData, ts)
+	return WriteScreenshotWithTimestamp(lw.w, webpData, ts)
 }
 
 // writeInputAck writes a FrameInputAck under a single lock hold.

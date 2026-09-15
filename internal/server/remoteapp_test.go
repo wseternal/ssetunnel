@@ -276,25 +276,25 @@ func TestHandleRemoteAppUp_RefreshScreenshotAccepted(t *testing.T) {
 
 func TestScreenshotTimestampStripAndAckRoundTrip(t *testing.T) {
 	t.Parallel()
-	// Build a synthetic FrameScreenshot payload: [8-byte BE timestamp][JPEG].
+	// Build a synthetic FrameScreenshot payload: [8-byte BE timestamp][WebP].
 	ts := time.Date(2025, 8, 1, 12, 0, 0, 0, time.UTC)
-	jpeg := []byte("fake-jpeg-data-for-server-test")
+	imgData := []byte("fake-webp-data-for-server-test")
 	var payload bytes.Buffer
 	var tsBuf [remoteapp.ScreenshotTimestampSize]byte
 	binary.BigEndian.PutUint64(tsBuf[:], uint64(ts.UnixMilli()))
 	payload.Write(tsBuf[:])
-	payload.Write(jpeg)
+	payload.Write(imgData)
 
-	// ParseScreenshotTimestamp should split timestamp and JPEG correctly.
-	gotTS, gotJPEG, ok := remoteapp.ParseScreenshotTimestamp(payload.Bytes())
+	// ParseScreenshotTimestamp should split timestamp and WebP correctly.
+	gotTS, gotImg, ok := remoteapp.ParseScreenshotTimestamp(payload.Bytes())
 	if !ok {
 		t.Fatal("ParseScreenshotTimestamp: ok=false")
 	}
 	if !gotTS.Equal(ts.Truncate(time.Millisecond)) {
 		t.Errorf("timestamp: got %v, want %v", gotTS, ts)
 	}
-	if !bytes.Equal(gotJPEG, jpeg) {
-		t.Errorf("jpeg: got %d bytes, want %d bytes", len(gotJPEG), len(jpeg))
+	if !bytes.Equal(gotImg, imgData) {
+		t.Errorf("image: got %d bytes, want %d bytes", len(gotImg), len(imgData))
 	}
 
 	// WriteScreenshotAck should produce a valid ACK frame.

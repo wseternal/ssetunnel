@@ -95,6 +95,14 @@ func DispatchInput(event InputEvent, screenWidth, screenHeight int) error {
 		// Control event: handled by the proxy before dispatch.
 		// No-op if dispatched directly.
 
+	case "start_streaming":
+		// Control event: handled by the proxy before dispatch.
+		// No-op if dispatched directly.
+
+	case "stop_streaming":
+		// Control event: handled by the proxy before dispatch.
+		// No-op if dispatched directly.
+
 	default:
 		log.Printf("remoteapp: unknown input event type: %s", event.Type)
 	}
