@@ -20,14 +20,14 @@ Typed length-prefixed frames: `[type][4-byte BE length][data]`.
 
 | Type | ID | Direction | Payload |
 |---|---|---|---|
-| `FrameScreenshot` | 0x01 | Agent → Server | [8-byte BE UnixMilli timestamp][JPEG data (quality 75)] |
+| `FrameScreenshot` | 0x01 | Agent → Server | [8-byte BE UnixMilli timestamp][WebP data (quality 75)] |
 | `FrameInput` | 0x02 | Server → Agent | JSON `InputEvent` |
 | `FrameScreenInfo` | 0x03 | Agent → Server | JSON `ScreenInfo{width,height}` |
 | `FrameLogEvent` | 0x04 | Agent → Server | JSON `LogEvent{ts,sev,src,msg}` |
 | `FrameScreenshotAck` | 0x05 | Server → Agent | 8-byte BE UnixMilli (ACK for received screenshot) |
 | `FrameInputAck` | 0x06 | Agent → Server | JSON `InputAck{type,detail}` |
 
-> **Breaking change:** `FrameScreenshot` payload includes an 8-byte timestamp prefix. `FrameInputAck` (0x06) is a new frame type. Agent and server must run the same version — mismatched versions will produce corrupt screenshots or unknown frame types during a rolling deployment.
+> **Breaking change:** `FrameScreenshot` payload includes an 8-byte timestamp prefix. `FrameInputAck` (0x06) is a new frame type. Screenshots are encoded as WebP via `github.com/deepteams/webp` (pure Go, no CGO). Agent and server must run the same version — mismatched versions will produce corrupt screenshots or unknown frame types during a rolling deployment.
 
 Max frame size: 4 MiB (`maxFrameSize`). `WriteFrame` constructs the header and payload in two separate writes to avoid allocating a combined ~150 KB buffer. Callers MUST ensure exclusive access to the writer for the duration of a `WriteFrame` call; the two writes are NOT atomic. Use `lockedWriter` for concurrent access. `ReadFrame` reads header then payload with `io.ReadFull`.
 
@@ -40,18 +40,20 @@ Max frame size: 4 MiB (`maxFrameSize`). `WriteFrame` constructs the header and p
 
 ## Capture Loop
 
-`CaptureLoop(ctx, w, forceCapture <-chan struct{})` captures the primary display and writes timestamped JPEG screenshots as typed frames. Capture strategy:
+`CaptureLoop(ctx, w, forceCapture <-chan struct{}, streaming <-chan bool)` captures the primary display and writes timestamped WebP screenshots as typed frames. Capture strategy:
 
 - **Initial capture**: One screenshot on startup before entering the select loop, so the frontend receives the first frame immediately.
 - **`forceCapture` channel**: Triggers an immediate capture when signaled. Used by the command palette "Refresh Screenshot" action. Buffered 1; extra signals coalesce via non-blocking send.
-- **No automatic re-capture**: After the initial screenshot, captures only occur when `forceCapture` is signaled. No timers, no deferred capture.
+- **`streaming` channel**: Toggles continuous capture mode. `true` starts a `time.Ticker` at 200 ms (5 FPS hard cap); `false` stops it. Buffered 1; drain-then-send for latest-wins semantics. During streaming, force signals are coalesced with the tick schedule — a force capture triggers a capture only if ≥200 ms elapsed since the last sent frame.
+- **No automatic re-capture**: When not streaming, captures only occur when `forceCapture` is signaled. No timers, no deferred capture.
 - **Buffer reuse**: Single `bytes.Buffer` reused across frames (~150 KB/frame savings).
 - **Circuit breaker**: After `maxConsecutiveCaptureFails` (10) consecutive non-transient failures, returns an error.
-- **Display-unavailable handling**: When `isDisplayUnavailable()` returns true (monitor off/sleeping), `captureAndSend` returns `transient=true` and resets `consecutiveFails` without tripping the circuit breaker. On macOS (CGO) this queries CoreGraphics `CGDisplayIsActive`; on other platforms (or darwin with `-tags purego`) it matches the robotgo error string (`robotgoCaptureErrSubstr`). Transient failures are logged but do not schedule a retry — the next capture occurs on the next manual refresh.
-- **Pre-flight permission check**: `checkScreenAccess()` is called before the first capture. On macOS (CGO) it uses `CGPreflightScreenCaptureAccess()` and fails immediately with an actionable error directing the user to System Settings → Privacy & Security → Screen Recording. On other platforms and `-tags purego`, it is a no-op.
-- **JPEG quality**: 75 provides crisp text rendering at ~100–300 KB per 1080p frame.
+- **Display-unavailable handling**: When `isDisplayUnavailable()` returns true (monitor off/sleeping), `captureAndSend` returns `transient=true` and resets `consecutiveFails` without tripping the circuit breaker. On macOS (CGO) this queries CoreGraphics `CGDisplayIsActive`; on other platforms (or darwin with `-tags purego`) it matches the robotgo error string (`robotgoCaptureErrSubstr`). Transient failures are logged but do not schedule a retry — the next capture occurs on the next manual refresh or tick.
+- **Pre-flight permission check**: `checkScreenAccessFn()` is called before the first capture. On macOS (CGO) it uses `CGPreflightScreenCaptureAccess()` and fails immediately with an actionable error directing the user to System Settings → Privacy & Security → Screen Recording. On other platforms and `-tags purego`, it is a no-op. `checkScreenAccessFn` is a test seam — tests substitute a no-op to bypass the macOS permission gate.
+- **WebP quality**: 75 provides crisp text rendering at ~80–250 KB per 1080p frame. `github.com/deepteams/webp` is a pure-Go VP8 encoder (no CGO required). `Method: 4` is the default speed/compression trade-off.
+- **Test seam**: `var captureImg = robotgo.CaptureImg` allows tests to substitute a synthetic image source.
 
-Each screenshot payload is prefixed with an 8-byte big-endian Unix-millisecond timestamp (`ScreenshotTimestampSize = 8`). The server parses and strips this prefix before forwarding JPEG to the frontend, and sends a `FrameScreenshotAck` back to the agent.
+Each screenshot payload is prefixed with an 8-byte big-endian Unix-millisecond timestamp (`ScreenshotTimestampSize = 8`). The server parses and strips this prefix before forwarding WebP to the frontend, and sends a `FrameScreenshotAck` back to the agent.
 
 ## Input Dispatch
 
@@ -66,6 +68,9 @@ Each screenshot payload is prefixed with an 8-byte big-endian Unix-millisecond t
 | `key_tap` | `KeyTap(key,[mods])` | Key+modifiers whitelisted |
 | `key_toggle` | `KeyToggle(key,state)` | Key whitelisted, state ∈ {down,up} |
 | `type_text` | `Type(text)` | Length ≤ 256, no control chars |
+| `refresh_screenshot` | — | Intercepted by proxy; signal forceCapture |
+| `start_streaming` | — | Intercepted by proxy; toggle streaming on |
+| `stop_streaming` | — | Intercepted by proxy; toggle streaming off |
 
 `ReleaseAllInputs()` releases all mouse buttons and modifier keys — called on session teardown to prevent stuck keys from lost "up" events.
 
@@ -88,8 +93,8 @@ Typed error types: `InvalidKeyError`, `InvalidModifierError`, `TextTooLongError`
 `ProxyRemoteApp(stream net.Conn)` orchestrates:
 1. Wrap stream in a `lockedWriter` for concurrent-safe frame writes
 2. Send `FrameScreenInfo` with initial screen dimensions
-3. Create `forceCapture` channel (buffered 1), start `CaptureLoop` goroutine
-4. Main loop: `ReadFrame` → dispatch input events; for every `FrameInput`, send `FrameInputAck` back with event type and detail; intercept `refresh_screenshot` control events to signal `forceCapture` and send `InputAck` without dispatching to robotgo; handle `FrameScreenshotAck` from server
+3. Create `forceCapture` channel (buffered 1) and `streaming` channel (buffered 1), start `CaptureLoop` goroutine
+4. Main loop: `ReadFrame` → dispatch input events; for every `FrameInput`, send `FrameInputAck` back with event type and detail; intercept `refresh_screenshot`, `start_streaming`, `stop_streaming` control events to signal `forceCapture` / `streaming` and send `InputAck` without dispatching to robotgo; handle `FrameScreenshotAck` from server
 5. On stream close: cancel capture, `ReleaseAllInputs`, wait for capture goroutine, emit "session ended" log event, close `lockedWriter`, close stream
 
 ## Concurrency Model
