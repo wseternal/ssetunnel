@@ -5,6 +5,7 @@ go 1.26.5
 require (
 	github.com/cenkalti/backoff/v4 v4.3.0
 	github.com/creack/pty v1.1.24
+	github.com/deepteams/webp v1.2.7
 	github.com/dgraph-io/badger/v4 v4.9.5
 	github.com/go-vgo/robotgo v1.0.2
 	github.com/gorilla/mux v1.8.1

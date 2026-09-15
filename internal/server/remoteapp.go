@@ -227,7 +227,7 @@ func (h *Handler) handleRemoteApp(w http.ResponseWriter, r *http.Request) {
 
 	// SSE loop: read typed frames from yamux stream → write SSE events.
 	// The agent sends:
-	//   - FrameScreenshot (0x01): [8-byte BE timestamp][JPEG] → base64 SSE data frame + ACK
+	//   - FrameScreenshot (0x01): [8-byte BE timestamp][WebP] → base64 SSE data frame + ACK
 	//   - FrameScreenInfo (0x03): JSON screen info → SSE "screeninfo" event
 	//   - FrameLogEvent (0x04): JSON log event → SSE "log" event (observability)
 	//   - FrameInputAck (0x06): JSON input ack → SSE "inputack" event (UI tooltip)
@@ -259,8 +259,8 @@ func (h *Handler) handleRemoteApp(w http.ResponseWriter, r *http.Request) {
 		switch frameType {
 		case remoteapp.FrameScreenshot:
 			// Parse and strip the 8-byte timestamp prefix from the payload.
-			// Forward only the JPEG data to the frontend; ACK back to agent.
-			ts, jpegData, ok := remoteapp.ParseScreenshotTimestamp(readBuf[:n])
+			// Forward only the image data to the frontend; ACK back to agent.
+			ts, imageData, ok := remoteapp.ParseScreenshotTimestamp(readBuf[:n])
 			if !ok {
 				// Malformed: payload shorter than timestamp prefix.
 				// Skip this frame rather than sending corrupt data.
@@ -268,10 +268,10 @@ func (h *Handler) handleRemoteApp(w http.ResponseWriter, r *http.Request) {
 				_ = writeSSELogEvent(w, f, "warn", "server", "malformed screenshot frame (no timestamp)")
 				continue
 			}
-			if werr := writeSSEDataFrame(w, f, jpegData); werr != nil {
+			if werr := writeSSEDataFrame(w, f, imageData); werr != nil {
 				return
 			}
-			h.metrics.RecordConnectBytes(agentID, 0, len(jpegData))
+			h.metrics.RecordConnectBytes(agentID, 0, len(imageData))
 			// Send ACK back to the agent via yamux stream.
 			streamMu.Lock()
 			ackErr := remoteapp.WriteScreenshotAck(stream, ts)

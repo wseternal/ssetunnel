@@ -202,6 +202,8 @@ func TestValidateInputEventType(t *testing.T) {
 		{"key_toggle", true},
 		{"type_text", true},
 		{"refresh_screenshot", true},
+		{"start_streaming", true},
+		{"stop_streaming", true},
 		{"", false},
 		{"unknown", false},
 		{"MOUSE_MOVE", false}, // case-sensitive

@@ -331,6 +331,11 @@ export default function App() {
   // palette state without re-attaching listeners on every toggle.
   useEffect(() => { paletteOpenRef.current = paletteOpen; }, [paletteOpen]);
 
+  // Desktop streaming state (per-connection, reset on disconnect).
+  const [desktopStreaming, setDesktopStreaming] = useState(false);
+  const desktopStreamingRef = useRef(false);
+  useEffect(() => { desktopStreamingRef.current = desktopStreaming; }, [desktopStreaming]);
+
   // Shell command palette state
   const [shellPaletteOpen, setShellPaletteOpen] = useState(false);
   const shellPaletteOpenRef = useRef(false);
@@ -372,6 +377,8 @@ export default function App() {
       case 'type_text': return d ? `Type "${d}"` : 'Type';
       case 'mouse_drag': return d ? `Drag ${d}` : 'Drag';
       case 'refresh_screenshot': return '⟳ Refreshing…';
+      case 'start_streaming': return '▶ Streaming started';
+      case 'stop_streaming': return '⏹ Streaming stopped';
       default: return t;
     }
   };
@@ -867,6 +874,8 @@ export default function App() {
     metaDownRef.current = false;
     setTextEditorOpen(false);
     setTextEditorContent('');
+    setDesktopStreaming(false);
+    desktopStreamingRef.current = false;
   }, []);
 
   const disconnectDesktop = useCallback(() => {
@@ -959,7 +968,7 @@ export default function App() {
           } else {
             // Screenshot frame: update image src
             if (desktopImgRef.current) {
-              desktopImgRef.current.src = `data:image/jpeg;base64,${eventData}`;
+              desktopImgRef.current.src = `data:image/webp;base64,${eventData}`;
             }
           }
         }
@@ -1051,7 +1060,7 @@ export default function App() {
   }, []);
 
   // Palette action handler
-  const handlePaletteAction = useCallback((action: string) => {
+  const handlePaletteAction = useCallback(async (action: string) => {
     setPaletteOpen(false);
     const sid = desktopSessionId;
     const abort = desktopAbortRef.current;
@@ -1060,6 +1069,26 @@ export default function App() {
       case 'refresh-screenshot':
         sendDesktopInput(sid, { type: 'refresh_screenshot' }, abort.signal);
         break;
+      case 'toggle-streaming': {
+        const next = !desktopStreamingRef.current;
+        desktopStreamingRef.current = next; // sync ref immediately (useEffect is async)
+        setDesktopStreaming(next);
+        try {
+          // Inline fetch instead of sendDesktopInput — sendDesktopInput
+          // swallows errors, so rollback would never trigger.
+          await fetch('/console/api/v1/remoteapp/connect-up', {
+            method: 'POST',
+            headers: { ...authHeaders(), 'X-SSET-Session': sid, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ type: next ? 'start_streaming' : 'stop_streaming' }),
+            signal: abort.signal,
+          });
+        } catch {
+          // Rollback on failure
+          desktopStreamingRef.current = !next;
+          setDesktopStreaming(!next);
+        }
+        break;
+      }
       case 'send-text':
         setTextEditorContent('');
         setTextEditorOpen(true);
@@ -1177,6 +1206,7 @@ export default function App() {
         }
         switch (e.key.toLowerCase()) {
           case 'r': handlePaletteAction('refresh-screenshot'); return;
+          case 's': handlePaletteAction('toggle-streaming'); return;
           case 't': handlePaletteAction('send-text'); return;
           case 'f': handlePaletteAction('toggle-fullscreen'); return;
           case 'q': handlePaletteAction('disconnect'); return;
@@ -2186,6 +2216,7 @@ export default function App() {
               </Box>
               {[
                 { id: 'refresh-screenshot', label: 'Refresh Screenshot', shortcut: 'R' },
+                { id: 'toggle-streaming', label: desktopStreaming ? 'Stop Streaming' : 'Start Streaming', shortcut: 'S' },
                 { id: 'send-text', label: 'Send Text', shortcut: 'T' },
                 { id: 'toggle-fullscreen', label: 'Toggle Fullscreen', shortcut: 'F' },
                 { id: 'disconnect', label: 'Disconnect', shortcut: 'Q' },

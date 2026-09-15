@@ -15,7 +15,7 @@ func TestWriteReadFrameRoundTrip(t *testing.T) {
 		frameType byte
 		data      []byte
 	}{
-		{"screenshot", FrameScreenshot, []byte("fake-jpeg-data")},
+		{"screenshot", FrameScreenshot, []byte("fake-webp-data")},
 		{"input", FrameInput, []byte(`{"type":"mouse_click","x":100,"y":200}`)},
 		{"screeninfo", FrameScreenInfo, []byte(`{"width":1920,"height":1080}`)},
 		{"empty data", FrameScreenshot, nil},
@@ -107,7 +107,7 @@ func TestReadFrameIntoRoundTrip(t *testing.T) {
 		frameType byte
 		data      []byte
 	}{
-		{"screenshot", FrameScreenshot, []byte("fake-jpeg-data")},
+		{"screenshot", FrameScreenshot, []byte("fake-webp-data")},
 		{"input", FrameInput, []byte(`{"type":"mouse_click","x":100,"y":200}`)},
 		{"empty data", FrameScreenshot, nil},
 		{"large data", FrameScreenshot, bytes.Repeat([]byte{0xAB}, 1<<16)},
@@ -159,7 +159,7 @@ func TestReadFrameIntoBufferTooSmall(t *testing.T) {
 }
 
 func BenchmarkWriteFrame(b *testing.B) {
-	data := bytes.Repeat([]byte{0xAB}, 150_000) // ~150 KB JPEG
+	data := bytes.Repeat([]byte{0xAB}, 150_000) // ~150 KB WebP
 	var buf bytes.Buffer
 	b.ResetTimer()
 	b.ReportAllocs()
@@ -286,7 +286,7 @@ func TestLockedWriterClosePreventsWrites(t *testing.T) {
 	if err := lw.writeFrame(FrameScreenshot, []byte("data")); err != ErrWriterClosed {
 		t.Errorf("writeFrame after close: got %v, want %v", err, ErrWriterClosed)
 	}
-	if err := lw.writeScreenshotWithTimestamp([]byte("jpeg"), time.Now()); err != ErrWriterClosed {
+	if err := lw.writeScreenshotWithTimestamp([]byte("webp"), time.Now()); err != ErrWriterClosed {
 		t.Errorf("writeScreenshotWithTimestamp after close: got %v, want %v", err, ErrWriterClosed)
 	}
 	_, err := lw.Write([]byte("raw"))
@@ -296,11 +296,11 @@ func TestLockedWriterClosePreventsWrites(t *testing.T) {
 }
 
 func TestScreenshotTimestampRoundTrip(t *testing.T) {
-	jpegData := []byte("fake-jpeg-data-for-timestamp-test")
+	webpData := []byte("fake-webp-data-for-timestamp-test")
 	ts := time.Date(2025, 7, 31, 12, 30, 45, 123_000_000, time.UTC)
 
 	var buf bytes.Buffer
-	if err := WriteScreenshotWithTimestamp(&buf, jpegData, ts); err != nil {
+	if err := WriteScreenshotWithTimestamp(&buf, webpData, ts); err != nil {
 		t.Fatalf("WriteScreenshotWithTimestamp: %v", err)
 	}
 
@@ -312,15 +312,15 @@ func TestScreenshotTimestampRoundTrip(t *testing.T) {
 		t.Errorf("frame type: got 0x%02x, want 0x%02x", frameType, FrameScreenshot)
 	}
 
-	gotTS, gotJPEG, ok := ParseScreenshotTimestamp(data)
+	gotTS, gotWebP, ok := ParseScreenshotTimestamp(data)
 	if !ok {
 		t.Fatal("ParseScreenshotTimestamp: ok=false")
 	}
 	if !gotTS.Equal(ts.Truncate(time.Millisecond)) {
 		t.Errorf("timestamp: got %v, want %v", gotTS, ts)
 	}
-	if !bytes.Equal(gotJPEG, jpegData) {
-		t.Errorf("jpeg data: got %d bytes, want %d bytes", len(gotJPEG), len(jpegData))
+	if !bytes.Equal(gotWebP, webpData) {
+		t.Errorf("webp data: got %d bytes, want %d bytes", len(gotWebP), len(webpData))
 	}
 }
 
@@ -463,6 +463,8 @@ func TestAckDetail(t *testing.T) {
 		{"type_text long unicode", InputEvent{Type: "type_text", Text: "\u4f60\u597d\u4e16\u754c\u4f60\u597d\u4e16\u754c\u4f60\u597d\u4e16\u754c"}, "\u4f60\u597d\u4e16\u754c\u4f60\u597d\u4e16\u754c\u4f60\u597d..."},
 		{"mouse_move", InputEvent{Type: "mouse_move"}, ""},
 		{"refresh_screenshot", InputEvent{Type: "refresh_screenshot"}, "refresh"},
+		{"start_streaming", InputEvent{Type: "start_streaming"}, "streaming started"},
+		{"stop_streaming", InputEvent{Type: "stop_streaming"}, "streaming stopped"},
 		{"unknown", InputEvent{Type: "unknown_type"}, ""},
 	}
 	for _, tt := range tests {

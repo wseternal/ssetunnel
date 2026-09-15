@@ -65,6 +65,10 @@ func ProxyRemoteApp(stream net.Conn) {
 	// Buffered 1; extra signals coalesce.
 	forceCapture := make(chan struct{}, 1)
 
+	// streaming toggles the capture loop's continuous streaming mode.
+	// Buffered 1; drain-then-send for latest-wins semantics.
+	streaming := make(chan bool, 1)
+
 	// lastAckUnixMilli tracks the latest server-ACK'd screenshot timestamp
 	// for observability. Loaded at session teardown for the final log line.
 	var lastAckUnixMilli atomic.Int64
@@ -75,7 +79,7 @@ func ProxyRemoteApp(stream net.Conn) {
 	// Goroutine: capture screenshots → yamux stream.
 	go func() {
 		defer wg.Done()
-		if err := CaptureLoop(ctx, lw, forceCapture); err != nil && err != context.Canceled {
+		if err := CaptureLoop(ctx, lw, forceCapture, streaming); err != nil && err != context.Canceled {
 			log.Printf("remoteapp: capture loop: %v", err)
 			if werr := lw.writeLogEvent("error", fmt.Sprintf("capture loop exited: %v", err)); werr != nil {
 				log.Printf("remoteapp: writeLogEvent: %v", werr)
@@ -92,7 +96,22 @@ func ProxyRemoteApp(stream net.Conn) {
 		}
 	}
 
+	// signalStreaming sends a streaming toggle signal to the capture loop.
+	// Non-blocking; drain-then-send for latest-wins semantics.
+	signalStreaming := func(on bool) {
+		// Drain any pending signal before sending the new one.
+		select {
+		case <-streaming:
+		default:
+		}
+		select {
+		case streaming <- on:
+		default:
+		}
+	}
+
 	// Main goroutine: read frames from yamux stream → dispatch.
+readLoop:
 	for {
 		frameType, data, err := ReadFrame(stream)
 		if err != nil {
@@ -111,13 +130,34 @@ func ProxyRemoteApp(stream net.Conn) {
 
 			// Control events: protocol-level actions that do not
 			// dispatch to robotgo.
-			if event.Type == "refresh_screenshot" {
+			switch event.Type {
+			case "refresh_screenshot":
 				log.Printf("remoteapp: refresh_screenshot received")
 				signalForceCapture()
 				if werr := lw.writeInputAck(InputAck{Type: event.Type, Detail: "refresh"}); werr != nil {
 					log.Printf("remoteapp: writeInputAck: %v", werr)
 					if errors.Is(werr, ErrWriterClosed) {
-						break
+						break readLoop
+					}
+				}
+				continue
+			case "start_streaming":
+				log.Printf("remoteapp: start_streaming received")
+				signalStreaming(true)
+				if werr := lw.writeInputAck(InputAck{Type: event.Type, Detail: "streaming started"}); werr != nil {
+					log.Printf("remoteapp: writeInputAck: %v", werr)
+					if errors.Is(werr, ErrWriterClosed) {
+						break readLoop
+					}
+				}
+				continue
+			case "stop_streaming":
+				log.Printf("remoteapp: stop_streaming received")
+				signalStreaming(false)
+				if werr := lw.writeInputAck(InputAck{Type: event.Type, Detail: "streaming stopped"}); werr != nil {
+					log.Printf("remoteapp: writeInputAck: %v", werr)
+					if errors.Is(werr, ErrWriterClosed) {
+						break readLoop
 					}
 				}
 				continue
@@ -129,7 +169,7 @@ func ProxyRemoteApp(stream net.Conn) {
 				if werr := lw.writeInputAck(InputAck{Type: event.Type, Detail: ackDetail(event)}); werr != nil {
 					log.Printf("remoteapp: writeInputAck: %v", werr)
 					if errors.Is(werr, ErrWriterClosed) {
-						break // stream is dead, exit read loop
+						break readLoop // stream is dead, exit read loop
 					}
 				}
 			}
@@ -195,6 +235,10 @@ func ackDetail(event InputEvent) string {
 		return ""
 	case "refresh_screenshot":
 		return "refresh"
+	case "start_streaming":
+		return "streaming started"
+	case "stop_streaming":
+		return "streaming stopped"
 	default:
 		return ""
 	}
