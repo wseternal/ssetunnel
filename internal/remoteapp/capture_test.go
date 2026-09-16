@@ -471,12 +471,6 @@ phase1:
 
 	time.Sleep(600 * time.Millisecond)
 
-	mu.Lock()
-	phase1Frames := make([]time.Time, len(frameAts))
-	copy(phase1Frames, frameAts)
-	phase1Count := len(frameAts)
-	mu.Unlock()
-
 	// Switch to 2 FPS.
 	select {
 	case <-maxFPSCh:
@@ -547,7 +541,7 @@ phase2:
 		}
 	}
 
-	_ = phase1Count // suppress unused warning
+	_ = count // suppress unused warning
 }
 
 // TestFPSCallbackInvoked verifies that the fpsCallback is invoked
