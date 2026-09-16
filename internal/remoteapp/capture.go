@@ -62,9 +62,10 @@ const maxConsecutiveCaptureFails = 10
 const maxConsecutiveEncodeFails = 10
 
 // maxConsecutiveTransientFails is the number of consecutive display-unavailable
-// failures before the circuit breaker trips. These are normally transient
-// (monitor off, display mode switching), but if they persist the underlying
-// issue is likely permanent (e.g. ScreenCaptureKit permission mismatch).
+// failures after which an extra warning is logged. Unlike a circuit breaker,
+// the capture loop never gives up on transient failures — they always resolve
+// when the display becomes available (e.g. after VNC reconnect, monitor wake).
+// The exponential backoff (capped at transientBackoffCap) keeps retry cost low.
 var maxConsecutiveTransientFails = 30
 
 // transientBackoffBase is the initial backoff delay after the first consecutive
@@ -140,39 +141,44 @@ func CaptureLoop(ctx context.Context, w io.Writer, forceCapture <-chan struct{},
 
 	// captureAndSend captures a screenshot and writes it as a WebP frame.
 	// Returns (isTransient=true, err=nil) when capture fails due to the
-	// display being unavailable (monitor off/sleeping) — the caller may
-	// log the event without tripping the circuit breaker.
-	// Returns (false, err) when the circuit breaker trips or a non-transient
-	// write/encode error occurs.
+	// display being unavailable (monitor off/sleeping, ScreenCaptureKit
+	// not ready after VNC disconnect) — the caller may log the event
+	// without tripping the circuit breaker.
+	// Returns (false, err) when a non-transient write/encode error occurs.
 	captureAndSend := func() (bool, error) {
 		captured, err := captureImg()
 		if err != nil {
 			if isDisplayUnavailableFn(err) {
 				captureFails = 0 // display-off invalidates prior fail history
 				transientFails++
-				// Circuit breaker for persistent transient failures.
-				if transientFails >= localMaxTransient {
-					writeLog("error", fmt.Sprintf("transient capture circuit breaker: %d consecutive display-unavailable failures: %v", transientFails, err))
-					return false, fmt.Errorf("transient capture failed %d consecutive times: %w", transientFails, err)
-				}
 				// Exponential backoff after 3 consecutive transient failures.
+				// Transient failures (display sleeping, ScreenCaptureKit not
+				// ready after virtual display transitions) are retried
+				// indefinitely — they always resolve when the display
+				// becomes available again.
 				if transientFails > 3 {
 					backoff := localBackoffBase * time.Duration(1<<min(transientFails-3, 6))
 					if backoff > localBackoffCap {
 						backoff = localBackoffCap
 					}
-					log.Printf("remoteapp: capture: display unavailable (%d/%d consecutive, backing off %v): %v",
-						transientFails, localMaxTransient, backoff, err)
-					writeLog("warn", fmt.Sprintf("display unavailable (%d/%d, retry in %v): %v",
-						transientFails, localMaxTransient, backoff, err))
+					if transientFails == localMaxTransient {
+						log.Printf("remoteapp: capture: display unavailable (%d consecutive, still retrying with %v backoff): %v",
+							transientFails, backoff, err)
+						writeLog("warn", fmt.Sprintf("display unavailable (%d consecutive, still retrying): %v",
+							transientFails, err))
+					}
+					log.Printf("remoteapp: capture: display unavailable (%d consecutive, backing off %v): %v",
+						transientFails, backoff, err)
+					writeLog("warn", fmt.Sprintf("display unavailable (%d, retry in %v): %v",
+						transientFails, backoff, err))
 					select {
 					case <-time.After(backoff):
 					case <-ctx.Done():
 						return false, ctx.Err()
 					}
 				} else {
-					log.Printf("remoteapp: capture: display unavailable (%d/%d consecutive): %v",
-						transientFails, localMaxTransient, err)
+					log.Printf("remoteapp: capture: display unavailable (%d consecutive): %v",
+						transientFails, err)
 					writeLog("warn", fmt.Sprintf("display unavailable (refresh to retry): %v", err))
 				}
 				return true, nil

@@ -621,21 +621,34 @@ func (f *frameRecorder) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// TestTransientCircuitBreaker verifies that the capture loop exits with
-// an error after maxConsecutiveTransientFails consecutive display-unavailable
-// failures, rather than retrying forever.
-func TestTransientCircuitBreaker(t *testing.T) {
-	// Override transient limits for fast testing.
-	origLimit := maxConsecutiveTransientFails
+// TestTransientNeverCircuitBreaks verifies that the capture loop never
+// exits due to consecutive display-unavailable (transient) failures. After
+// many failures, the loop keeps retrying with backoff. A subsequent
+// successful capture resets the counter and produces a frame.
+func TestTransientNeverCircuitBreaks(t *testing.T) {
+	// Use fast backoff for testing.
 	origBase := transientBackoffBase
 	origCap := transientBackoffCap
-	maxConsecutiveTransientFails = 5
 	transientBackoffBase = time.Millisecond
 	transientBackoffCap = 2 * time.Millisecond
 
+	// Track capture attempts and allow switching from fail to success.
+	var (
+		callMu    sync.Mutex
+		callN     int
+		failUntil = 10 // fail the first 10 captures (at 1 FPS, takes ~10s)
+	)
+
 	origCapture := captureImg
 	captureImg = func(args ...int) (image.Image, error) {
-		return nil, errors.New("Capture image not found.")
+		callMu.Lock()
+		callN++
+		n := callN
+		callMu.Unlock()
+		if n <= failUntil {
+			return nil, errors.New("Capture image not found.")
+		}
+		return syntheticImage(), nil
 	}
 
 	fw := &frameRecorder{
@@ -655,23 +668,51 @@ func TestTransientCircuitBreaker(t *testing.T) {
 		done <- CaptureLoop(ctx, fw, forceCapture, streaming, nil, nil)
 	}()
 
-	select {
-	case err := <-done:
-		if err == nil {
-			t.Fatal("expected circuit breaker error, got nil")
+	// Wait for the loop to process > failUntil transient failures.
+	// At default 1 FPS, each tick is 1s; 10 failures take ~10s.
+	deadline := time.After(20 * time.Second)
+	for {
+		callMu.Lock()
+		calls := callN
+		callMu.Unlock()
+		if calls >= failUntil {
+			break
 		}
-		if !strings.Contains(err.Error(), "transient capture failed") {
-			t.Errorf("expected transient circuit breaker error, got: %v", err)
+		select {
+		case <-deadline:
+			cancel()
+			<-done
+			t.Fatalf("timed out waiting for %d capture attempts, got %d", failUntil, calls)
+			return
+		case <-time.After(100 * time.Millisecond):
 		}
-	case <-time.After(20 * time.Second):
-		cancel()
-		<-done
-		t.Fatal("capture loop did not exit after transient circuit breaker")
 	}
 
-	// Restore after goroutine exit to avoid data race.
+	// Verify the loop is still running (did NOT exit with a circuit breaker error).
+	select {
+	case err := <-done:
+		t.Fatalf("capture loop exited unexpectedly after transient failures: %v", err)
+	default:
+		// Good — loop still running.
+	}
+
+	// Now the capture function will return a valid image (n > failUntil).
+	// Wait for the streaming tick to produce a frame.
+	time.Sleep(2 * time.Second)
+
+	fw.mu.Lock()
+	frames := len(*fw.frameAts)
+	fw.mu.Unlock()
+
+	if frames < 1 {
+		t.Errorf("expected at least 1 frame after transient recovery, got %d", frames)
+	}
+
+	cancel()
+	<-done
+
+	// Restore.
 	captureImg = origCapture
-	maxConsecutiveTransientFails = origLimit
 	transientBackoffBase = origBase
 	transientBackoffCap = origCap
 }
@@ -681,10 +722,8 @@ func TestTransientCircuitBreaker(t *testing.T) {
 func TestTransientBackoffApplied(t *testing.T) {
 	origBase := transientBackoffBase
 	origCap := transientBackoffCap
-	origLimit := maxConsecutiveTransientFails
 	transientBackoffBase = 50 * time.Millisecond
 	transientBackoffCap = 100 * time.Millisecond
-	maxConsecutiveTransientFails = 20 // high enough to not trip
 
 	origCapture := captureImg
 
@@ -730,7 +769,6 @@ func TestTransientBackoffApplied(t *testing.T) {
 			captureImg = origCapture
 			transientBackoffBase = origBase
 			transientBackoffCap = origCap
-			maxConsecutiveTransientFails = origLimit
 			t.Fatalf("timed out waiting for captures, got %d", n)
 			return
 		default:
@@ -745,7 +783,6 @@ func TestTransientBackoffApplied(t *testing.T) {
 	captureImg = origCapture
 	transientBackoffBase = origBase
 	transientBackoffCap = origCap
-	maxConsecutiveTransientFails = origLimit
 
 	callTimesMu.Lock()
 	defer callTimesMu.Unlock()
