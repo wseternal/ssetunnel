@@ -48,6 +48,11 @@ var captureImg = robotgo.CaptureImg
 // substitute a no-op to bypass the macOS permission gate.
 var checkScreenAccessFn = checkScreenAccess
 
+// isDisplayUnavailableFn is a test seam for the display-unavailable check.
+// Production code calls isDisplayUnavailable (platform-specific); tests
+// substitute a string-matching implementation to avoid platform API deps.
+var isDisplayUnavailableFn = isDisplayUnavailable
+
 // maxConsecutiveCaptureFails is the number of consecutive capture failures
 // before the loop gives up and returns an error (circuit breaker).
 const maxConsecutiveCaptureFails = 10
@@ -55,6 +60,19 @@ const maxConsecutiveCaptureFails = 10
 // maxConsecutiveEncodeFails is the number of consecutive WebP encode failures
 // before the loop gives up and returns an error (independent of capture).
 const maxConsecutiveEncodeFails = 10
+
+// maxConsecutiveTransientFails is the number of consecutive display-unavailable
+// failures before the circuit breaker trips. These are normally transient
+// (monitor off, display mode switching), but if they persist the underlying
+// issue is likely permanent (e.g. ScreenCaptureKit permission mismatch).
+var maxConsecutiveTransientFails = 30
+
+// transientBackoffBase is the initial backoff delay after the first consecutive
+// transient failure. Doubles on each subsequent failure up to transientBackoffCap.
+var transientBackoffBase = 200 * time.Millisecond
+
+// transientBackoffCap bounds the exponential backoff for transient failures.
+var transientBackoffCap = 5 * time.Second
 
 // defaultEncoderOpts is the shared EncoderOptions used for every WebP encode.
 // Hoisted to avoid allocating a new struct on every frame.
@@ -96,6 +114,7 @@ func CaptureLoop(ctx context.Context, w io.Writer, forceCapture <-chan struct{},
 	var buf bytes.Buffer
 	captureFails := 0
 	encodeFails := 0
+	transientFails := 0
 	var lastFrameAt time.Time // tracks last frame send time for rate limiting
 
 	writeLog := func(severity, message string) {
@@ -121,12 +140,33 @@ func CaptureLoop(ctx context.Context, w io.Writer, forceCapture <-chan struct{},
 	captureAndSend := func() (bool, error) {
 		captured, err := captureImg()
 		if err != nil {
-			if isDisplayUnavailable(err) {
+			if isDisplayUnavailableFn(err) {
 				captureFails = 0 // display-off invalidates prior fail history
-				log.Printf("remoteapp: capture: display unavailable: %v", err)
-				writeLog("warn", fmt.Sprintf("display unavailable (refresh to retry): %v", err))
+				transientFails++
+				// Circuit breaker for persistent transient failures.
+				if transientFails >= maxConsecutiveTransientFails {
+					writeLog("error", fmt.Sprintf("transient capture circuit breaker: %d consecutive display-unavailable failures: %v", transientFails, err))
+					return false, fmt.Errorf("transient capture failed %d consecutive times: %w", transientFails, err)
+				}
+				// Exponential backoff after 3 consecutive transient failures.
+				if transientFails > 3 {
+					backoff := transientBackoffBase * time.Duration(1<<min(transientFails-3, 6))
+					if backoff > transientBackoffCap {
+						backoff = transientBackoffCap
+					}
+					log.Printf("remoteapp: capture: display unavailable (%d/%d consecutive, backing off %v): %v",
+						transientFails, maxConsecutiveTransientFails, backoff, err)
+					writeLog("warn", fmt.Sprintf("display unavailable (%d/%d, retry in %v): %v",
+						transientFails, maxConsecutiveTransientFails, backoff, err))
+					time.Sleep(backoff)
+				} else {
+					log.Printf("remoteapp: capture: display unavailable (%d/%d consecutive): %v",
+						transientFails, maxConsecutiveTransientFails, err)
+					writeLog("warn", fmt.Sprintf("display unavailable (refresh to retry): %v", err))
+				}
 				return true, nil
 			}
+			transientFails = 0 // non-display error resets transient counter
 			captureFails++
 			if captureFails >= maxConsecutiveCaptureFails {
 				writeLog("error", fmt.Sprintf("capture circuit breaker: %d consecutive failures: %v", captureFails, err))
@@ -136,7 +176,8 @@ func CaptureLoop(ctx context.Context, w io.Writer, forceCapture <-chan struct{},
 			writeLog("warn", fmt.Sprintf("capture failed (attempt %d/%d): %v", captureFails, maxConsecutiveCaptureFails, err))
 			return false, nil // non-fatal
 		}
-		captureFails = 0 // reset on success
+		captureFails = 0   // reset on success
+		transientFails = 0 // reset on success
 
 		buf.Reset()
 		if err := webp.Encode(&buf, captured, defaultEncoderOpts); err != nil {
