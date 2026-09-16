@@ -1113,7 +1113,6 @@ export default function App() {
         const next = !desktopStreamingRef.current;
         desktopStreamingRef.current = next; // sync ref immediately (useEffect is async)
         setDesktopStreaming(next);
-        if (next) setDesktopMaxFps(10); // reset to default on start
         try {
           // Inline fetch instead of sendDesktopInput — sendDesktopInput
           // swallows errors, so rollback would never trigger.

@@ -336,8 +336,8 @@ func (h *Handler) handleRemoteApp(w http.ResponseWriter, r *http.Request) {
 			h.metrics.RecordConnectBytes(agentID, 0, n)
 		case remoteapp.FrameFPS:
 			// Forward FPS metric event from agent to frontend.
-			var fpsEvt remoteapp.FPSEvent
-			if err := json.Unmarshal(readBuf[:n], &fpsEvt); err != nil {
+			fpsEvt, ok := remoteapp.ParseFPSEvent(readBuf[:n])
+			if !ok {
 				continue // skip malformed FPS events
 			}
 			sanitized, err := json.Marshal(fpsEvt)
@@ -355,9 +355,13 @@ func (h *Handler) handleRemoteApp(w http.ResponseWriter, r *http.Request) {
 		// Check if FPS ticker fired during frame processing.
 		select {
 		case <-fpsTicker.C:
-			fps := frameCount
-			frameCount = 0
-			log.Printf("remoteapp: FPS agent=%s session=%s: %d", agentID, id, fps)
+			if frameCount > 0 {
+				fps := frameCount
+				frameCount = 0
+				log.Printf("remoteapp: FPS agent=%s session=%s: %d", agentID, id, fps)
+			} else {
+				frameCount = 0
+			}
 		default:
 		}
 	}

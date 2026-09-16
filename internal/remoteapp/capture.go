@@ -160,9 +160,9 @@ func CaptureLoop(ctx context.Context, w io.Writer, forceCapture <-chan struct{},
 
 	// maybeCapture triggers a capture, respecting the streaming rate cap.
 	// When force=true and streaming is active, the capture is skipped if
-	// less than streamInterval has elapsed since the last frame (coalesce
-	// force-refresh into the tick schedule). When not streaming, force
-	// captures immediately.
+	// less than the current FPS interval has elapsed since the last frame
+	// (coalesce force-refresh into the tick schedule). When not streaming,
+	// force captures immediately.
 	maybeCapture := func(force bool, isStreaming bool, currentFPS int) error {
 		interval := fpsToInterval(currentFPS)
 		if force && isStreaming && !lastFrameAt.IsZero() && time.Since(lastFrameAt) < interval {

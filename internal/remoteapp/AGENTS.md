@@ -26,8 +26,9 @@ Typed length-prefixed frames: `[type][4-byte BE length][data]`.
 | `FrameLogEvent` | 0x04 | Agent → Server | JSON `LogEvent{ts,sev,src,msg}` |
 | `FrameScreenshotAck` | 0x05 | Server → Agent | 8-byte BE UnixMilli (ACK for received screenshot) |
 | `FrameInputAck` | 0x06 | Agent → Server | JSON `InputAck{type,detail}` |
+| `FrameFPS` | 0x07 | Agent → Server | JSON `FPSEvent{max_fps}` (1 Hz while streaming) |
 
-> **Breaking change:** `FrameScreenshot` payload includes an 8-byte timestamp prefix. `FrameInputAck` (0x06) is a new frame type. Screenshots are encoded as WebP via `github.com/deepteams/webp` (pure Go, no CGO). Agent and server must run the same version — mismatched versions will produce corrupt screenshots or unknown frame types during a rolling deployment.
+> **Breaking change:** `FrameScreenshot` payload includes an 8-byte timestamp prefix. `FrameInputAck` (0x06) and `FrameFPS` (0x07) are newer frame types. Screenshots are encoded as WebP via `github.com/deepteams/webp` (pure Go, no CGO). Agent and server must run the same version — mismatched versions will produce corrupt screenshots or unknown frame types during a rolling deployment.
 
 Max frame size: 4 MiB (`maxFrameSize`). `WriteFrame` constructs the header and payload in two separate writes to avoid allocating a combined ~150 KB buffer. Callers MUST ensure exclusive access to the writer for the duration of a `WriteFrame` call; the two writes are NOT atomic. Use `lockedWriter` for concurrent access. `ReadFrame` reads header then payload with `io.ReadFull`.
 
@@ -40,11 +41,13 @@ Max frame size: 4 MiB (`maxFrameSize`). `WriteFrame` constructs the header and p
 
 ## Capture Loop
 
-`CaptureLoop(ctx, w, forceCapture <-chan struct{}, streaming <-chan bool)` captures the primary display and writes timestamped WebP screenshots as typed frames. Capture strategy:
+`CaptureLoop(ctx, w, forceCapture <-chan struct{}, streaming <-chan bool, maxFPS <-chan int, fpsCallback func(int))` captures the primary display and writes timestamped WebP screenshots as typed frames. Capture strategy:
 
 - **Initial capture**: One screenshot on startup before entering the select loop, so the frontend receives the first frame immediately.
 - **`forceCapture` channel**: Triggers an immediate capture when signaled. Used by the command palette "Refresh Screenshot" action. Buffered 1; extra signals coalesce via non-blocking send.
-- **`streaming` channel**: Toggles continuous capture mode. `true` starts a `time.Ticker` at 200 ms (5 FPS hard cap); `false` stops it. Buffered 1; drain-then-send for latest-wins semantics. During streaming, force signals are coalesced with the tick schedule — a force capture triggers a capture only if ≥200 ms elapsed since the last sent frame.
+- **`streaming` channel**: Toggles continuous capture mode. `true` starts a `time.Ticker` at the current maxFPS interval (default 10 FPS, range 1–30); `false` stops it. Buffered 1; drain-then-send for latest-wins semantics. During streaming, force signals are coalesced with the tick schedule — a force capture triggers a capture only if the current FPS interval has elapsed since the last sent frame.
+- **`maxFPS` channel**: Adjusts the streaming FPS cap live. Sending an int (1–30) resets the ticker interval immediately. Buffered 1; drain-then-send for latest-wins semantics. Changes are only meaningful while streaming is active.
+- **`fpsCallback`**: If non-nil, invoked once per second while streaming with the current maxFPS setting for metric reporting (emits `FrameFPS` events).
 - **No automatic re-capture**: When not streaming, captures only occur when `forceCapture` is signaled. No timers, no deferred capture.
 - **Buffer reuse**: Single `bytes.Buffer` reused across frames (~150 KB/frame savings).
 - **Circuit breaker**: After `maxConsecutiveCaptureFails` (10) consecutive non-transient failures, returns an error.
@@ -71,6 +74,7 @@ Each screenshot payload is prefixed with an 8-byte big-endian Unix-millisecond t
 | `refresh_screenshot` | — | Intercepted by proxy; signal forceCapture |
 | `start_streaming` | — | Intercepted by proxy; toggle streaming on |
 | `stop_streaming` | — | Intercepted by proxy; toggle streaming off |
+| `set_max_fps` | — | Intercepted by proxy; adjust FPS cap (Amount field, 1–30) |
 
 `ReleaseAllInputs()` releases all mouse buttons and modifier keys — called on session teardown to prevent stuck keys from lost "up" events.
 
@@ -93,8 +97,8 @@ Typed error types: `InvalidKeyError`, `InvalidModifierError`, `TextTooLongError`
 `ProxyRemoteApp(stream net.Conn)` orchestrates:
 1. Wrap stream in a `lockedWriter` for concurrent-safe frame writes
 2. Send `FrameScreenInfo` with initial screen dimensions
-3. Create `forceCapture` channel (buffered 1) and `streaming` channel (buffered 1), start `CaptureLoop` goroutine
-4. Main loop: `ReadFrame` → dispatch input events; for every `FrameInput`, send `FrameInputAck` back with event type and detail; intercept `refresh_screenshot`, `start_streaming`, `stop_streaming` control events to signal `forceCapture` / `streaming` and send `InputAck` without dispatching to robotgo; handle `FrameScreenshotAck` from server
+3. Create `forceCapture` channel (buffered 1), `streaming` channel (buffered 1), and `maxFPSCh` channel (buffered 1), start `CaptureLoop` goroutine with fpsCallback that emits `FrameFPS` events
+4. Main loop: `ReadFrame` → dispatch input events; for every `FrameInput`, send `FrameInputAck` back with event type and detail; intercept `refresh_screenshot`, `start_streaming`, `stop_streaming`, `set_max_fps` control events to signal `forceCapture` / `streaming` / `maxFPSCh` and send `InputAck` without dispatching to robotgo; handle `FrameScreenshotAck` from server
 5. On stream close: cancel capture, `ReleaseAllInputs`, wait for capture goroutine, emit "session ended" log event, close `lockedWriter`, close stream
 
 ## Concurrency Model
@@ -106,6 +110,7 @@ The agent→server direction has concurrent writers: the capture goroutine (scre
 - `writeLogEvent(severity, message)` — build `LogEvent` JSON + `writeFrame` under mutex
 - `writeScreenshotWithTimestamp(webpData, ts)` — build timestamped payload + `writeFrame` under mutex
 - `writeInputAck(ack InputAck)` — marshal `InputAck` JSON + `writeFrame` under mutex
+- `writeFPSEvent(maxFPS int)` — marshal `FPSEvent` JSON + `writeFrame` under mutex
 - `close()` — set `closed=true` under mutex, preventing further writes
 
 `CaptureLoop` detects `*lockedWriter` via type assertion to use mutex-guarded methods; otherwise falls back to bare `WriteFrame`/`WriteLogEvent` (caller must serialize).
