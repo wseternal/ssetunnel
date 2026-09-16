@@ -2064,7 +2064,7 @@ export default function App() {
             {desktopConnected && (
               <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, minWidth: 180 }}>
                 <Typography variant="caption" sx={{ fontWeight: 600, whiteSpace: 'nowrap' }}>
-                  FPS: {desktopMaxFps}
+                  FPS: {desktopMaxFps}{desktopStreaming ? ` | Q: ${desktopQueue}` : ''}
                 </Typography>
                 <Slider
                   value={desktopMaxFps}
