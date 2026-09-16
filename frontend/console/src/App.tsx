@@ -342,7 +342,8 @@ export default function App() {
   const desktopFrameTimesRef = useRef<number[]>([]);
   const desktopFpsTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   // Max FPS (target cap synced from agent via fps SSE event or slider adjustment).
-  const [desktopMaxFps, setDesktopMaxFps] = useState<number>(10);
+  const [desktopMaxFps, setDesktopMaxFps] = useState<number>(1);
+  const [desktopQueue, setDesktopQueue] = useState<number>(0);
 
   // Shell command palette state
   const [shellPaletteOpen, setShellPaletteOpen] = useState(false);
@@ -887,7 +888,8 @@ export default function App() {
     desktopStreamingRef.current = false;
     // FPS cleanup
     setDesktopFps(0);
-    setDesktopMaxFps(10);
+    setDesktopMaxFps(1);
+    setDesktopQueue(0);
     desktopFrameTimesRef.current = [];
     if (desktopFpsTimerRef.current) {
       clearInterval(desktopFpsTimerRef.current);
@@ -1007,6 +1009,7 @@ export default function App() {
           } else {
             // Screenshot frame: update image src + count for FPS measurement
             desktopFrameTimesRef.current.push(Date.now());
+            setDesktopQueue(q => q + 1);
             if (desktopImgRef.current) {
               desktopImgRef.current.src = `data:image/webp;base64,${eventData}`;
             }
@@ -2058,6 +2061,31 @@ export default function App() {
         title="Remote Desktop"
         actions={
           <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
+            {desktopConnected && (
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, minWidth: 180 }}>
+                <Typography variant="caption" sx={{ fontWeight: 600, whiteSpace: 'nowrap' }}>
+                  FPS: {desktopMaxFps}
+                </Typography>
+                <Slider
+                  value={desktopMaxFps}
+                  min={1}
+                  max={30}
+                  step={1}
+                  marks={[{ value: 1, label: '1' }, { value: 10, label: '10' }, { value: 20, label: '20' }, { value: 30, label: '30' }]}
+                  onChange={(_e, val) => setDesktopMaxFps(val as number)}
+                  onChangeCommitted={(_e, val) => {
+                    const sid = desktopSessionId;
+                    const abort = desktopAbortRef.current;
+                    if (sid && abort) {
+                      sendDesktopInput(sid, { type: 'set_max_fps', amount: val as number }, abort.signal);
+                    }
+                  }}
+                  disabled={!desktopStreaming}
+                  size="small"
+                  sx={{ flexGrow: 1 }}
+                />
+              </Box>
+            )}
             <FormControl size="small" sx={{ minWidth: 180 }}>
               <InputLabel>Agent</InputLabel>
               <Select
@@ -2218,6 +2246,7 @@ export default function App() {
           ref={desktopImgRef}
           alt="Remote Desktop"
           className="remote-desktop-img"
+          onLoad={() => setDesktopQueue(q => Math.max(0, q - 1))}
           style={{
             maxWidth: '100%',
             maxHeight: isFullscreen ? '100vh' : '80vh',
@@ -2252,10 +2281,15 @@ export default function App() {
               }}
               onClick={(e) => e.stopPropagation()}
             >
-              <Box sx={{ px: 2, py: 1.25, borderBottom: 1, borderColor: 'divider' }}>
+              <Box sx={{ px: 2, py: 1.25, borderBottom: 1, borderColor: 'divider', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
                 <Typography variant="overline" color="text.secondary" sx={{ letterSpacing: 1.5 }}>
                   Command Palette
                 </Typography>
+                {desktopStreaming && (
+                  <Typography variant="caption" sx={{ fontFamily: 'monospace', color: 'text.secondary' }}>
+                    FPS: {desktopFps} | Q: {desktopQueue}
+                  </Typography>
+                )}
               </Box>
               {[
                 { id: 'refresh-screenshot', label: 'Refresh Screenshot', shortcut: 'R' },
@@ -2384,47 +2418,6 @@ export default function App() {
                 </Button>
               </Box>
             </Paper>
-          </Box>
-        )}
-        {/* FPS Slider (visible when streaming) */}
-        {desktopStreaming && (
-          <Box
-            sx={{
-              position: 'absolute',
-              bottom: 8,
-              left: 8,
-              zIndex: 12,
-              width: 220,
-              borderRadius: 1,
-              bgcolor: 'rgba(30, 30, 46, 0.85)',
-              px: 2,
-              py: 1,
-            }}
-            onClick={(e) => e.stopPropagation()}
-          >
-            <Typography variant="caption" sx={{ color: '#e0e0e0', fontWeight: 600, display: 'block', mb: 0.5 }}>
-              Max FPS: {desktopMaxFps}
-            </Typography>
-            <Slider
-              value={desktopMaxFps}
-              min={1}
-              max={30}
-              step={1}
-              marks={[{ value: 1, label: '1' }, { value: 10, label: '10' }, { value: 20, label: '20' }, { value: 30, label: '30' }]}
-              onChange={(_e, val) => setDesktopMaxFps(val as number)}
-              onChangeCommitted={(_e, val) => {
-                const sid = desktopSessionId;
-                const abort = desktopAbortRef.current;
-                if (sid && abort) {
-                  sendDesktopInput(sid, { type: 'set_max_fps', amount: val as number }, abort.signal);
-                }
-              }}
-              size="small"
-              sx={{
-                color: '#90caf9',
-                '& .MuiSlider-markLabel': { color: '#999', fontSize: '0.65rem' },
-              }}
-            />
           </Box>
         )}
         {/* Activity Log overlay (top-left) */}
