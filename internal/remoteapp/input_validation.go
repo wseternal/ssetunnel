@@ -190,8 +190,9 @@ var validInputTypes = map[string]bool{
 	"key_toggle":         true,
 	"type_text":          true,
 	"refresh_screenshot": true, // control event: force immediate capture (no robotgo dispatch)
-	"start_streaming":    true, // control event: start continuous capture at 5 FPS (no robotgo dispatch)
+	"start_streaming":    true, // control event: start continuous capture at 10 FPS (no robotgo dispatch)
 	"stop_streaming":     true, // control event: stop continuous capture (no robotgo dispatch)
+	"set_max_fps":        true, // control event: adjust streaming FPS cap (Amount field, 1–30) (no robotgo dispatch)
 }
 
 // ValidateInputEventType checks whether an InputEvent type string is recognized.

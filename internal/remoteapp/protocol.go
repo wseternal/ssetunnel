@@ -27,6 +27,7 @@ const (
 	FrameLogEvent      byte = 0x04 // Agent → Server: JSON log event for console observability
 	FrameScreenshotAck byte = 0x05 // Server → Agent: 8-byte BE UnixMilli (ACK for received screenshot)
 	FrameInputAck      byte = 0x06 // Agent → Server: JSON ack for received input event
+	FrameFPS           byte = 0x07 // Agent → Server: JSON FPS metric event
 )
 
 // ScreenshotTimestampSize is the byte length of the Unix-millisecond timestamp
@@ -148,6 +149,31 @@ type InputEvent struct {
 type InputAck struct {
 	Type   string `json:"type"`             // echoed input event type (mouse_click, key_tap, ...)
 	Detail string `json:"detail,omitempty"` // brief human-readable detail (button, key name, ...)
+}
+
+// FPSEvent carries a streaming FPS metric from the agent to the server.
+// Sent periodically (1 Hz) while streaming is active.
+type FPSEvent struct {
+	MaxFPS int `json:"max_fps"` // current target max FPS setting
+}
+
+// WriteFPSEvent serializes an FPSEvent and writes it as a FrameFPS frame.
+func WriteFPSEvent(w io.Writer, maxFPS int) error {
+	evt := FPSEvent{MaxFPS: maxFPS}
+	data, err := json.Marshal(evt)
+	if err != nil {
+		return err
+	}
+	return WriteFrame(w, FrameFPS, data)
+}
+
+// ParseFPSEvent deserializes an FPSEvent from a FrameFPS payload.
+func ParseFPSEvent(data []byte) (FPSEvent, bool) {
+	var evt FPSEvent
+	if err := json.Unmarshal(data, &evt); err != nil {
+		return FPSEvent{}, false
+	}
+	return evt, true
 }
 
 // WriteInputAck serializes an InputAck and writes it as a FrameInputAck frame.
@@ -324,6 +350,16 @@ func (lw *lockedWriter) writeScreenshotWithTimestamp(webpData []byte, ts time.Ti
 		return ErrWriterClosed
 	}
 	return WriteScreenshotWithTimestamp(lw.w, webpData, ts)
+}
+
+// writeFPSEvent writes a FrameFPS event under a single lock hold.
+func (lw *lockedWriter) writeFPSEvent(maxFPS int) error {
+	lw.mu.Lock()
+	defer lw.mu.Unlock()
+	if lw.closed {
+		return ErrWriterClosed
+	}
+	return WriteFPSEvent(lw.w, maxFPS)
 }
 
 // writeInputAck writes a FrameInputAck under a single lock hold.

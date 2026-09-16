@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"strconv"
 	"sync"
 	"sync/atomic"
 )
@@ -69,6 +70,10 @@ func ProxyRemoteApp(stream net.Conn) {
 	// Buffered 1; drain-then-send for latest-wins semantics.
 	streaming := make(chan bool, 1)
 
+	// maxFPSCh adjusts the capture loop's streaming FPS cap live.
+	// Buffered 1; drain-then-send for latest-wins semantics.
+	maxFPSCh := make(chan int, 1)
+
 	// lastAckUnixMilli tracks the latest server-ACK'd screenshot timestamp
 	// for observability. Loaded at session teardown for the final log line.
 	var lastAckUnixMilli atomic.Int64
@@ -79,7 +84,13 @@ func ProxyRemoteApp(stream net.Conn) {
 	// Goroutine: capture screenshots → yamux stream.
 	go func() {
 		defer wg.Done()
-		if err := CaptureLoop(ctx, lw, forceCapture, streaming); err != nil && err != context.Canceled {
+		// fpsCallback emits a FrameFPS event once per second while streaming.
+		fpsCallback := func(currentMaxFPS int) {
+			if err := lw.writeFPSEvent(currentMaxFPS); err != nil {
+				log.Printf("remoteapp: writeFPSEvent: %v", err)
+			}
+		}
+		if err := CaptureLoop(ctx, lw, forceCapture, streaming, maxFPSCh, fpsCallback); err != nil && err != context.Canceled {
 			log.Printf("remoteapp: capture loop: %v", err)
 			if werr := lw.writeLogEvent("error", fmt.Sprintf("capture loop exited: %v", err)); werr != nil {
 				log.Printf("remoteapp: writeLogEvent: %v", werr)
@@ -106,6 +117,19 @@ func ProxyRemoteApp(stream net.Conn) {
 		}
 		select {
 		case streaming <- on:
+		default:
+		}
+	}
+
+	// signalMaxFPS sends a max FPS adjustment signal to the capture loop.
+	// Non-blocking; drain-then-send for latest-wins semantics.
+	signalMaxFPS := func(fps int) {
+		select {
+		case <-maxFPSCh:
+		default:
+		}
+		select {
+		case maxFPSCh <- fps:
 		default:
 		}
 	}
@@ -155,6 +179,23 @@ readLoop:
 				log.Printf("remoteapp: stop_streaming received")
 				signalStreaming(false)
 				if werr := lw.writeInputAck(InputAck{Type: event.Type, Detail: "streaming stopped"}); werr != nil {
+					log.Printf("remoteapp: writeInputAck: %v", werr)
+					if errors.Is(werr, ErrWriterClosed) {
+						break readLoop
+					}
+				}
+				continue
+			case "set_max_fps":
+				fps := event.Amount
+				if fps < 1 {
+					fps = 1
+				}
+				if fps > 30 {
+					fps = 30
+				}
+				log.Printf("remoteapp: set_max_fps received: %d", fps)
+				signalMaxFPS(fps)
+				if werr := lw.writeInputAck(InputAck{Type: event.Type, Detail: strconv.Itoa(fps)}); werr != nil {
 					log.Printf("remoteapp: writeInputAck: %v", werr)
 					if errors.Is(werr, ErrWriterClosed) {
 						break readLoop
@@ -239,6 +280,8 @@ func ackDetail(event InputEvent) string {
 		return "streaming started"
 	case "stop_streaming":
 		return "streaming stopped"
+	case "set_max_fps":
+		return fmt.Sprintf("fps:%d", event.Amount)
 	default:
 		return ""
 	}

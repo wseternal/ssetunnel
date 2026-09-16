@@ -18,8 +18,26 @@ import (
 // 75 provides crisp text rendering at ~80–250 KB per 1080p frame.
 const webpQuality = 75
 
-// streamInterval is the minimum time between streaming frames (5 FPS cap).
-const streamInterval = 200 * time.Millisecond
+// defaultMaxFPS is the initial streaming frame rate cap.
+const defaultMaxFPS = 10
+
+// minFPS and maxFPS bound the user-adjustable streaming FPS range.
+const (
+	minFPS = 1
+	maxFPSLimit = 30
+)
+
+// fpsToInterval converts a target FPS value to a time.Ticker interval.
+// Clamps to [minFPS, maxFPSLimit] for safety.
+func fpsToInterval(fps int) time.Duration {
+	if fps < minFPS {
+		fps = minFPS
+	}
+	if fps > maxFPSLimit {
+		fps = maxFPSLimit
+	}
+	return time.Second / time.Duration(fps)
+}
 
 // captureImg is a test seam: production code calls robotgo.CaptureImg,
 // tests substitute a synthetic image source.
@@ -49,23 +67,28 @@ var defaultEncoderOpts = &webp.EncoderOptions{Quality: webpQuality, Method: 4}
 // Capture strategy: an initial screenshot is taken on startup so the
 // frontend receives the first frame immediately. After that, screenshots
 // are taken when the forceCapture channel is signaled (manual refresh
-// from the command palette) or when streaming mode is active (ticker at
-// 5 FPS driven by the streaming channel).
+// from the command palette) or when streaming mode is active (ticker
+// driven by the current maxFPS setting).
 //
 // The streaming channel toggles continuous capture: true starts a ticker
-// at streamInterval (200 ms, 5 FPS hard cap); false stops it. The ticker
-// is created and destroyed inside the capture goroutine — no extra
-// application-level goroutines or mutexes are needed.
+// at the current maxFPS interval (default 10 FPS); false stops it.
+// The ticker is created and destroyed inside the capture goroutine.
+//
+// The maxFPS channel adjusts the streaming FPS cap live: sending an int
+// (1–30) resets the ticker interval immediately. Changes are only
+// meaningful while streaming is active.
 //
 // The forceCapture channel triggers an immediate capture when signaled.
 // During streaming, force signals are coalesced with the tick schedule:
-// a force signal triggers a capture only if ≥streamInterval elapsed since
-// the last sent frame; otherwise it is dropped. When NOT streaming, force
-// capture behaves as before (immediate).
+// a force signal triggers a capture only if the minimum interval has
+// elapsed since the last sent frame; otherwise it is dropped.
+//
+// fpsCallback, if non-nil, is invoked once per second while streaming
+// with the current maxFPS setting for metric reporting.
 //
 // If w is a *lockedWriter (as used by ProxyRemoteApp), all frame and log
 // writes are mutex-guarded for concurrent safety.
-func CaptureLoop(ctx context.Context, w io.Writer, forceCapture <-chan struct{}, streaming <-chan bool) error {
+func CaptureLoop(ctx context.Context, w io.Writer, forceCapture <-chan struct{}, streaming <-chan bool, maxFPS <-chan int, fpsCallback func(int)) error {
 	// Detect lockedWriter for mutex-guarded writes.
 	lw, _ := w.(*lockedWriter)
 
@@ -140,8 +163,9 @@ func CaptureLoop(ctx context.Context, w io.Writer, forceCapture <-chan struct{},
 	// less than streamInterval has elapsed since the last frame (coalesce
 	// force-refresh into the tick schedule). When not streaming, force
 	// captures immediately.
-	maybeCapture := func(force bool, isStreaming bool) error {
-		if force && isStreaming && !lastFrameAt.IsZero() && time.Since(lastFrameAt) < streamInterval {
+	maybeCapture := func(force bool, isStreaming bool, currentFPS int) error {
+		interval := fpsToInterval(currentFPS)
+		if force && isStreaming && !lastFrameAt.IsZero() && time.Since(lastFrameAt) < interval {
 			return nil // coalesced: streaming tick will deliver the next frame
 		}
 		_, err := captureAndSend()
@@ -167,15 +191,24 @@ func CaptureLoop(ctx context.Context, w io.Writer, forceCapture <-chan struct{},
 
 	// isStreaming tracks the current streaming state.
 	// ticker is non-nil only while streaming.
+	// currentMaxFPS tracks the live FPS cap for the ticker.
 	isStreaming := false
+	currentMaxFPS := defaultMaxFPS
 	var ticker *time.Ticker
 	var tickC <-chan time.Time
+
+	// fpsTimer fires once per second for FPS metric reporting.
+	var fpsTimerC <-chan time.Time
+	var fpsTimer *time.Ticker
 
 	for {
 		select {
 		case <-ctx.Done():
 			if ticker != nil {
 				ticker.Stop()
+			}
+			if fpsTimer != nil {
+				fpsTimer.Stop()
 			}
 			writeLog("info", "capture stopped (context canceled)")
 			return ctx.Err()
@@ -187,6 +220,11 @@ func CaptureLoop(ctx context.Context, w io.Writer, forceCapture <-chan struct{},
 					ticker = nil
 					tickC = nil
 				}
+				if fpsTimer != nil {
+					fpsTimer.Stop()
+					fpsTimer = nil
+					fpsTimerC = nil
+				}
 				isStreaming = false
 				streaming = nil // disable select case
 				continue
@@ -196,24 +234,52 @@ func CaptureLoop(ctx context.Context, w io.Writer, forceCapture <-chan struct{},
 			}
 			isStreaming = on
 			if isStreaming {
-				ticker = time.NewTicker(streamInterval)
+				currentMaxFPS = defaultMaxFPS
+				ticker = time.NewTicker(fpsToInterval(currentMaxFPS))
 				tickC = ticker.C
-				writeLog("info", "streaming started (5 FPS cap)")
+				fpsTimer = time.NewTicker(time.Second)
+				fpsTimerC = fpsTimer.C
+				writeLog("info", fmt.Sprintf("streaming started (%d FPS cap)", currentMaxFPS))
 			} else {
 				if ticker != nil {
 					ticker.Stop()
 					ticker = nil
 					tickC = nil
 				}
+				if fpsTimer != nil {
+					fpsTimer.Stop()
+					fpsTimer = nil
+					fpsTimerC = nil
+				}
 				writeLog("info", "streaming stopped")
 			}
+		case newFPS, ok := <-maxFPS:
+			if !ok {
+				maxFPS = nil // disable select case
+				continue
+			}
+			if newFPS < minFPS {
+				newFPS = minFPS
+			}
+			if newFPS > maxFPSLimit {
+				newFPS = maxFPSLimit
+			}
+			currentMaxFPS = newFPS
+			if isStreaming && ticker != nil {
+				ticker.Reset(fpsToInterval(currentMaxFPS))
+				writeLog("info", fmt.Sprintf("streaming FPS adjusted to %d", currentMaxFPS))
+			}
+		case <-fpsTimerC:
+			if isStreaming && fpsCallback != nil {
+				fpsCallback(currentMaxFPS)
+			}
 		case <-tickC:
-			if err := maybeCapture(false, true); err != nil {
+			if err := maybeCapture(false, true, currentMaxFPS); err != nil {
 				return err
 			}
 		case <-forceCapture:
 			writeLog("info", "force capture requested")
-			if err := maybeCapture(true, isStreaming); err != nil {
+			if err := maybeCapture(true, isStreaming, currentMaxFPS); err != nil {
 				return err
 			}
 		}
