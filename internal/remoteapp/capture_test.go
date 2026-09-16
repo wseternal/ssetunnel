@@ -5,8 +5,10 @@ package remoteapp
 import (
 	"bytes"
 	"context"
+	"errors"
 	"image"
 	"image/color"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -123,6 +125,11 @@ func syntheticImage() *image.NRGBA {
 func init() {
 	// Bypass macOS screen recording permission check in tests.
 	checkScreenAccessFn = func() error { return nil }
+	// Use string-matching display-unavailable check in tests
+	// (avoids platform API dependencies like CGDisplayIsActive).
+	isDisplayUnavailableFn = func(err error) bool {
+		return err != nil && strings.Contains(err.Error(), robotgoCaptureErrSubstr)
+	}
 }
 
 // TestWebPEncodeRoundTrip verifies that encoding a synthetic image via
@@ -551,4 +558,133 @@ func (f *frameRecorder) Write(p []byte) (int, error) {
 		f.mu.Unlock()
 	}
 	return len(p), nil
+}
+
+// TestTransientCircuitBreaker verifies that the capture loop exits with
+// an error after maxConsecutiveTransientFails consecutive display-unavailable
+// failures, rather than retrying forever.
+func TestTransientCircuitBreaker(t *testing.T) {
+	// Override transient limits for fast testing.
+	origLimit := maxConsecutiveTransientFails
+	origBase := transientBackoffBase
+	origCap := transientBackoffCap
+	defer func() {
+		maxConsecutiveTransientFails = origLimit
+		transientBackoffBase = origBase
+		transientBackoffCap = origCap
+	}()
+	maxConsecutiveTransientFails = 5
+	transientBackoffBase = time.Millisecond
+	transientBackoffCap = 2 * time.Millisecond
+
+	origCapture := captureImg
+	defer func() { captureImg = origCapture }()
+	captureImg = func(args ...int) (image.Image, error) {
+		return nil, errors.New("Capture image not found.")
+	}
+
+	fw := &frameRecorder{
+		mu:       &sync.Mutex{},
+		frameAts: &[]time.Time{},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	forceCapture := make(chan struct{}, 1)
+	streaming := make(chan bool, 1)
+	streaming <- true // start streaming
+
+	done := make(chan error, 1)
+	go func() {
+		done <- CaptureLoop(ctx, fw, forceCapture, streaming, nil, nil)
+	}()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("expected circuit breaker error, got nil")
+		}
+		if !strings.Contains(err.Error(), "transient capture failed") {
+			t.Errorf("expected transient circuit breaker error, got: %v", err)
+		}
+	case <-time.After(4 * time.Second):
+		t.Fatal("capture loop did not exit after transient circuit breaker")
+	}
+}
+
+// TestTransientBackoffApplied verifies that backoff delays are applied
+// after 3 consecutive transient failures, slowing down retries.
+func TestTransientBackoffApplied(t *testing.T) {
+	origBase := transientBackoffBase
+	origCap := transientBackoffCap
+	origLimit := maxConsecutiveTransientFails
+	defer func() {
+		transientBackoffBase = origBase
+		transientBackoffCap = origCap
+		maxConsecutiveTransientFails = origLimit
+	}()
+	transientBackoffBase = 50 * time.Millisecond
+	transientBackoffCap = 100 * time.Millisecond
+	maxConsecutiveTransientFails = 20 // high enough to not trip
+
+	origCapture := captureImg
+	defer func() { captureImg = origCapture }()
+
+	var callTimesMu sync.Mutex
+	var callTimes []time.Time
+	captureImg = func(args ...int) (image.Image, error) {
+		callTimesMu.Lock()
+		callTimes = append(callTimes, time.Now())
+		callTimesMu.Unlock()
+		return nil, errors.New("Capture image not found.")
+	}
+
+	fw := &frameRecorder{
+		mu:       &sync.Mutex{},
+		frameAts: &[]time.Time{},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	forceCapture := make(chan struct{}, 1)
+	streaming := make(chan bool, 1)
+	streaming <- true
+
+	done := make(chan error, 1)
+	go func() {
+		done <- CaptureLoop(ctx, fw, forceCapture, streaming, nil, nil)
+	}()
+
+	<-ctx.Done()
+	cancel()
+	<-done
+
+	callTimesMu.Lock()
+	defer callTimesMu.Unlock()
+
+	if len(callTimes) < 6 {
+		t.Fatalf("too few capture attempts: %d (want ≥6)", len(callTimes))
+	}
+
+	// First 3 calls should have no backoff (very close together).
+	// Calls 4+ should have increasing gaps (≥50ms).
+	// Check that at least one gap after call 4 is ≥ 40ms (with jitter tolerance).
+	foundBackoff := false
+	for i := 4; i < len(callTimes); i++ {
+		gap := callTimes[i].Sub(callTimes[i-1])
+		if gap >= 40*time.Millisecond {
+			foundBackoff = true
+			break
+		}
+	}
+	if !foundBackoff {
+		// Log all gaps for debugging.
+		var gaps []time.Duration
+		for i := 1; i < len(callTimes); i++ {
+			gaps = append(gaps, callTimes[i].Sub(callTimes[i-1]))
+		}
+		t.Errorf("expected backoff ≥40ms after 3 consecutive transient failures, gaps: %v", gaps)
+	}
 }

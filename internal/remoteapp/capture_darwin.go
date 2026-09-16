@@ -42,19 +42,27 @@ func isDisplayUnavailable(err error) bool {
 	if err == nil {
 		return false
 	}
+	dispID := C.CGMainDisplayID()
+	active := C.CGDisplayIsActive(dispID)
 	// Display inactive (sleeping/off) → transient.
-	if C.CGDisplayIsActive(C.CGMainDisplayID()) == 0 {
+	if active == 0 {
+		log.Printf("remoteapp: isDisplayUnavailable: display_id=%d active=false (display sleeping/off)", dispID)
 		return true
 	}
 	// Display is active: if permission is denied, this is NOT a transient
 	// display-unavailable condition — caller should treat as permanent.
-	if !C.CGPreflightScreenCaptureAccess() {
+	hasPermission := C.CGPreflightScreenCaptureAccess()
+	if !hasPermission {
+		log.Printf("remoteapp: isDisplayUnavailable: display_id=%d active=true permission=false (treating as permanent failure)", dispID)
 		log.Printf("remoteapp: screen recording permission denied (treating as permanent failure)")
 		return false
 	}
 	// Permission granted but capture still failed — genuinely transient
 	// (e.g. display mode switching, resolution change).
-	return strings.Contains(err.Error(), robotgoCaptureErrSubstr)
+	isRobotgoErr := strings.Contains(err.Error(), robotgoCaptureErrSubstr)
+	log.Printf("remoteapp: isDisplayUnavailable: display_id=%d active=true permission=true error=%q matches_robotgo=%v",
+		dispID, err.Error(), isRobotgoErr)
+	return isRobotgoErr
 }
 
 // robotgoCaptureErrSubstr is the error substring from robotgo.CaptureImg when

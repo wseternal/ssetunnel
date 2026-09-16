@@ -2,7 +2,10 @@
 
 package remoteapp
 
-import "strings"
+import (
+	"log"
+	"strings"
+)
 
 // robotgoCaptureErrSubstr is the error substring from robotgo.CaptureImg when
 // the display server cannot produce a screenshot. Pinned to robotgo v0.100.x;
@@ -15,7 +18,12 @@ const robotgoCaptureErrSubstr = "Capture image not found"
 // platform-specific display query APIs (e.g. CoreGraphics on darwin) are
 // unavailable.
 func isDisplayUnavailable(err error) bool {
-	return err != nil && strings.Contains(err.Error(), robotgoCaptureErrSubstr)
+	if err == nil {
+		return false
+	}
+	isRobotgoErr := strings.Contains(err.Error(), robotgoCaptureErrSubstr)
+	log.Printf("remoteapp: isDisplayUnavailable: error=%q matches_robotgo=%v", err.Error(), isRobotgoErr)
+	return isRobotgoErr
 }
 
 // checkScreenAccess is a no-op with -tags purego (no CGO for platform APIs).
