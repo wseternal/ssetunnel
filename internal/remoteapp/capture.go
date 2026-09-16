@@ -89,7 +89,7 @@ var defaultEncoderOpts = &webp.EncoderOptions{Quality: webpQuality, Method: 4}
 // driven by the current maxFPS setting).
 //
 // The streaming channel toggles continuous capture: true starts a ticker
-// at the current maxFPS interval (default 10 FPS); false stops it.
+// at the current maxFPS interval (default 1 FPS); false stops it.
 // The ticker is created and destroyed inside the capture goroutine.
 //
 // The maxFPS channel adjusts the streaming FPS cap live: sending an int
