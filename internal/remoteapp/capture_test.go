@@ -625,7 +625,7 @@ func (f *frameRecorder) Write(p []byte) (int, error) {
 // exits due to consecutive display-unavailable (transient) failures. After
 // many failures, the loop keeps retrying with backoff. A subsequent
 // successful capture resets the counter and produces a frame.
-func TestTransientNeverCircuitBreaker(t *testing.T) {
+func TestTransientNeverCircuitBreaks(t *testing.T) {
 	// Use fast backoff for testing.
 	origBase := transientBackoffBase
 	origCap := transientBackoffCap
