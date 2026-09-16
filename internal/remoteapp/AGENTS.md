@@ -129,6 +129,36 @@ Agent-side `lockedWriter.writeLogEvent` and server-side `writeSSELogEvent` produ
 
 When the agent receives a `FrameInput` from the server, it sends a `FrameInputAck` back containing the event type and a brief detail string. The server forwards this as an SSE `event: inputack` named event to the console frontend, which displays a live tooltip overlay on the current screenshot. This provides immediate visual feedback that the agent received the user's input.
 
+## Testing — Data Race Pitfall with Test Seams
+
+`captureImg` and `checkScreenAccessFn` are package-level test seam variables. Tests substitute them and launch `CaptureLoop` in a goroutine. **Never use `time.Sleep` to wait for the goroutine before restoring these variables** — `time.Sleep` does not establish a happens-before relationship, and `-race` will detect a data race between the deferred restore (write) and the goroutine's read.
+
+**Correct pattern — `done` channel:**
+```go
+func TestXxx(t *testing.T) {
+    origCapture := captureImg
+    defer func() { captureImg = origCapture }()
+    captureImg = func(args ...int) (image.Image, error) { return syntheticImage(), nil }
+
+    ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+    defer cancel()
+
+    done := make(chan error, 1)          // buffered so goroutine never blocks on send
+    go func() {
+        done <- CaptureLoop(ctx, w, force, streaming, maxFPS, fpsCb)
+    }()
+
+    // ... test logic ...
+
+    cancel()   // or <-ctx.Done()
+    <-done     // establishes happens-before: goroutine fully exited before defer restores captureImg
+}
+```
+
+**Why this matters:** The deferred `captureImg = origCapture` is a write to a package-level variable. If the `CaptureLoop` goroutine is still running (or its last `captureImg()` call is still on the stack), the race detector flags concurrent read/write. `<-done` guarantees the goroutine has returned, so all its reads are complete.
+
+**Rule:** Every test that swaps `captureImg` (or any package-level test seam) and launches `CaptureLoop` in a goroutine **must** use a `done` channel to wait for goroutine exit before the test function returns. This applies to any future test seams added to this package.
+
 ## Rules
 * **lockedWriter for concurrent writes**: All agent→server frame writes go through a `lockedWriter` that serializes access with a mutex. The capture goroutine and main goroutine share the same `lockedWriter`.
 * **Fail-fast**: Capture write errors, stream read errors, and robotgo panics terminate the session.
