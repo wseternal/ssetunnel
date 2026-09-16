@@ -185,13 +185,14 @@ func TestStreamingTickerCapsFPS(t *testing.T) {
 	streaming := make(chan bool, 1)
 	streaming <- true // start streaming immediately
 
+	done := make(chan error, 1)
 	go func() {
-		_ = CaptureLoop(ctx, fw, forceCapture, streaming, nil, nil)
+		done <- CaptureLoop(ctx, fw, forceCapture, streaming, nil, nil)
 	}()
 
 	<-ctx.Done()
-	// Allow a brief moment for the goroutine to exit.
-	time.Sleep(50 * time.Millisecond)
+	// Wait for CaptureLoop to exit (establishes happens-before the deferred captureImg restore).
+	<-done
 
 	mu.Lock()
 	count := len(frameAts)
@@ -243,8 +244,9 @@ func TestStreamingStopsCleanly(t *testing.T) {
 	streaming := make(chan bool, 1)
 	streaming <- true // start streaming
 
+	done := make(chan error, 1)
 	go func() {
-		_ = CaptureLoop(ctx, fw, forceCapture, streaming, nil, nil)
+		done <- CaptureLoop(ctx, fw, forceCapture, streaming, nil, nil)
 	}()
 
 	// Let streaming run for ~400 ms, then stop.
@@ -276,6 +278,7 @@ func TestStreamingStopsCleanly(t *testing.T) {
 	}
 
 	cancel()
+	<-done
 }
 
 // TestForceCaptureCoalescedDuringStreaming verifies that rapid force
@@ -304,8 +307,9 @@ func TestForceCaptureCoalescedDuringStreaming(t *testing.T) {
 	streaming := make(chan bool, 1)
 	streaming <- true
 
+	done := make(chan error, 1)
 	go func() {
-		_ = CaptureLoop(ctx, fw, forceCapture, streaming, nil, nil)
+		done <- CaptureLoop(ctx, fw, forceCapture, streaming, nil, nil)
 	}()
 
 	// Fire 5 rapid force signals while streaming.
@@ -319,7 +323,7 @@ func TestForceCaptureCoalescedDuringStreaming(t *testing.T) {
 	}
 
 	<-ctx.Done()
-	time.Sleep(50 * time.Millisecond)
+	<-done
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -409,8 +413,9 @@ func TestDynamicFPSAdjustment(t *testing.T) {
 	maxFPSCh := make(chan int, 1)
 	streaming <- true // start streaming at default 10 FPS
 
+	done := make(chan error, 1)
 	go func() {
-		_ = CaptureLoop(ctx, fw, forceCapture, streaming, maxFPSCh, nil)
+		done <- CaptureLoop(ctx, fw, forceCapture, streaming, maxFPSCh, nil)
 	}()
 
 	// Let it run at 10 FPS for ~500ms.
@@ -425,6 +430,9 @@ func TestDynamicFPSAdjustment(t *testing.T) {
 
 	// Let it run at 2 FPS for ~1.2s.
 	time.Sleep(1200 * time.Millisecond)
+
+	cancel()
+	<-done
 
 	mu.Lock()
 	count := len(frameAts)
@@ -505,12 +513,13 @@ func TestFPSCallbackInvoked(t *testing.T) {
 	streaming := make(chan bool, 1)
 	streaming <- true
 
+	done := make(chan error, 1)
 	go func() {
-		_ = CaptureLoop(ctx, fw2, forceCapture, streaming, nil, fpsCallback)
+		done <- CaptureLoop(ctx, fw2, forceCapture, streaming, nil, fpsCallback)
 	}()
 
 	<-ctx.Done()
-	time.Sleep(50 * time.Millisecond)
+	<-done
 
 	callbackMu.Lock()
 	calls := len(callbackCalls)
