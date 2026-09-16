@@ -19,7 +19,7 @@ import (
 const webpQuality = 75
 
 // defaultMaxFPS is the initial streaming frame rate cap.
-const defaultMaxFPS = 10
+const defaultMaxFPS = 1
 
 // minFPS and maxFPS bound the user-adjustable streaming FPS range.
 const (
@@ -110,6 +110,13 @@ func CaptureLoop(ctx context.Context, w io.Writer, forceCapture <-chan struct{},
 	// Detect lockedWriter for mutex-guarded writes.
 	lw, _ := w.(*lockedWriter)
 
+	// Snapshot transient-failure config once at startup so the
+	// inner closure only reads local variables (race-free with
+	// tests that override the package-level vars).
+	localMaxTransient := maxConsecutiveTransientFails
+	localBackoffBase := transientBackoffBase
+	localBackoffCap := transientBackoffCap
+
 	// Reuse buffer across frames to avoid ~150 KB/frame allocation.
 	var buf bytes.Buffer
 	captureFails := 0
@@ -144,24 +151,28 @@ func CaptureLoop(ctx context.Context, w io.Writer, forceCapture <-chan struct{},
 				captureFails = 0 // display-off invalidates prior fail history
 				transientFails++
 				// Circuit breaker for persistent transient failures.
-				if transientFails >= maxConsecutiveTransientFails {
+				if transientFails >= localMaxTransient {
 					writeLog("error", fmt.Sprintf("transient capture circuit breaker: %d consecutive display-unavailable failures: %v", transientFails, err))
 					return false, fmt.Errorf("transient capture failed %d consecutive times: %w", transientFails, err)
 				}
 				// Exponential backoff after 3 consecutive transient failures.
 				if transientFails > 3 {
-					backoff := transientBackoffBase * time.Duration(1<<min(transientFails-3, 6))
-					if backoff > transientBackoffCap {
-						backoff = transientBackoffCap
+					backoff := localBackoffBase * time.Duration(1<<min(transientFails-3, 6))
+					if backoff > localBackoffCap {
+						backoff = localBackoffCap
 					}
 					log.Printf("remoteapp: capture: display unavailable (%d/%d consecutive, backing off %v): %v",
-						transientFails, maxConsecutiveTransientFails, backoff, err)
+						transientFails, localMaxTransient, backoff, err)
 					writeLog("warn", fmt.Sprintf("display unavailable (%d/%d, retry in %v): %v",
-						transientFails, maxConsecutiveTransientFails, backoff, err))
-					time.Sleep(backoff)
+						transientFails, localMaxTransient, backoff, err))
+					select {
+					case <-time.After(backoff):
+					case <-ctx.Done():
+						return false, ctx.Err()
+					}
 				} else {
 					log.Printf("remoteapp: capture: display unavailable (%d/%d consecutive): %v",
-						transientFails, maxConsecutiveTransientFails, err)
+						transientFails, localMaxTransient, err)
 					writeLog("warn", fmt.Sprintf("display unavailable (refresh to retry): %v", err))
 				}
 				return true, nil

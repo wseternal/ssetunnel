@@ -412,30 +412,95 @@ func TestDynamicFPSAdjustment(t *testing.T) {
 		frameAts: &frameAts,
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	forceCapture := make(chan struct{}, 1)
 	streaming := make(chan bool, 1)
 	maxFPSCh := make(chan int, 1)
-	streaming <- true // start streaming at default 10 FPS
+
+	// Use fpsCallback to detect when the FPS override has been processed.
+	fpsSeen := make(chan int, 4)
+	fpsCallback := func(fps int) {
+		select {
+		case fpsSeen <- fps:
+		default:
+		}
+	}
+
+	streaming <- true // start streaming at default FPS
 
 	done := make(chan error, 1)
 	go func() {
-		done <- CaptureLoop(ctx, fw, forceCapture, streaming, maxFPSCh, nil)
+		done <- CaptureLoop(ctx, fw, forceCapture, streaming, maxFPSCh, fpsCallback)
 	}()
 
-	// Let it run at 10 FPS for ~500ms.
-	time.Sleep(500 * time.Millisecond)
+	// Wait for the first fpsCallback tick (confirms CaptureLoop started streaming).
+	select {
+	case <-fpsSeen:
+	case <-time.After(5 * time.Second):
+		cancel()
+		<-done
+		t.Fatal("timed out waiting for initial FPS callback")
+	}
 
-	// Switch to 2 FPS (500ms interval) — much slower.
+	// Now override FPS to 10.
+	maxFPSCh <- 10
+
+	// Wait for fpsCallback to report 10 FPS.
+	deadline := time.After(5 * time.Second)
+	for {
+		select {
+		case fps := <-fpsSeen:
+			if fps == 10 {
+				goto phase1
+			}
+		case <-deadline:
+			cancel()
+			<-done
+			t.Fatal("timed out waiting for FPS override to take effect")
+			return
+		}
+	}
+
+phase1:
+	// Record frame timestamps for 600ms at 10 FPS.
+	mu.Lock()
+	phase1Start := time.Now()
+	mu.Unlock()
+
+	time.Sleep(600 * time.Millisecond)
+
+	mu.Lock()
+	phase1Frames := make([]time.Time, len(frameAts))
+	copy(phase1Frames, frameAts)
+	phase1Count := len(frameAts)
+	mu.Unlock()
+
+	// Switch to 2 FPS.
 	select {
 	case <-maxFPSCh:
 	default:
 	}
 	maxFPSCh <- 2
 
-	// Let it run at 2 FPS for ~1.2s.
+	// Wait for fpsCallback to report 2 FPS.
+	deadline = time.After(5 * time.Second)
+	for {
+		select {
+		case fps := <-fpsSeen:
+			if fps == 2 {
+				goto phase2
+			}
+		case <-deadline:
+			cancel()
+			<-done
+			t.Fatal("timed out waiting for 2 FPS override")
+			return
+		}
+	}
+
+phase2:
 	time.Sleep(1200 * time.Millisecond)
 
 	cancel()
@@ -443,34 +508,35 @@ func TestDynamicFPSAdjustment(t *testing.T) {
 
 	mu.Lock()
 	count := len(frameAts)
-	// Copy timestamps for interval analysis.
 	ats := make([]time.Time, len(frameAts))
 	copy(ats, frameAts)
 	mu.Unlock()
 
-	// Find the transition point: frames after ~500ms should be at 2 FPS (500ms interval).
-	// Count frames in each phase.
-	phase1End := ats[0].Add(500 * time.Millisecond)
-	var phase1Count, phase2Count int
+	// Phase 1 analysis: count frames within 600ms of phase1Start.
+	var p1Count int
 	for _, at := range ats {
-		if at.Before(phase1End) {
-			phase1Count++
-		} else {
-			phase2Count++
+		if !at.Before(phase1Start) && at.Before(phase1Start.Add(600*time.Millisecond)) {
+			p1Count++
 		}
 	}
 
-	// Phase 1: ~500ms at 10 FPS → expect 3–7 frames (initial + a few ticks).
-	if phase1Count < 2 {
-		t.Errorf("phase 1: too few frames: %d (want ≥2 at 10 FPS / 500ms)", phase1Count)
+	// At 10 FPS for 600ms, expect 4–8 frames.
+	if p1Count < 2 {
+		t.Errorf("phase 1: too few frames: %d (want ≥2 at 10 FPS / 600ms), total=%d", p1Count, count)
 	}
 
-	// Phase 2: ~1.2s at 2 FPS → expect 2–4 frames.
-	if phase2Count < 1 {
-		t.Errorf("phase 2: too few frames: %d (want ≥1 at 2 FPS / 1.2s)", phase2Count)
+	// Phase 2: count frames after phase1Start+600ms.
+	var p2Count int
+	for _, at := range ats {
+		if !at.Before(phase1Start.Add(600 * time.Millisecond)) {
+			p2Count++
+		}
 	}
-	if phase2Count > 5 {
-		t.Errorf("phase 2: too many frames: %d (want ≤5 at 2 FPS / 1.2s)", phase2Count)
+	if p2Count < 1 {
+		t.Errorf("phase 2: too few frames: %d (want ≥1 at 2 FPS / 1.2s)", p2Count)
+	}
+	if p2Count > 5 {
+		t.Errorf("phase 2: too many frames: %d (want ≤5 at 2 FPS / 1.2s)", p2Count)
 	}
 
 	// Verify that later frames have wider intervals (~500ms for 2 FPS).
@@ -481,7 +547,7 @@ func TestDynamicFPSAdjustment(t *testing.T) {
 		}
 	}
 
-	_ = count // suppress unused warning
+	_ = phase1Count // suppress unused warning
 }
 
 // TestFPSCallbackInvoked verifies that the fpsCallback is invoked
@@ -568,17 +634,11 @@ func TestTransientCircuitBreaker(t *testing.T) {
 	origLimit := maxConsecutiveTransientFails
 	origBase := transientBackoffBase
 	origCap := transientBackoffCap
-	defer func() {
-		maxConsecutiveTransientFails = origLimit
-		transientBackoffBase = origBase
-		transientBackoffCap = origCap
-	}()
 	maxConsecutiveTransientFails = 5
 	transientBackoffBase = time.Millisecond
 	transientBackoffCap = 2 * time.Millisecond
 
 	origCapture := captureImg
-	defer func() { captureImg = origCapture }()
 	captureImg = func(args ...int) (image.Image, error) {
 		return nil, errors.New("Capture image not found.")
 	}
@@ -588,7 +648,7 @@ func TestTransientCircuitBreaker(t *testing.T) {
 		frameAts: &[]time.Time{},
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	forceCapture := make(chan struct{}, 1)
@@ -608,9 +668,17 @@ func TestTransientCircuitBreaker(t *testing.T) {
 		if !strings.Contains(err.Error(), "transient capture failed") {
 			t.Errorf("expected transient circuit breaker error, got: %v", err)
 		}
-	case <-time.After(4 * time.Second):
+	case <-time.After(20 * time.Second):
+		cancel()
+		<-done
 		t.Fatal("capture loop did not exit after transient circuit breaker")
 	}
+
+	// Restore after goroutine exit to avoid data race.
+	captureImg = origCapture
+	maxConsecutiveTransientFails = origLimit
+	transientBackoffBase = origBase
+	transientBackoffCap = origCap
 }
 
 // TestTransientBackoffApplied verifies that backoff delays are applied
@@ -619,17 +687,11 @@ func TestTransientBackoffApplied(t *testing.T) {
 	origBase := transientBackoffBase
 	origCap := transientBackoffCap
 	origLimit := maxConsecutiveTransientFails
-	defer func() {
-		transientBackoffBase = origBase
-		transientBackoffCap = origCap
-		maxConsecutiveTransientFails = origLimit
-	}()
 	transientBackoffBase = 50 * time.Millisecond
 	transientBackoffCap = 100 * time.Millisecond
 	maxConsecutiveTransientFails = 20 // high enough to not trip
 
 	origCapture := captureImg
-	defer func() { captureImg = origCapture }()
 
 	var callTimesMu sync.Mutex
 	var callTimes []time.Time
@@ -645,7 +707,7 @@ func TestTransientBackoffApplied(t *testing.T) {
 		frameAts: &[]time.Time{},
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	forceCapture := make(chan struct{}, 1)
@@ -657,9 +719,38 @@ func TestTransientBackoffApplied(t *testing.T) {
 		done <- CaptureLoop(ctx, fw, forceCapture, streaming, nil, nil)
 	}()
 
-	<-ctx.Done()
+	// Wait for enough captures (need ≥6) or context timeout.
+	for {
+		callTimesMu.Lock()
+		n := len(callTimes)
+		callTimesMu.Unlock()
+		if n >= 8 {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			cancel()
+			<-done
+			// Restore before failing.
+			captureImg = origCapture
+			transientBackoffBase = origBase
+			transientBackoffCap = origCap
+			maxConsecutiveTransientFails = origLimit
+			t.Fatalf("timed out waiting for captures, got %d", n)
+			return
+		default:
+			time.Sleep(50 * time.Millisecond)
+		}
+	}
+
 	cancel()
 	<-done
+
+	// Restore after goroutine exit to avoid data race.
+	captureImg = origCapture
+	transientBackoffBase = origBase
+	transientBackoffCap = origCap
+	maxConsecutiveTransientFails = origLimit
 
 	callTimesMu.Lock()
 	defer callTimesMu.Unlock()
