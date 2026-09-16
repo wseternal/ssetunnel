@@ -212,6 +212,11 @@ func (h *Handler) handleRemoteApp(w http.ResponseWriter, r *http.Request) {
 	h.metrics.RecordSessionStart(agentID)
 	log.Printf("remoteapp: session started agent=%s session=%s user=%d", agentID, id, ownerID)
 
+	// FPS tracking: count screenshot frames delivered per second.
+	var frameCount int
+	fpsTicker := time.NewTicker(time.Second)
+	defer fpsTicker.Stop()
+
 	// Inject server event: stream opened.
 	if werr := writeSSELogEvent(w, f, "info", "server", "stream opened to agent"); werr != nil {
 		return
@@ -231,6 +236,7 @@ func (h *Handler) handleRemoteApp(w http.ResponseWriter, r *http.Request) {
 	//   - FrameScreenInfo (0x03): JSON screen info → SSE "screeninfo" event
 	//   - FrameLogEvent (0x04): JSON log event → SSE "log" event (observability)
 	//   - FrameInputAck (0x06): JSON input ack → SSE "inputack" event (UI tooltip)
+	//   - FrameFPS (0x07): JSON FPS metric → SSE "fps" event (metric reporting)
 	for {
 		stream.SetReadDeadline(time.Now().Add(h.heartbeat))
 		frameType, n, err := remoteapp.ReadFrameInto(stream, readBuf)
@@ -258,6 +264,7 @@ func (h *Handler) handleRemoteApp(w http.ResponseWriter, r *http.Request) {
 
 		switch frameType {
 		case remoteapp.FrameScreenshot:
+			frameCount++
 			// Parse and strip the 8-byte timestamp prefix from the payload.
 			// Forward only the image data to the frontend; ACK back to agent.
 			ts, imageData, ok := remoteapp.ParseScreenshotTimestamp(readBuf[:n])
@@ -327,8 +334,35 @@ func (h *Handler) handleRemoteApp(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			h.metrics.RecordConnectBytes(agentID, 0, n)
+		case remoteapp.FrameFPS:
+			// Forward FPS metric event from agent to frontend.
+			fpsEvt, ok := remoteapp.ParseFPSEvent(readBuf[:n])
+			if !ok {
+				continue // skip malformed FPS events
+			}
+			sanitized, err := json.Marshal(fpsEvt)
+			if err != nil {
+				continue
+			}
+			if werr := writeSSENamedFrame(w, f, "fps", sanitized); werr != nil {
+				return
+			}
+			h.metrics.RecordConnectBytes(agentID, 0, n)
 		default:
 			// Unknown frame type from agent; skip.
+		}
+
+		// Check if FPS ticker fired during frame processing.
+		select {
+		case <-fpsTicker.C:
+			if frameCount > 0 {
+				fps := frameCount
+				frameCount = 0
+				log.Printf("remoteapp: FPS agent=%s session=%s: %d", agentID, id, fps)
+			} else {
+				frameCount = 0
+			}
+		default:
 		}
 	}
 }

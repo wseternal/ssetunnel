@@ -465,6 +465,7 @@ func TestAckDetail(t *testing.T) {
 		{"refresh_screenshot", InputEvent{Type: "refresh_screenshot"}, "refresh"},
 		{"start_streaming", InputEvent{Type: "start_streaming"}, "streaming started"},
 		{"stop_streaming", InputEvent{Type: "stop_streaming"}, "streaming stopped"},
+		{"set_max_fps", InputEvent{Type: "set_max_fps", Amount: 15}, "fps:15"},
 		{"unknown", InputEvent{Type: "unknown_type"}, ""},
 	}
 	for _, tt := range tests {

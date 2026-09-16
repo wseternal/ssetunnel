@@ -158,7 +158,7 @@ func TestWebPEncodeRoundTrip(t *testing.T) {
 }
 
 // TestStreamingTickerCapsFPS verifies that the capture loop never sends
-// frames faster than the 5 FPS cap (200 ms interval) while streaming.
+// frames faster than the default 10 FPS cap (100 ms interval) while streaming.
 func TestStreamingTickerCapsFPS(t *testing.T) {
 	// Substitute captureImg with a synthetic source.
 	origCapture := captureImg
@@ -185,34 +185,35 @@ func TestStreamingTickerCapsFPS(t *testing.T) {
 	streaming := make(chan bool, 1)
 	streaming <- true // start streaming immediately
 
+	done := make(chan error, 1)
 	go func() {
-		_ = CaptureLoop(ctx, fw, forceCapture, streaming)
+		done <- CaptureLoop(ctx, fw, forceCapture, streaming, nil, nil)
 	}()
 
 	<-ctx.Done()
-	// Allow a brief moment for the goroutine to exit.
-	time.Sleep(50 * time.Millisecond)
+	// Wait for CaptureLoop to exit (establishes happens-before the deferred captureImg restore).
+	<-done
 
 	mu.Lock()
 	count := len(frameAts)
 	mu.Unlock()
 
-	// Over ~1.1 s at 5 FPS, we expect ≤6 frames (initial + up to 5 ticks).
+	// Over ~1.1 s at 10 FPS, we expect ≤12 frames (initial + up to 11 ticks).
 	// Allow a small margin for timing jitter.
-	if count > 7 {
-		t.Errorf("too many frames: got %d, want ≤7 (5 FPS cap over 1.1s)", count)
+	if count > 14 {
+		t.Errorf("too many frames: got %d, want ≤14 (10 FPS cap over 1.1s)", count)
 	}
 	if count < 2 {
 		t.Errorf("too few frames: got %d, want ≥2", count)
 	}
 
-	// Verify intervals between frames are ≥200 ms (minus jitter tolerance).
+	// Verify intervals between frames are ≥100 ms (minus jitter tolerance).
 	mu.Lock()
 	defer mu.Unlock()
 	for i := 1; i < len(frameAts); i++ {
 		gap := frameAts[i].Sub(frameAts[i-1])
-		if gap < 150*time.Millisecond { // 50 ms jitter tolerance
-			t.Errorf("frame interval too short: frame %d→%d gap = %v (want ≥150ms)", i-1, i, gap)
+		if gap < 60*time.Millisecond { // 40 ms jitter tolerance
+			t.Errorf("frame interval too short: frame %d→%d gap = %v (want ≥60ms)", i-1, i, gap)
 		}
 	}
 }
@@ -243,8 +244,9 @@ func TestStreamingStopsCleanly(t *testing.T) {
 	streaming := make(chan bool, 1)
 	streaming <- true // start streaming
 
+	done := make(chan error, 1)
 	go func() {
-		_ = CaptureLoop(ctx, fw, forceCapture, streaming)
+		done <- CaptureLoop(ctx, fw, forceCapture, streaming, nil, nil)
 	}()
 
 	// Let streaming run for ~400 ms, then stop.
@@ -276,6 +278,7 @@ func TestStreamingStopsCleanly(t *testing.T) {
 	}
 
 	cancel()
+	<-done
 }
 
 // TestForceCaptureCoalescedDuringStreaming verifies that rapid force
@@ -304,8 +307,9 @@ func TestForceCaptureCoalescedDuringStreaming(t *testing.T) {
 	streaming := make(chan bool, 1)
 	streaming <- true
 
+	done := make(chan error, 1)
 	go func() {
-		_ = CaptureLoop(ctx, fw, forceCapture, streaming)
+		done <- CaptureLoop(ctx, fw, forceCapture, streaming, nil, nil)
 	}()
 
 	// Fire 5 rapid force signals while streaming.
@@ -319,14 +323,14 @@ func TestForceCaptureCoalescedDuringStreaming(t *testing.T) {
 	}
 
 	<-ctx.Done()
-	time.Sleep(50 * time.Millisecond)
+	<-done
 
 	mu.Lock()
 	defer mu.Unlock()
-	// Verify no burst: all inter-frame intervals ≥ 150 ms.
+	// Verify no burst: all inter-frame intervals ≥ 60 ms (10 FPS = 100ms with jitter).
 	for i := 1; i < len(frameAts); i++ {
 		gap := frameAts[i].Sub(frameAts[i-1])
-		if gap < 150*time.Millisecond {
+		if gap < 60*time.Millisecond {
 			t.Errorf("burst detected: frame %d→%d gap = %v", i-1, i, gap)
 		}
 	}
@@ -358,7 +362,7 @@ func TestStreamingStopsOnContextCancel(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		done <- CaptureLoop(ctx, fw, forceCapture, streaming)
+		done <- CaptureLoop(ctx, fw, forceCapture, streaming, nil, nil)
 	}()
 
 	// Let it stream for ~300 ms, then cancel.
@@ -379,6 +383,154 @@ func TestStreamingStopsOnContextCancel(t *testing.T) {
 	mu.Unlock()
 	if count < 1 {
 		t.Errorf("expected at least 1 frame before cancel, got %d", count)
+	}
+}
+
+// TestDynamicFPSAdjustment verifies that sending a new FPS value via the
+// maxFPS channel changes the capture interval live without restarting.
+func TestDynamicFPSAdjustment(t *testing.T) {
+	origCapture := captureImg
+	defer func() { captureImg = origCapture }()
+	captureImg = func(args ...int) (image.Image, error) {
+		return syntheticImage(), nil
+	}
+
+	var (
+		mu       sync.Mutex
+		frameAts []time.Time
+	)
+
+	fw := &frameRecorder{
+		mu:       &mu,
+		frameAts: &frameAts,
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	forceCapture := make(chan struct{}, 1)
+	streaming := make(chan bool, 1)
+	maxFPSCh := make(chan int, 1)
+	streaming <- true // start streaming at default 10 FPS
+
+	done := make(chan error, 1)
+	go func() {
+		done <- CaptureLoop(ctx, fw, forceCapture, streaming, maxFPSCh, nil)
+	}()
+
+	// Let it run at 10 FPS for ~500ms.
+	time.Sleep(500 * time.Millisecond)
+
+	// Switch to 2 FPS (500ms interval) — much slower.
+	select {
+	case <-maxFPSCh:
+	default:
+	}
+	maxFPSCh <- 2
+
+	// Let it run at 2 FPS for ~1.2s.
+	time.Sleep(1200 * time.Millisecond)
+
+	cancel()
+	<-done
+
+	mu.Lock()
+	count := len(frameAts)
+	// Copy timestamps for interval analysis.
+	ats := make([]time.Time, len(frameAts))
+	copy(ats, frameAts)
+	mu.Unlock()
+
+	// Find the transition point: frames after ~500ms should be at 2 FPS (500ms interval).
+	// Count frames in each phase.
+	phase1End := ats[0].Add(500 * time.Millisecond)
+	var phase1Count, phase2Count int
+	for _, at := range ats {
+		if at.Before(phase1End) {
+			phase1Count++
+		} else {
+			phase2Count++
+		}
+	}
+
+	// Phase 1: ~500ms at 10 FPS → expect 3–7 frames (initial + a few ticks).
+	if phase1Count < 2 {
+		t.Errorf("phase 1: too few frames: %d (want ≥2 at 10 FPS / 500ms)", phase1Count)
+	}
+
+	// Phase 2: ~1.2s at 2 FPS → expect 2–4 frames.
+	if phase2Count < 1 {
+		t.Errorf("phase 2: too few frames: %d (want ≥1 at 2 FPS / 1.2s)", phase2Count)
+	}
+	if phase2Count > 5 {
+		t.Errorf("phase 2: too many frames: %d (want ≤5 at 2 FPS / 1.2s)", phase2Count)
+	}
+
+	// Verify that later frames have wider intervals (~500ms for 2 FPS).
+	if len(ats) > 2 {
+		lastGap := ats[len(ats)-1].Sub(ats[len(ats)-2])
+		if lastGap < 300*time.Millisecond {
+			t.Errorf("expected wide interval at 2 FPS, got %v", lastGap)
+		}
+	}
+
+	_ = count // suppress unused warning
+}
+
+// TestFPSCallbackInvoked verifies that the fpsCallback is invoked
+// periodically while streaming is active.
+func TestFPSCallbackInvoked(t *testing.T) {
+	origCapture := captureImg
+	defer func() { captureImg = origCapture }()
+	captureImg = func(args ...int) (image.Image, error) {
+		return syntheticImage(), nil
+	}
+
+	var (
+		callbackMu    sync.Mutex
+		callbackCalls []int
+	)
+
+	fpsCallback := func(fps int) {
+		callbackMu.Lock()
+		callbackCalls = append(callbackCalls, fps)
+		callbackMu.Unlock()
+	}
+
+	var (
+		mu2      sync.Mutex
+		frameAts2 []time.Time
+	)
+	fw2 := &frameRecorder{
+		mu:       &mu2,
+		frameAts: &frameAts2,
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2500*time.Millisecond)
+	defer cancel()
+
+	forceCapture := make(chan struct{}, 1)
+	streaming := make(chan bool, 1)
+	streaming <- true
+
+	done := make(chan error, 1)
+	go func() {
+		done <- CaptureLoop(ctx, fw2, forceCapture, streaming, nil, fpsCallback)
+	}()
+
+	<-ctx.Done()
+	<-done
+
+	callbackMu.Lock()
+	calls := len(callbackCalls)
+	callbackMu.Unlock()
+
+	// Over ~2.5s with 1s ticker, expect 2 callbacks.
+	if calls < 1 {
+		t.Errorf("expected ≥1 fpsCallback invocation, got %d", calls)
+	}
+	if calls > 4 {
+		t.Errorf("too many fpsCallback invocations: %d (want ≤4)", calls)
 	}
 }
 

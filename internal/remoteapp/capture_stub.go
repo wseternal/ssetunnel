@@ -8,7 +8,7 @@ import (
 )
 
 // CaptureLoop is the stub for unsupported platforms. Returns ErrNotSupported.
-func CaptureLoop(ctx context.Context, w io.Writer, forceCapture <-chan struct{}, streaming <-chan bool) error {
+func CaptureLoop(ctx context.Context, w io.Writer, forceCapture <-chan struct{}, streaming <-chan bool, maxFPS <-chan int, fpsCallback func(int)) error {
 	return ErrNotSupported
 }
 
