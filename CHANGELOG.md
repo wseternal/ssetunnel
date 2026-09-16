@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.12.0](https://github.com/wseternal/ssetunnel/compare/v1.11.0...v1.12.0) (2026-09-16)
+
+
+### Features
+
+* **remoteapp:** adjustable streaming FPS with live display and slider ([#72](https://github.com/wseternal/ssetunnel/issues/72)) ([1d1716d](https://github.com/wseternal/ssetunnel/commit/1d1716d7ecbb64ede48672dbfd5a322fc50e1290))
+
+
+### Bug Fixes
+
+* add transient capture backoff and diagnostic logging for display unavailable ([#74](https://github.com/wseternal/ssetunnel/issues/74)) ([3a3507f](https://github.com/wseternal/ssetunnel/commit/3a3507f66303a22ad6bc8a86a9bddcc8597faec5))
+* display queue length beside FPS in remote desktop header ([#76](https://github.com/wseternal/ssetunnel/issues/76)) ([9ba98cd](https://github.com/wseternal/ssetunnel/commit/9ba98cde877d02b0e1d3cda405bb6b5403756961))
+* remove transient circuit breaker so capture retries indefinitely on display-unavailable errors ([#77](https://github.com/wseternal/ssetunnel/issues/77)) ([866cd04](https://github.com/wseternal/ssetunnel/commit/866cd04e71e2e846351ce2f6a7838861768848d9))
+* streaming fps tweak ([#75](https://github.com/wseternal/ssetunnel/issues/75)) ([bf39598](https://github.com/wseternal/ssetunnel/commit/bf39598a906305792620c1ac9a6372fa1799545c))
+
 ## [1.11.0](https://github.com/wseternal/ssetunnel/compare/v1.10.0...v1.11.0) (2026-09-15)
 
 
