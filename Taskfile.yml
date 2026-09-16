@@ -167,6 +167,7 @@ tasks:
         </plist>
         EOF
       - plutil -lint "{{.SIGN_APP}}/Contents/Info.plist"
+      # if sign failed with "errSecInternalComponent", try `security unlock-keychain ~/Library/Keychains/login.keychain-db`
       - codesign --force --sign "{{.SIGN_IDENTITY}}" "{{.SIGN_APP}}"
       - codesign --verify --deep --strict --verbose=2 "{{.SIGN_APP}}"
       - codesign -d -vvv "{{.SIGN_APP}}"
