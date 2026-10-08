@@ -299,7 +299,6 @@ export default function App() {
   const termRef = useRef<HTMLDivElement>(null);
   const shellContainerRef = useRef<HTMLDivElement>(null);
   const shellLineBufRef = useRef<string>('');
-  const shellInputPendingRef = useRef<string>('');
   const shellPersistentIdRef = useRef<string>('');
   const xtermRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
@@ -647,13 +646,16 @@ export default function App() {
       sseURL += `&reattach=${encodeURIComponent(effectiveReattachId)}`;
     }
 
-    // Set up input handler: batch keystrokes via requestAnimationFrame
-    // and send via POST. Batching reduces HTTP request count (one flush
-    // per animation frame instead of one per onData event), preventing
-    // browser connection-pool saturation that starves TUI apps like vim
-    // of input during heavy terminal output (e.g. full-screen redraws).
+    // Set up input handler: send keystrokes via POST with single-flight
+    // serialization. The first keystroke fires a POST immediately (no
+    // frame-rate coupling — critical for TUI apps like vim whose
+    // full-screen redraws saturate the rendering pipeline and delay
+    // requestAnimationFrame callbacks). While a POST is in flight,
+    // subsequent keystrokes accumulate in a local buffer and are flushed
+    // as one POST when the in-flight request completes. This avoids both
+    // connection-pool saturation (at most one input POST in flight) and
+    // the frame-rate latency that previously caused vim to appear hung.
     shellLineBufRef.current = '';
-    shellInputPendingRef.current = '';
     const trackLineInput = (data: string) => {
       // Track typed line to detect exit/logout commands.
       // Reset on line-cancel controls (Ctrl-U/Ctrl-C/etc.) so stale
@@ -679,10 +681,21 @@ export default function App() {
         }
       }
     };
-    const flushShellInput = async () => {
-      const data = shellInputPendingRef.current;
-      if (!data) return;
-      shellInputPendingRef.current = '';
+    // Closed-over local state (not a React ref): scoped to this connection,
+    // so each reconnect gets a fresh sender with no stale queue.
+    let pending = '';
+    let inFlight = false;
+    let queued = false;
+    const flush = async () => {
+      if (inFlight) {
+        // A POST is already running; coalesce into the next flush.
+        queued = true;
+        return;
+      }
+      if (!pending) return;
+      const data = pending;
+      pending = '';
+      inFlight = true;
       try {
         const resp = await fetch('/console/api/v1/shell/connect-up', {
           method: 'POST',
@@ -697,19 +710,19 @@ export default function App() {
         if (!abort.signal.aborted) {
           term.writeln('\x1b[31m[Send error]\x1b[0m');
         }
+      } finally {
+        inFlight = false;
       }
-      // Schedule next flush if more input accumulated during the POST.
-      if (shellInputPendingRef.current) {
-        requestAnimationFrame(flushShellInput);
+      // Drain anything that arrived while the POST was in flight.
+      if (queued) {
+        queued = false;
+        void flush();
       }
     };
     const sendInput = (data: string) => {
       trackLineInput(data);
-      shellInputPendingRef.current += data;
-      // Schedule flush on next animation frame if not already pending.
-      if (shellInputPendingRef.current === data) {
-        requestAnimationFrame(flushShellInput);
-      }
+      pending += data;
+      void flush();
     };
 
     // Dispose previous handler if any (e.g., from a prior connection that wasn't cleaned up).
@@ -827,7 +840,6 @@ export default function App() {
         resizeDisposableRef.current.dispose();
         resizeDisposableRef.current = null;
       }
-      shellInputPendingRef.current = '';
       setShellPaletteOpen(false);
       setShellConnected(false);
       setShellSessionId('');
