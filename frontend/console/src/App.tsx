@@ -685,38 +685,40 @@ export default function App() {
     // so each reconnect gets a fresh sender with no stale queue.
     let pending = '';
     let inFlight = false;
-    let queued = false;
+    let needsFlush = false;
     const flush = async () => {
       if (inFlight) {
         // A POST is already running; coalesce into the next flush.
-        queued = true;
+        needsFlush = true;
         return;
       }
-      if (!pending) return;
-      const data = pending;
-      pending = '';
-      inFlight = true;
-      try {
-        const resp = await fetch('/console/api/v1/shell/connect-up', {
-          method: 'POST',
-          headers: { ...authHeaders(), 'X-SSET-Session': sid },
-          body: data,
-          signal: abort.signal,
-        });
-        if (!resp.ok && !abort.signal.aborted) {
-          term.writeln(`\x1b[31m[Input send error: ${resp.status}]\x1b[0m`);
+      // Drain whatever has accumulated, looping to pick up anything that
+      // lands while each POST is in flight. Single-flight invariant: at
+      // most one in-flight input POST at any moment.
+      while (pending) {
+        const data = pending;
+        pending = '';
+        needsFlush = false;
+        inFlight = true;
+        try {
+          const resp = await fetch('/console/api/v1/shell/connect-up', {
+            method: 'POST',
+            headers: { ...authHeaders(), 'X-SSET-Session': sid },
+            body: data,
+            signal: abort.signal,
+          });
+          if (!resp.ok && !abort.signal.aborted) {
+            term.writeln(`\x1b[31m[Input send error: ${resp.status}]\x1b[0m`);
+          }
+        } catch (e) {
+          if (!abort.signal.aborted) {
+            term.writeln('\x1b[31m[Send error]\x1b[0m');
+          }
+        } finally {
+          inFlight = false;
         }
-      } catch (e) {
-        if (!abort.signal.aborted) {
-          term.writeln('\x1b[31m[Send error]\x1b[0m');
-        }
-      } finally {
-        inFlight = false;
-      }
-      // Drain anything that arrived while the POST was in flight.
-      if (queued) {
-        queued = false;
-        void flush();
+        // If nothing was coalesced during the POST, `pending` is empty and
+        // `needsFlush` is false — the loop exits naturally.
       }
     };
     const sendInput = (data: string) => {
