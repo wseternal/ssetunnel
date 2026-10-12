@@ -68,6 +68,7 @@ import {
   type StatusPillTone,
 } from '@doublefin/orca-ui';
 import { theme } from './theme/theme';
+import { parseSSEFrames } from './lib/sse';
 
 interface Session {
   id: string;
@@ -514,23 +515,6 @@ export default function App() {
 
   // --- Cloud Shell ---
 
-  // Parse SSE frames from a text chunk and return the data payloads.
-  const parseSSEFrames = useCallback((text: string): string[] => {
-    const frames: string[] = [];
-    const lines = text.split('\n');
-    let currentData = '';
-    for (const line of lines) {
-      if (line.startsWith('data:')) {
-        currentData += line.slice(5);
-      } else if (line === '' && currentData !== '') {
-        frames.push(currentData);
-        currentData = '';
-      }
-    }
-    if (currentData !== '') frames.push(currentData);
-    return frames;
-  }, []);
-
   const disconnectShell = useCallback(async () => {
     // Explicitly terminate the persistent shell session on the server.
     // Await to prevent race where a fast reconnect creates a new session
@@ -850,7 +834,7 @@ export default function App() {
       if (shellAbortRef.current === abort) shellAbortRef.current = null;
       fetchShellSessions();
     }
-  }, [sessionToken, parseSSEFrames, fetchShellSessions, shellThemeKey]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [sessionToken, fetchShellSessions, shellThemeKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // --- Remote Desktop ---
 
