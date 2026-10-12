@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.12.1](https://github.com/wseternal/ssetunnel/compare/v1.12.0...v1.12.1) (2026-10-12)
+
+
+### Bug Fixes
+
+* **console:** fix SSE parser to emit only terminated frames ([#79](https://github.com/wseternal/ssetunnel/issues/79)) ([693b5df](https://github.com/wseternal/ssetunnel/commit/693b5df57453ac2be35de4e145a9b5a017dd93e9))
+
 ## [1.12.0](https://github.com/wseternal/ssetunnel/compare/v1.11.0...v1.12.0) (2026-10-08)
 
 
