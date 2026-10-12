@@ -32,6 +32,7 @@ tasks:
       - task: go:build
       - task: go:vet
       - task: go:test
+      - task: fe:test
 
   # ── Go ──────────────────────────────────────────────────────────────
 
@@ -191,6 +192,12 @@ tasks:
     dir: "{{.FRONTEND_DIR}}"
     cmds:
       - bun run dev
+
+  fe:test:
+    desc: Run frontend contract tests
+    dir: "{{.FRONTEND_DIR}}"
+    cmds:
+      - bun test
 
   fe:clean:
     desc: Clean frontend build output

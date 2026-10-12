@@ -114,4 +114,20 @@ describe('parseSSEFrames', () => {
     const framesWithSpace = parseSSEFrames('data: AAAA\n\n');
     expect(framesWithSpace).toEqual(['AAAA']);
   });
+
+  // Edge: empty input yields no frames.
+  test('empty input yields no frames', () => {
+    expect(parseSSEFrames('')).toEqual([]);
+  });
+
+  // Edge: standalone unterminated frame yields no frames.
+  test('standalone unterminated frame yields no frames', () => {
+    expect(parseSSEFrames('data: AAAA')).toEqual([]);
+  });
+
+  // Edge: heartbeat followed by data in same chunk yields only data.
+  test('heartbeat followed by data in same chunk', () => {
+    const frames = parseSSEFrames(': ka\n\ndata: AAAA\n\n');
+    expect(frames).toEqual(['AAAA']);
+  });
 });
