@@ -68,6 +68,7 @@ import {
   type StatusPillTone,
 } from '@doublefin/orca-ui';
 import { theme } from './theme/theme';
+import { parseSSEEvents } from './lib/sse';
 
 interface Session {
   id: string;
@@ -514,23 +515,6 @@ export default function App() {
 
   // --- Cloud Shell ---
 
-  // Parse SSE frames from a text chunk and return the data payloads.
-  const parseSSEFrames = useCallback((text: string): string[] => {
-    const frames: string[] = [];
-    const lines = text.split('\n');
-    let currentData = '';
-    for (const line of lines) {
-      if (line.startsWith('data:')) {
-        currentData += line.slice(5);
-      } else if (line === '' && currentData !== '') {
-        frames.push(currentData);
-        currentData = '';
-      }
-    }
-    if (currentData !== '') frames.push(currentData);
-    return frames;
-  }, []);
-
   const disconnectShell = useCallback(async () => {
     // Explicitly terminate the persistent shell session on the server.
     // Await to prevent race where a fast reconnect creates a new session
@@ -800,20 +784,18 @@ export default function App() {
         if (done) break;
         buffer += decoder.decode(value, { stream: true });
 
-        // Process complete SSE frames.
-        const frames = parseSSEFrames(buffer);
-        // Keep incomplete trailing data in buffer.
-        const lastDoubleNewline = buffer.lastIndexOf('\n\n');
-        buffer = lastDoubleNewline >= 0 ? buffer.slice(lastDoubleNewline + 2) : buffer;
+        // Process complete SSE events.
+        const { events, remaining } = parseSSEEvents(buffer);
+        buffer = remaining;
 
-        for (const frame of frames) {
-          if (frame === '') continue; // heartbeat
+        for (const evt of events) {
+          if (evt.data === '') continue; // heartbeat
           // Decode base64 data (SSE frames contain base64-encoded binary data).
           // Convert to Uint8Array to preserve all byte values — passing a JS
           // string to term.write() causes UTF-8 re-encoding which corrupts
           // bytes > 127 (e.g. ANSI 256-color, UTF-8 shell output).
           try {
-            const binary = atob(frame);
+            const binary = atob(evt.data);
             const bytes = new Uint8Array(binary.length);
             for (let i = 0; i < binary.length; i++) {
               bytes[i] = binary.charCodeAt(i);
@@ -821,7 +803,7 @@ export default function App() {
             term.write(bytes);
           } catch {
             // If not valid base64, write as plain text (fallback).
-            term.write(frame);
+            term.write(evt.data);
           }
         }
       }
@@ -850,7 +832,7 @@ export default function App() {
       if (shellAbortRef.current === abort) shellAbortRef.current = null;
       fetchShellSessions();
     }
-  }, [sessionToken, parseSSEFrames, fetchShellSessions, shellThemeKey]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [sessionToken, fetchShellSessions, shellThemeKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // --- Remote Desktop ---
 
@@ -969,45 +951,37 @@ export default function App() {
         if (done) break;
         buffer += decoder.decode(value, { stream: true });
 
-        // Process complete SSE events
-        const events = buffer.split('\n\n');
-        buffer = events.pop() || '';
+        // Process complete SSE events.
+        const { events, remaining } = parseSSEEvents(buffer);
+        buffer = remaining;
 
         for (const evt of events) {
-          if (!evt.trim()) continue;
+          if (!evt.data) continue;
 
-          let eventType = '';
-          let eventData = '';
-          for (const line of evt.split('\n')) {
-            if (line.startsWith('event: ')) eventType = line.slice(7);
-            else if (line.startsWith('data: ')) eventData = line.slice(6);
-          }
-          if (!eventData) continue;
-
-          if (eventType === 'screeninfo') {
+          if (evt.type === 'screeninfo') {
             try {
-              const info = JSON.parse(atob(eventData));
+              const info = JSON.parse(atob(evt.data));
               setScreenWidth(info.width);
               setScreenHeight(info.height);
               screenWidthRef.current = info.width;
               screenHeightRef.current = info.height;
             } catch { /* ignore */ }
-          } else if (eventType === 'fps') {
+          } else if (evt.type === 'fps') {
             try {
-              const fpsData = JSON.parse(atob(eventData));
+              const fpsData = JSON.parse(atob(evt.data));
               if (fpsData.max_fps) setDesktopMaxFps(fpsData.max_fps);
             } catch { /* ignore */ }
-          } else if (eventType === 'log') {
+          } else if (evt.type === 'log') {
             try {
-              const entry: DesktopLogEntry = JSON.parse(atob(eventData));
+              const entry: DesktopLogEntry = JSON.parse(atob(evt.data));
               setDesktopLogs(prev => {
                 const next = [...prev, entry];
                 return next.length > MAX_DESKTOP_LOGS ? next.slice(-MAX_DESKTOP_LOGS) : next;
               });
             } catch (e) { console.warn('failed to parse log event:', e); }
-          } else if (eventType === 'inputack') {
+          } else if (evt.type === 'inputack') {
             try {
-              const ack = JSON.parse(atob(eventData));
+              const ack = JSON.parse(atob(evt.data));
               // Sync max FPS from agent's set_max_fps ack (detail = "fps:N").
               if (ack.type === 'set_max_fps' && ack.detail) {
                 const v = parseInt(ack.detail, 10);
@@ -1025,7 +999,7 @@ export default function App() {
             desktopFrameTimesRef.current.push(Date.now());
             setDesktopQueue(q => q + 1);
             if (desktopImgRef.current) {
-              desktopImgRef.current.src = `data:image/webp;base64,${eventData}`;
+              desktopImgRef.current.src = `data:image/webp;base64,${evt.data}`;
             }
           }
         }
