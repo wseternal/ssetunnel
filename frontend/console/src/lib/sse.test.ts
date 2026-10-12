@@ -25,22 +25,20 @@ function simulateLoop(chunks: string[]): string[] {
 
 describe('parseSSEFrames', () => {
   // Case 1: one complete frame in one chunk yields one frame.
-  // RED: slice(5) retains the space from "data: ", producing " aGVsbG8=".
   test('one complete frame in one chunk', () => {
     const frames = parseSSEFrames('data: aGVsbG8=\n\n');
-    expect(frames).toEqual([' aGVsbG8=']);
+    expect(frames).toEqual(['aGVsbG8=']);
   });
 
   // Case 2: a frame split mid-payload yields exactly one frame after
   // both chunks through the caller loop.
-  // RED: the buggy flush emits a truncated prefix, then the full frame.
   test('split frame yields exactly one frame via caller loop', () => {
     const full = 'data: aGVsbG8gd29ybGQ=\n\n';
     const splitAt = 10; // mid-payload: "data: aGVs" | "bG8gd29ybGQ=\n\n"
     const chunk1 = full.slice(0, splitAt);
     const chunk2 = full.slice(splitAt);
     const frames = simulateLoop([chunk1, chunk2]);
-    expect(frames).toEqual([' aGVsbG8gd29ybGQ=']);
+    expect(frames).toEqual(['aGVsbG8gd29ybGQ=']);
   });
 
   // Case 3: a 341 KiB-scale payload (reattach replay size), split at a
@@ -66,8 +64,7 @@ describe('parseSSEFrames', () => {
       const frames = simulateLoop([chunk1, chunk2]);
       // RED: the buggy flush may emit a truncated prefix before the full frame.
       expect(frames.length, `offset ${off}: expected 1 frame, got ${frames.length}`).toBe(1);
-      // Expect the exact base64 payload (with leading space from slice(5)).
-      expect(frames[0], `offset ${off}: payload mismatch`).toBe(' ' + b64);
+      expect(frames[0], `offset ${off}: payload mismatch`).toBe(b64);
     }
   });
 
@@ -87,37 +84,34 @@ describe('parseSSEFrames', () => {
   });
 
   // Case 6: multiple frames in one chunk yield all frames in order.
-  // RED: slice(5) retains the space from "data: ".
   test('multiple frames in one chunk', () => {
     const frames = parseSSEFrames('data: AAAA\n\ndata: BBBB\n\ndata: CCCC\n\n');
-    expect(frames).toEqual([' AAAA', ' BBBB', ' CCCC']);
+    expect(frames).toEqual(['AAAA', 'BBBB', 'CCCC']);
   });
 
   // Case 7: unterminated tail is NOT emitted.
-  // RED: the buggy flush emits the unterminated tail as a complete frame.
   test('unterminated tail is not emitted', () => {
     // Complete frame followed by incomplete tail.
     const text = 'data: Q1BNU0FM\n\ndata: VEhJUw==';
     const frames = parseSSEFrames(text);
     // Only the terminated frame should appear.
-    expect(frames).toEqual([' Q1BNU0FM']);
+    expect(frames).toEqual(['Q1BNU0FM']);
   });
 
   // Case 7b: unterminated tail that ends after the first \n of the delimiter.
   test('tail ending after single newline is not emitted', () => {
     const text = 'data: Q1BNU0FM\n\ndata: VEhJUw==\n';
     const frames = parseSSEFrames(text);
-    expect(frames).toEqual([' Q1BNU0FM']);
+    expect(frames).toEqual(['Q1BNU0FM']);
   });
 
   // Case 8: both "data: " (with space) and "data:" (no space) decode.
   test('data with and without space both decode', () => {
-    // slice(5) strips "data:" only. The space variant retains a leading space.
-    // This documents the current behavior. Both variants produce output.
+    // The fix strips the optional space after "data:".
     const framesNoSpace = parseSSEFrames('data:AAAA\n\n');
     expect(framesNoSpace).toEqual(['AAAA']);
 
     const framesWithSpace = parseSSEFrames('data: AAAA\n\n');
-    expect(framesWithSpace).toEqual([' AAAA']);
+    expect(framesWithSpace).toEqual(['AAAA']);
   });
 });
