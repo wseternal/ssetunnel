@@ -525,12 +525,20 @@ export default function App() {
   // --- Cloud Shell ---
 
   const disconnectShell = useCallback(async () => {
-    // Explicitly terminate the persistent shell session on the server.
+    // Clear reconnect state synchronously FIRST — before any await —
+    // so a pending auto-reconnect timer callback reads empty refs and
+    // bails instead of reconnecting during the DELETE request.
+    const persistentId = shellPersistentIdRef.current;
+    shellPersistentIdRef.current = '';
+    shellAgentIDRef.current = '';
+    if (shellReconnectTimerRef.current) {
+      clearTimeout(shellReconnectTimerRef.current);
+      shellReconnectTimerRef.current = null;
+    }
+    shellReconnectCountRef.current = 0;
+    // Now terminate the persistent shell session on the server.
     // Await to prevent race where a fast reconnect creates a new session
     // that the still-in-flight DELETE would then kill.
-    // Use ref to avoid stale closure — sendInput captures disconnectShell
-    // before shellPersistentId state is populated.
-    const persistentId = shellPersistentIdRef.current;
     if (persistentId) {
       try {
         await fetch('/console/api/v1/shell/sessions/delete', {
@@ -540,16 +548,6 @@ export default function App() {
         });
       } catch { /* best-effort server cleanup */ }
     }
-    // Clear persistent ID and agent BEFORE abort so the auto-reconnect
-    // setTimeout callback (which reads these refs inside the callback,
-    // not at schedule time — N3 fix) sees the cleared values and bails.
-    shellPersistentIdRef.current = '';
-    shellAgentIDRef.current = '';
-    if (shellReconnectTimerRef.current) {
-      clearTimeout(shellReconnectTimerRef.current);
-      shellReconnectTimerRef.current = null;
-    }
-    shellReconnectCountRef.current = 0;
     if (shellAbortRef.current) {
       shellAbortRef.current.abort();
       shellAbortRef.current = null;

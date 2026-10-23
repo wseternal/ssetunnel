@@ -313,8 +313,8 @@ func (ss *ShellSession) outputConsumer(heartbeat time.Duration) {
 			// happened outside ss.mu: Attach could drain the ring between
 			// the two operations, replay the bytes, and then the consumer
 			// would write the same bytes again via WriteFrame (C1 fix).
-			ss.ring.Write((*buf)[:n])
 			ss.mu.Lock()
+			ss.ring.Write((*buf)[:n])
 			ss.lastActivity = time.Now()
 			closed := ss.closed.Load()
 			w := ss.sseWriter
