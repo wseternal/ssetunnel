@@ -268,6 +268,23 @@ func (ss *ShellSession) IsDead() bool {
 	return ss.closed.Load()
 }
 
+// detachWriter clears the SSE writer if it still matches w, preventing
+// a new client's writer from being cleared by a stale failure from the
+// previous client. When touchActivity is true, lastActivity is updated
+// (used on heartbeat failures to delay idle cleanup).
+func (ss *ShellSession) detachWriter(w io.Writer, touchActivity bool) {
+	ss.mu.Lock()
+	if ss.sseWriter == w {
+		ss.sseWriter = nil
+		ss.flusher = nil
+		ss.rc = nil
+		if touchActivity {
+			ss.lastActivity = time.Now()
+		}
+	}
+	ss.mu.Unlock()
+}
+
 // LastActivity returns the time of the last client activity.
 func (ss *ShellSession) LastActivity() time.Time {
 	ss.mu.Lock()
@@ -334,25 +351,10 @@ func (ss *ShellSession) outputConsumer(heartbeat time.Duration) {
 
 			if w != nil {
 				if deadlineErr != nil {
-					// Connection broken — detach without attempting write.
-					ss.mu.Lock()
-					if ss.sseWriter == w {
-						ss.sseWriter = nil
-						ss.flusher = nil
-						ss.rc = nil
-					}
-					ss.mu.Unlock()
+					ss.detachWriter(w, false)
 				} else if werr := transport.WriteFrame(w, f, (*buf)[:n]); werr != nil {
 					log.Printf("shell: detaching session %s (agent=%s, user=%d): write error: %v", ss.id, ss.agentID, ss.userID, werr)
-					// Guard: only clear if the current writer is still the one
-					// that failed (a new client may have attached in the meantime).
-					ss.mu.Lock()
-					if ss.sseWriter == w {
-						ss.sseWriter = nil
-						ss.flusher = nil
-						ss.rc = nil
-					}
-					ss.mu.Unlock()
+					ss.detachWriter(w, false)
 				}
 				ss.metrics.RecordConnectBytes(ss.agentID, 0, n)
 			} else {
@@ -388,27 +390,10 @@ func (ss *ShellSession) outputConsumer(heartbeat time.Duration) {
 					}
 				}
 				if deadlineErr != nil {
-					// Connection broken — detach without attempting write.
-					ss.mu.Lock()
-					if ss.sseWriter == w {
-						ss.sseWriter = nil
-						ss.flusher = nil
-						ss.rc = nil
-						ss.lastActivity = time.Now()
-					}
-					ss.mu.Unlock()
+					ss.detachWriter(w, true)
 				} else if werr := transport.WriteHeartbeat(w, f); werr != nil {
 					log.Printf("shell: detaching session %s (agent=%s, user=%d): heartbeat error: %v", ss.id, ss.agentID, ss.userID, werr)
-					// Guard: only detach if the current writer is still the one
-					// that failed (a new client may have attached in the meantime).
-					ss.mu.Lock()
-					if ss.sseWriter == w {
-						ss.sseWriter = nil
-						ss.flusher = nil
-						ss.rc = nil
-						ss.lastActivity = time.Now()
-					}
-					ss.mu.Unlock()
+					ss.detachWriter(w, true)
 				}
 			}
 
