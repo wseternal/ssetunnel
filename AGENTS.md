@@ -170,7 +170,7 @@ Connect clients pass `agent` and `target` as HTTP query parameters on `GET /conn
 Sessions that survived past the 10 s health threshold reset the backoff to 0 — a drop after long uptime is a network event, not a flapping server, so retry immediately.
 
 ### Cloud Shell (`__shell__` Target)
-The console frontend can open a browser-based shell. The server's `ShellConnectHandler` forces `target=__shell__` via a context key (bypassing agent config validation). The agent detects `__shell__` and spawns a local shell with PTY instead of dialing TCP. Resize events are sent as NUL-prefixed JSON on the yamux stream.
+The console frontend can open a browser-based shell. The server's `ShellConnectHandler` forces `target=__shell__` via a context key (bypassing agent config validation). The agent detects `__shell__` and spawns a local shell with PTY instead of dialing TCP. Resize events are sent as length-prefixed JSON (`0x00 | uint16be(len) | JSON`) on the yamux stream.
 
 ### Auto-Tuning
 The `AutoTuner` evaluates agents every 30 s: throughput saturation adjusts batch size (4 KiB–1 MiB), p95 latency adjusts concurrency (1–4), and bandwidth level toggles gzip. Decisions are pushed via SSE `event: tune` control frames. Agents apply batch-size and compress changes live; concurrency changes are deferred to next reconnect. The tuner enforces a 2-minute cooldown between decisions per agent.

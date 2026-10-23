@@ -4,6 +4,7 @@ package agent
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"log"
 	"net"
@@ -170,7 +171,19 @@ func readAndApplyResize(stream net.Conn, ptmx *os.File) bool {
 			n = maxResizePayload
 		}
 		if n > 0 {
-			_, _ = io.CopyN(io.Discard, stream, int64(n))
+			if _, err := io.CopyN(io.Discard, stream, int64(n)); err != nil {
+				// Timeout during discard is expected (2 s deadline expires
+				// while waiting for bytes the peer never sends) — treat as
+				// recoverable. Non-timeout errors (EOF, connection reset)
+				// mean the stream is broken.
+				var nerr net.Error
+				if errors.As(err, &nerr) && nerr.Timeout() {
+					log.Printf("agent: discard oversized resize payload timed out (expected)")
+				} else {
+					log.Printf("agent: discard oversized resize payload: %v", err)
+					return false
+				}
+			}
 		}
 		return true
 	}
@@ -180,6 +193,7 @@ func readAndApplyResize(stream net.Conn, ptmx *os.File) bool {
 	}
 	// Sanity check: payload must be JSON object.
 	if len(buf) == 0 || buf[0] != '{' {
+		log.Printf("agent: resize payload not JSON (first byte: %d), discarding", buf[0])
 		return true // false trigger; discard and continue
 	}
 	var ws struct {

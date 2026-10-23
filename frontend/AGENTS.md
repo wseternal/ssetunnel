@@ -72,6 +72,13 @@ Output goes to `frontend/console/dist/`, which is embedded by `frontend.go`.
 - Resize forwarded via `POST /shell/resize` with JSON `{id, cols, rows}`
 - Binary-safe output: base64 decode → Uint8Array → `term.write(bytes)` to preserve ANSI/UTF-8
 
+#### Failure Handling
+- Server emits `event: closed` on backing-session death (agent disconnect, stream error, explicit kill); the frontend auto-reconnects with exponential backoff (1 s → 30 s cap, max 10 attempts) instead of freezing
+- Input POSTs have a 10 s hard timeout (`AbortController`) that aborts the connection on hang and triggers auto-reconnect
+- Resize POST failures are logged via `console.warn` for diagnostics
+- Ctrl-D / `exit` / `logout` interception removed — raw PTY bytes belong to the remote shell (Ctrl-D is vim's half-page-down; `exit` typed inside psql or nested SSH is legitimate input)
+- Reconnect backoff counter resets on successful data receipt; explicit user disconnect clears the pending reconnect timer and agent ref before abort so the scheduled callback bails out
+
 ### Metrics Visualization
 - Overview cards: active agents, upload/download throughput, error rate
 - Per-agent expandable cards showing current params (batch, concurrency, compress) and snapshot metrics

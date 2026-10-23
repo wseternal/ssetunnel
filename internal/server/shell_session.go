@@ -99,6 +99,12 @@ func NewShellSession(id, agentID string, userID int64, stream *yamux.Stream, mc 
 // the deadline, while a half-open TCP socket fails within one tick.
 const sseWriteDeadline = 30 * time.Second
 
+// replayChunkSize bounds each SSE frame emitted during Attach ring
+// replay. Chunking amortizes lock pressure and lets a wedged client
+// fail faster (one deadline tick per chunk instead of one for the
+// entire 256 KiB ring).
+const replayChunkSize = 64 << 10
+
 // ID returns the session identifier.
 func (ss *ShellSession) ID() string { return ss.id }
 
@@ -175,16 +181,32 @@ func (ss *ShellSession) Attach(w io.Writer, f http.Flusher) error {
 	ss.lastActivity = time.Now()
 
 	data := ss.ring.ReadAll()
-	if len(data) > 0 {
-		// Arm the per-frame write deadline so a wedged browser cannot
-		// stall Attach indefinitely. The consumer applies the same
-		// deadline on every subsequent frame write (F8).
-		if rc := ss.rc; rc != nil {
-			_ = rc.SetWriteDeadline(time.Now().Add(sseWriteDeadline))
+	// Replay the ring buffer in chunks. Each chunk gets its own write
+	// deadline so a wedged browser fails within one tick per chunk
+	// rather than stalling the entire replay. The lock is held for the
+	// full replay to preserve the byte-ordering invariant: all buffered
+	// bytes reach the HTTP response before any subsequent consumer byte.
+	for off := 0; off < len(data); off += replayChunkSize {
+		if ss.closed.Load() {
+			ss.sseWriter = nil
+			ss.flusher = nil
+			ss.rc = nil
+			return fmt.Errorf("session closed during replay")
 		}
-		if err := transport.WriteFrame(w, f, data); err != nil {
-			// Replay failed — roll back the writer install so the
-			// caller observes a clean state on return.
+		end := off + replayChunkSize
+		if end > len(data) {
+			end = len(data)
+		}
+		if rc := ss.rc; rc != nil {
+			if err := rc.SetWriteDeadline(time.Now().Add(sseWriteDeadline)); err != nil {
+				log.Printf("shell: set write deadline during replay failed (session=%s): %v", ss.id, err)
+				ss.sseWriter = nil
+				ss.flusher = nil
+				ss.rc = nil
+				return fmt.Errorf("replay set deadline: %w", err)
+			}
+		}
+		if err := transport.WriteFrame(w, f, data[off:end]); err != nil {
 			ss.sseWriter = nil
 			ss.flusher = nil
 			ss.rc = nil
@@ -286,20 +308,24 @@ func (ss *ShellSession) outputConsumer(heartbeat time.Duration) {
 		n, err := ss.stream.Read(*buf)
 
 		if n > 0 {
-			// Always write to ring buffer so reattaching clients can
-			// replay scrollback history (not just the bytes captured
-			// while detached).
+			// Write to ring and snapshot SSE writer under a single lock
+			// acquisition. This closes the race where the ring write
+			// happened outside ss.mu: Attach could drain the ring between
+			// the two operations, replay the bytes, and then the consumer
+			// would write the same bytes again via WriteFrame (C1 fix).
 			ss.ring.Write((*buf)[:n])
-
-			// Snapshot writer state under lock, then release before
-			// the potentially-blocking WriteFrame call so that
-			// Detach/Close are not starved by TCP backpressure.
 			ss.mu.Lock()
 			ss.lastActivity = time.Now()
 			closed := ss.closed.Load()
 			w := ss.sseWriter
 			f := ss.flusher
-			rc := ss.rc
+			var deadlineErr error
+			if w != nil && ss.rc != nil {
+				deadlineErr = ss.rc.SetWriteDeadline(time.Now().Add(sseWriteDeadline))
+				if deadlineErr != nil {
+					log.Printf("shell: set write deadline failed (session=%s, agent=%s): %v", ss.id, ss.agentID, deadlineErr)
+				}
+			}
 			ss.mu.Unlock()
 
 			if closed {
@@ -307,13 +333,17 @@ func (ss *ShellSession) outputConsumer(heartbeat time.Duration) {
 			}
 
 			if w != nil {
-				// Attached: refresh write deadline, then write the SSE
-				// frame outside the lock using the pooled buffer.
-				if rc != nil {
-					_ = rc.SetWriteDeadline(time.Now().Add(sseWriteDeadline))
-				}
-				if werr := transport.WriteFrame(w, f, (*buf)[:n]); werr != nil {
-					// Client write failed — re-acquire lock to detach.
+				if deadlineErr != nil {
+					// Connection broken — detach without attempting write.
+					ss.mu.Lock()
+					if ss.sseWriter == w {
+						ss.sseWriter = nil
+						ss.flusher = nil
+						ss.rc = nil
+					}
+					ss.mu.Unlock()
+				} else if werr := transport.WriteFrame(w, f, (*buf)[:n]); werr != nil {
+					log.Printf("shell: detaching session %s (agent=%s, user=%d): write error: %v", ss.id, ss.agentID, ss.userID, werr)
 					// Guard: only clear if the current writer is still the one
 					// that failed (a new client may have attached in the meantime).
 					ss.mu.Lock()
@@ -350,10 +380,25 @@ func (ss *ShellSession) outputConsumer(heartbeat time.Duration) {
 			}
 
 			if w != nil {
+				var deadlineErr error
 				if rc != nil {
-					_ = rc.SetWriteDeadline(time.Now().Add(sseWriteDeadline))
+					deadlineErr = rc.SetWriteDeadline(time.Now().Add(sseWriteDeadline))
+					if deadlineErr != nil {
+						log.Printf("shell: set write deadline for heartbeat failed (session=%s, agent=%s): %v", ss.id, ss.agentID, deadlineErr)
+					}
 				}
-				if werr := transport.WriteHeartbeat(w, f); werr != nil {
+				if deadlineErr != nil {
+					// Connection broken — detach without attempting write.
+					ss.mu.Lock()
+					if ss.sseWriter == w {
+						ss.sseWriter = nil
+						ss.flusher = nil
+						ss.rc = nil
+						ss.lastActivity = time.Now()
+					}
+					ss.mu.Unlock()
+				} else if werr := transport.WriteHeartbeat(w, f); werr != nil {
+					log.Printf("shell: detaching session %s (agent=%s, user=%d): heartbeat error: %v", ss.id, ss.agentID, ss.userID, werr)
 					// Guard: only detach if the current writer is still the one
 					// that failed (a new client may have attached in the meantime).
 					ss.mu.Lock()

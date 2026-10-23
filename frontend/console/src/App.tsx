@@ -304,6 +304,8 @@ export default function App() {
   const xtermRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
   const shellAbortRef = useRef<AbortController | null>(null);
+  const shellReconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const shellReconnectCountRef = useRef<number>(0);
   const inputDisposableRef = useRef<IDisposable | null>(null);
   const resizeDisposableRef = useRef<IDisposable | null>(null);
   // Stable ref to the latest connectShell callback. Used by the
@@ -538,6 +540,16 @@ export default function App() {
         });
       } catch { /* best-effort server cleanup */ }
     }
+    // Clear persistent ID and agent BEFORE abort so the auto-reconnect
+    // setTimeout callback (which reads these refs inside the callback,
+    // not at schedule time — N3 fix) sees the cleared values and bails.
+    shellPersistentIdRef.current = '';
+    shellAgentIDRef.current = '';
+    if (shellReconnectTimerRef.current) {
+      clearTimeout(shellReconnectTimerRef.current);
+      shellReconnectTimerRef.current = null;
+    }
+    shellReconnectCountRef.current = 0;
     if (shellAbortRef.current) {
       shellAbortRef.current.abort();
       shellAbortRef.current = null;
@@ -557,8 +569,6 @@ export default function App() {
     setShellConnected(false);
     setShellSessionId('');
     setShellPersistentId('');
-    shellPersistentIdRef.current = '';
-    shellAgentIDRef.current = '';
     setShellReattached(false);
     fetchShellSessions();
   }, [fetchShellSessions]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -797,7 +807,7 @@ export default function App() {
           headers: { ...authHeaders(), 'Content-Type': 'application/json' },
           body: JSON.stringify({ id: sid, cols, rows }),
           signal: abort.signal,
-        }).catch(() => {});
+        }).catch((e) => console.warn('[shell] resize POST failed:', e));
       };
       resizeDisposableRef.current = term.onResize(({ cols, rows }) => sendResize(cols, rows));
       // Send initial size so the PTY matches xterm.js from the start.
@@ -810,6 +820,9 @@ export default function App() {
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
+        // Reset reconnect backoff counter on successful data receipt
+        // (W3: a healthy connection forgets past reconnect failures).
+        shellReconnectCountRef.current = 0;
         buffer += decoder.decode(value, { stream: true });
 
         // Process complete SSE events.
@@ -874,36 +887,40 @@ export default function App() {
 
       if (shouldAutoReconnect) {
         // Auto-reconnect path: keep shellConnected=true so the UI
-        // does not flash "disconnected" during reattach. The
-        // recursive connectShell below will find the existing
-        // persistent session on the server (FindByUserAgent) and
-        // reattach with ring-buffer replay, or create a fresh one
-        // if the server already reaped it (404 fallback inside
-        // connectShell handles this case).
-        const reconnectAgent = shellAgentIDRef.current;
-        if (reconnectAgent) {
-          setTimeout(() => {
-            // Invoke via the stable ref so the recursive call uses
-            // whatever connectShell closure is current at fire time
-            // (avoids capturing a stale closure at scheduling time).
-            connectShellRef.current(reconnectAgent).catch(() => {
-              // Auto-reconnect failed — surface the failure and
-              // drop back to the disconnected state.
+        // does not flash "disconnected" during reattach.
+        // Exponential backoff with jitter (W3): 1s → 2s → 4s → 30s cap.
+        // Max 10 attempts before giving up.
+        const attempt = shellReconnectCountRef.current;
+        shellReconnectCountRef.current = attempt + 1;
+        if (attempt >= 10) {
+          if (xtermRef.current) {
+            xtermRef.current.writeln('\x1b[31m[Reconnect failed after 10 attempts — giving up]\x1b[0m');
+          }
+          setShellPaletteOpen(false);
+          setShellConnected(false);
+          setShellSessionId('');
+          setShellPersistentId('');
+          shellPersistentIdRef.current = '';
+          shellAgentIDRef.current = '';
+          shellReconnectCountRef.current = 0;
+          fetchShellSessions();
+        } else {
+          const delay = Math.min(1000 * Math.pow(2, attempt), 30000) + Math.random() * 500;
+          shellReconnectTimerRef.current = setTimeout(() => {
+            shellReconnectTimerRef.current = null;
+            // Read agent ID inside callback (N3): if disconnectShell
+            // cleared it since scheduling, bail out instead of
+            // reconnecting a shell the user explicitly disconnected.
+            const agent = shellAgentIDRef.current;
+            if (!agent) return;
+            connectShellRef.current(agent).catch(() => {
               if (xtermRef.current) {
                 xtermRef.current.writeln('\x1b[31m[Reconnect failed]\x1b[0m');
               }
               setShellConnected(false);
               shellAgentIDRef.current = '';
             });
-          }, 1000);
-        } else {
-          // No agent to reconnect to (explicit disconnect path).
-          setShellPaletteOpen(false);
-          setShellConnected(false);
-          setShellSessionId('');
-          setShellPersistentId('');
-          shellPersistentIdRef.current = '';
-          fetchShellSessions();
+          }, delay);
         }
       } else {
         // Explicit disconnect (user action or disconnectShell call).
@@ -1780,6 +1797,7 @@ export default function App() {
   useEffect(() => {
     return () => {
       if (shellAbortRef.current) shellAbortRef.current.abort();
+      if (shellReconnectTimerRef.current) clearTimeout(shellReconnectTimerRef.current);
       if (xtermRef.current) { xtermRef.current.dispose(); xtermRef.current = null; }
     };
   }, []);

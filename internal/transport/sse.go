@@ -22,11 +22,15 @@ const SSEEventTypeClosed = "closed"
 const maxSSELineSize = 1 << 20 // 1 MiB
 
 // WriteHeaders sets the SSE response headers. X-Accel-Buffering: no
-// stops nginx-style proxies from buffering the stream.
+// stops nginx-style proxies from buffering the stream. Cache-Control
+// forbids storage (not just revalidation) because shell output often
+// contains secrets (pasted credentials, env vars, file contents).
 func WriteHeaders(w http.ResponseWriter) {
 	h := w.Header()
 	h.Set("Content-Type", "text/event-stream")
-	h.Set("Cache-Control", "no-cache")
+	h.Set("Cache-Control", "no-cache, no-store, must-revalidate")
+	h.Set("Pragma", "no-cache")
+	h.Set("Expires", "0")
 	h.Set("X-Accel-Buffering", "no")
 }
 
