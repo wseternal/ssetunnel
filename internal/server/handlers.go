@@ -511,14 +511,10 @@ func (h *Handler) handleConnect(w http.ResponseWriter, r *http.Request) {
 			select {
 			case ws := <-cs.resize:
 				msg, _ := json.Marshal(ws)
-				if len(msg) > 0xFFFF {
+				resizeMsg := transport.EncodeResize(msg)
+				if resizeMsg == nil {
 					continue
 				}
-				resizeMsg := make([]byte, 3+len(msg))
-				resizeMsg[0] = 0
-				resizeMsg[1] = byte(len(msg) >> 8)
-				resizeMsg[2] = byte(len(msg))
-				copy(resizeMsg[3:], msg)
 				if _, err := stream.Write(resizeMsg); err != nil {
 					stream.Close()
 					return

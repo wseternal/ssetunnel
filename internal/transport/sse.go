@@ -90,6 +90,49 @@ func WriteHeartbeat(w io.Writer, f http.Flusher) error {
 	return nil
 }
 
+// EncodeResize encodes a PTY resize JSON payload into the
+// length-prefixed wire format shared by the server's resizeForwarder
+// and the connect bridge's resize multiplexer:
+//
+//	0x00 | uint16be(len) | JSON payload
+//
+// The 2-byte length bounds the agent-side read so a stray NUL byte
+// from user input (Ctrl-Space, Ctrl-@) costs at most a bounded
+// hiccup instead of swallowing keystrokes into an unbounded buffer
+// until a literal 0x0A. Returns nil when jsonPayload is empty or
+// exceeds 0xFFFF bytes (callers are expected to drop oversize
+// messages rather than truncate).
+func EncodeResize(jsonPayload []byte) []byte {
+	n := len(jsonPayload)
+	if n == 0 || n > 0xFFFF {
+		return nil
+	}
+	out := make([]byte, 3+n)
+	out[0] = 0
+	out[1] = byte(n >> 8)
+	out[2] = byte(n)
+	copy(out[3:], jsonPayload)
+	return out
+}
+
+// DecodeResize is the inverse of EncodeResize: given a wire frame
+// (without the leading 0x00 marker, which the caller has already
+// consumed), reads the 2-byte length and payload, returning the
+// JSON body. Returns an error when the frame is truncated or the
+// declared length exceeds maxResizePayload (1024 B in the agent;
+// passed as a parameter so server-side tests can pass a different
+// bound).
+func DecodeResize(lenByte0, lenByte1 byte, payload []byte, maxLen int) ([]byte, error) {
+	n := int(lenByte0)<<8 | int(lenByte1)
+	if n == 0 || n > maxLen {
+		return nil, fmt.Errorf("resize payload length %d out of bounds (max %d)", n, maxLen)
+	}
+	if len(payload) < n {
+		return nil, fmt.Errorf("resize payload truncated: have %d, want %d", len(payload), n)
+	}
+	return payload[:n], nil
+}
+
 // SSEEvent is one parsed SSE event with its type and decoded data.
 // Type is empty for data-only events (no event: field).
 type SSEEvent struct {

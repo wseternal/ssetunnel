@@ -82,7 +82,7 @@ func NewShellSession(id, agentID string, userID int64, stream *yamux.Stream, mc 
 		userID:       userID,
 		stream:       stream,
 		upPipe:       transport.NewPipe(connectUpPipeCap),
-		resizeCh:     make(chan windowSize, 1),
+		resizeCh:     make(chan windowSize, 16),
 		metrics:      mc,
 		ring:         NewRingBuffer(shellRingCap),
 		wakeup:       make(chan struct{}, 1),
@@ -435,15 +435,11 @@ func (ss *ShellSession) resizeForwarder() {
 		select {
 		case ws := <-ss.resizeCh:
 			msg, _ := json.Marshal(ws)
-			if len(msg) > 0xFFFF {
+			resizeMsg := transport.EncodeResize(msg)
+			if resizeMsg == nil {
 				log.Printf("shell: resize message too large (%d bytes), dropping", len(msg))
 				continue
 			}
-			resizeMsg := make([]byte, 3+len(msg))
-			resizeMsg[0] = 0
-			resizeMsg[1] = byte(len(msg) >> 8)
-			resizeMsg[2] = byte(len(msg))
-			copy(resizeMsg[3:], msg)
 			ss.writeMu.Lock()
 			_, err := ss.stream.Write(resizeMsg)
 			ss.writeMu.Unlock()

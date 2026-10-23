@@ -15,8 +15,8 @@
 | 0 Setup | done | Remote=github, base=main, HEAD matches github/main, tree clean except analysis doc |
 | 1 Plan | done | F1-F8 approved; F4 clean cutover (no compat); F2 keepalive tuning; F1 death signal + auto-reattach |
 | 2 Implement | done | RED→GREEN→REFACTOR for T1-T8; all backend + frontend tests green; frontend rebuilt |
-| 3 Review | in_progress | Multi-axis review |
-| 4 Simplify | pending | Complexity reduction |
+| 3 Review | done | 2 Critical + 2 Warning fixed; Suggestions (test gaps) deferred |
+| 4 Simplify | done | Extracted `transport.EncodeResize`/`DecodeResize`; resizeCh buffer 1→16 |
 | 5 Wrap-up | pending | Conventional commits, recap, post-cycle choice |
 
 ## Key Decisions
@@ -35,7 +35,17 @@
 
 ## Per-Phase Commits
 
-- **Phase 2 (Implement):** `fix(shell): resolve cloud shell freeze on vim with large files` — F1-F8 implementation.
+- **Phase 2 (Implement):** `49185a1` — `fix(shell): resolve cloud shell freeze on vim with large files` (F1-F8).
+- **Phase 3 (Review):** `5cae35e` — `fix(shell): eliminate concurrent-write race in Attach replay (review follow-up)`.
+  - Critical #1: Attach held ss.mu across writer install AND replay (was: unlock→replay→concurrent-write race).
+  - Critical #2: Removed dead `replayBuf` field and stale struct comment.
+  - Warning #3: mux.go comment updated to cite current 1 MiB batcher queue (was: 4 MiB).
+  - Warning #4: Auto-reconnect setTimeout uses stable `connectShellRef` (avoids self-referential useCallback).
+- **Phase 4 (Simplify):** `refactor(shell): extract resize wire encoding; bump resizeCh buffer`.
+  - DRY out two resize-encoding copies in `shell_session.go` and `handlers.go` via `transport.EncodeResize`.
+  - Add symmetric `transport.DecodeResize` for test use.
+  - `resizeCh` buffer 1 → 16 to absorb resize bursts during rapid window drag.
+  - Round-trip + bounds + error tests added.
 
 ## Deferred Findings
 
