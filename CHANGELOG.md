@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.12.1](https://github.com/wseternal/ssetunnel/compare/v1.12.0...v1.12.1) (2026-10-23)
+
+
+### Bug Fixes
+
+* **console:** fix SSE parser to emit only terminated frames ([#79](https://github.com/wseternal/ssetunnel/issues/79)) ([693b5df](https://github.com/wseternal/ssetunnel/commit/693b5df57453ac2be35de4e145a9b5a017dd93e9))
+* **shell:** resolve cloud shell freeze on vim with large files ([#81](https://github.com/wseternal/ssetunnel/issues/81)) ([cd66071](https://github.com/wseternal/ssetunnel/commit/cd6607160b98c32f9643c8b73ed275e64682d4e8))
+
 ## [1.12.0](https://github.com/wseternal/ssetunnel/compare/v1.11.0...v1.12.0) (2026-10-08)
 
 
