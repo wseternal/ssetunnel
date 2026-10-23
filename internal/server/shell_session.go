@@ -63,17 +63,6 @@ type ShellSession struct {
 	rc        *http.ResponseController // per-conn write-deadline controller; nil when detached
 	closed    atomic.Bool
 
-	// replayBuf captures consumer bytes that arrive while Attach is
-	// replaying the ring buffer to the SSE writer outside ss.mu. The
-	// consumer diverts to this buffer (instead of the writer) for the
-	// duration of the replay so byte ordering on the wire is preserved:
-	// replay bytes first, then captured bytes, then live bytes. Only the
-	// consumer writes to it, and only while sseWriter is non-nil and
-	// replayBuf is non-nil; Attach drains it under mu at the end of
-	// replay. Resized on demand; not bounded, but replay is short-lived
-	// (milliseconds on a healthy link) so growth is bounded in practice.
-	replayBuf []byte
-
 	ring *RingBuffer // output ring buffer (always written to when detached)
 
 	wakeup chan struct{} // signal consumer to check new writer / flush
@@ -149,35 +138,33 @@ func (ss *ShellSession) Start(heartbeat time.Duration) {
 }
 
 // Attach connects a client to this session. It atomically installs the
-// SSE writer and drains the ring buffer as SSE frames so no output bytes
-// are skipped or duplicated across the attach transition. The caller
-// must hold no locks and must block until the client disconnects, then
-// call Detach.
+// SSE writer and drains the ring buffer as SSE frames under a single
+// lock acquisition so no output bytes are skipped or duplicated across
+// the attach transition, and no concurrent writes can race the replay.
+// The caller must hold no locks and must block until the client
+// disconnects, then call Detach.
 //
-// Byte ordering invariant: the SSE writer is installed under ss.mu and
-// the ring is drained while the lock is still held, so every byte that
-// was in the ring reaches the HTTP response before any subsequent
-// consumer byte. To keep this invariant without deadlocking on a
-// wedged browser, the consumer applies a per-frame write deadline
-// (sseWriteDeadline) — a wedged client detaches within one tick rather
-// than blocking Attach/Detach/Close indefinitely.
+// Byte ordering invariant: every byte that was in the ring reaches the
+// HTTP response before any subsequent consumer byte. The consumer
+// acquires ss.mu before writing any SSE frame, so holding the lock
+// through the replay guarantees this ordering. To keep this invariant
+// without deadlocking on a wedged browser, the replay applies a
+// per-frame write deadline (sseWriteDeadline) — a wedged client
+// detaches within one tick rather than blocking Attach indefinitely.
 func (ss *ShellSession) Attach(w io.Writer, f http.Flusher) error {
 	ss.mu.Lock()
+	defer ss.mu.Unlock()
 	if ss.closed.Load() {
-		ss.mu.Unlock()
 		return fmt.Errorf("session closed")
 	}
 	if ss.sseWriter != nil {
-		ss.mu.Unlock()
 		return fmt.Errorf("already attached")
 	}
 
-	// Install the writer first, then drain the ring under the same lock
-	// acquisition. This guarantees the ordering invariant: every byte
-	// already in the ring reaches the HTTP response before any byte the
-	// consumer writes after this lock release. The consumer sees a
-	// non-nil sseWriter here and writes to it; those writes serialize
-	// with the drain under ss.mu, so they land after the replay.
+	// Install the writer first, then drain the ring under the same lock.
+	// Holding the lock through the replay serializes all writes to w:
+	// the consumer cannot observe sseWriter until the replay is done,
+	// so replay bytes always reach the wire before any live byte.
 	ss.sseWriter = w
 	ss.flusher = f
 	// ResponseController requires http.ResponseWriter; the production
@@ -188,28 +175,19 @@ func (ss *ShellSession) Attach(w io.Writer, f http.Flusher) error {
 	ss.lastActivity = time.Now()
 
 	data := ss.ring.ReadAll()
-	ss.mu.Unlock()
-
-	// Replay ring contents as SSE frames. This happens outside the lock
-	// so Detach/Close can still interleave (the write deadline bounds
-	// the worst-case stall). Any consumer bytes arriving during replay
-	// go to the writer concurrently; ordering between replay and those
-	// bytes is preserved by the lock held above — by the time the
-	// consumer acquires the lock to write, the writer is installed and
-	// the ring is empty, so its write happens after this drain's last
-	// lock-held write.
 	if len(data) > 0 {
+		// Arm the per-frame write deadline so a wedged browser cannot
+		// stall Attach indefinitely. The consumer applies the same
+		// deadline on every subsequent frame write (F8).
+		if rc := ss.rc; rc != nil {
+			_ = rc.SetWriteDeadline(time.Now().Add(sseWriteDeadline))
+		}
 		if err := transport.WriteFrame(w, f, data); err != nil {
-			// Replay failed — detach before returning so the caller
-			// sees a clean state. Guard: only clear if the writer is
-			// still the one we installed.
-			ss.mu.Lock()
-			if ss.sseWriter == w {
-				ss.sseWriter = nil
-				ss.flusher = nil
-				ss.rc = nil
-			}
-			ss.mu.Unlock()
+			// Replay failed — roll back the writer install so the
+			// caller observes a clean state on return.
+			ss.sseWriter = nil
+			ss.flusher = nil
+			ss.rc = nil
 			return fmt.Errorf("replay buffer: %w", err)
 		}
 	}
@@ -217,6 +195,8 @@ func (ss *ShellSession) Attach(w io.Writer, f http.Flusher) error {
 	log.Printf("shell: attached client to session %s (agent=%s, replay=%d bytes)", ss.id, ss.agentID, len(data))
 
 	// Signal consumer to wake up (in case it was waiting on a nil writer).
+	// Non-blocking: the channel has a 1-slot buffer; a pending signal is
+	// enough to nudge the consumer.
 	select {
 	case ss.wakeup <- struct{}{}:
 	default:
@@ -231,7 +211,6 @@ func (ss *ShellSession) Detach() {
 	ss.sseWriter = nil
 	ss.flusher = nil
 	ss.rc = nil
-	ss.replayBuf = nil
 	ss.lastActivity = time.Now()
 	ss.mu.Unlock()
 	log.Printf("shell: detached session %s (agent=%s)", ss.id, ss.agentID)
@@ -248,7 +227,6 @@ func (ss *ShellSession) Close() error {
 	ss.sseWriter = nil
 	ss.flusher = nil
 	ss.rc = nil
-	ss.replayBuf = nil
 	ss.mu.Unlock()
 
 	if ss.upPipe != nil {

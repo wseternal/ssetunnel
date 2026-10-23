@@ -16,10 +16,10 @@ import (
 //     needs to detect a dead peer, not preserve the connection.
 //   - ConnectionWriteTimeout = 120 s (up from default 10 s). On a slow
 //     uplink, yamux control frames (pings, pongs, window updates) queue
-//     FIFO behind up to 4 MiB of buffered bulk output in the agent's
-//     batcher. At 100 KiB/s drain rate that is ~40 s of queueing; the
+//     FIFO behind up to 1 MiB of buffered bulk output in the agent's
+//     batcher. At 100 KiB/s drain rate that is ~10 s of queueing; the
 //     10 s default kills the session on a normal vim redraw burst. 120 s
-//     covers a 4 MiB queue at ~35 KiB/s with margin.
+//     gives generous headroom for transient stalls and keepalive RTT.
 func config() *yamux.Config {
 	cfg := yamux.DefaultConfig()
 	// 4 MiB stream window: at 100 ms effective RTT this yields

@@ -306,6 +306,13 @@ export default function App() {
   const shellAbortRef = useRef<AbortController | null>(null);
   const inputDisposableRef = useRef<IDisposable | null>(null);
   const resizeDisposableRef = useRef<IDisposable | null>(null);
+  // Stable ref to the latest connectShell callback. Used by the
+  // auto-reconnect setTimeout in connectShell's finally block so the
+  // scheduled call always invokes the current closure (not the one
+  // captured at scheduling time, which may hold stale state). This
+  // avoids the self-referential useCallback anti-pattern where the
+  // callback would have to be listed in its own dependency array.
+  const connectShellRef = useRef<(agentID: string, reattachId?: string) => Promise<void>>(() => Promise.resolve());
 
   // Remote Desktop
   const [desktopAgent, setDesktopAgent] = useState<string>('');
@@ -876,7 +883,10 @@ export default function App() {
         const reconnectAgent = shellAgentIDRef.current;
         if (reconnectAgent) {
           setTimeout(() => {
-            connectShell(reconnectAgent).catch(() => {
+            // Invoke via the stable ref so the recursive call uses
+            // whatever connectShell closure is current at fire time
+            // (avoids capturing a stale closure at scheduling time).
+            connectShellRef.current(reconnectAgent).catch(() => {
               // Auto-reconnect failed — surface the failure and
               // drop back to the disconnected state.
               if (xtermRef.current) {
@@ -906,6 +916,7 @@ export default function App() {
       }
     }
   }, [sessionToken, fetchShellSessions, shellThemeKey]); // eslint-disable-line react-hooks/exhaustive-deps
+  connectShellRef.current = connectShell;
 
   // --- Remote Desktop ---
 
