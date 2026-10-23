@@ -11,6 +11,12 @@ import (
 // SSEEventTypeTune is the SSE event type for auto-tuner control frames.
 const SSEEventTypeTune = "tune"
 
+// SSEEventTypeClosed is the SSE event type emitted when the server
+// terminates an SSE stream deliberately (e.g., the backing session
+// died). The frontend treats it as a signal to auto-reconnect rather
+// than a permanent failure.
+const SSEEventTypeClosed = "closed"
+
 // maxSSELineSize bounds one encoded SSE line so a corrupt or hostile
 // peer cannot make the decoder buffer unboundedly.
 const maxSSELineSize = 1 << 20 // 1 MiB
@@ -42,13 +48,33 @@ func WriteFrame(w io.Writer, f http.Flusher, payload []byte) error {
 // JSON payload. The agent's SSE decoder base64-decodes all data: lines,
 // so tune frames must be encoded identically to WriteFrame payloads.
 func WriteTuneFrame(w io.Writer, f http.Flusher, jsonPayload []byte) error {
+	return WriteEventFrame(w, f, SSEEventTypeTune, jsonPayload)
+}
+
+// WriteEventFrame writes one typed SSE event with a base64-encoded data
+// payload and flushes immediately. Typed events surface in the frontend
+// parser as SSEEvent{Type: eventType, Data: <decoded>}.
+func WriteEventFrame(w io.Writer, f http.Flusher, eventType string, payload []byte) error {
 	var buf bytes.Buffer
-	buf.WriteString("event: tune\n")
+	buf.WriteString("event: ")
+	buf.WriteString(eventType)
+	buf.WriteByte('\n')
 	buf.WriteString("data: ")
-	buf.WriteString(base64.StdEncoding.EncodeToString(jsonPayload))
+	buf.WriteString(base64.StdEncoding.EncodeToString(payload))
 	buf.WriteString("\n\n")
 	if _, err := w.Write(buf.Bytes()); err != nil {
-		return fmt.Errorf("write sse tune frame: %w", err)
+		return fmt.Errorf("write sse %s frame: %w", eventType, err)
+	}
+	f.Flush()
+	return nil
+}
+
+// WriteClosedFrame writes the terminal SSE "event: closed" frame that
+// tells the frontend the server is ending the stream deliberately
+// (backing session died, explicit teardown, etc.). Payload is empty.
+func WriteClosedFrame(w io.Writer, f http.Flusher) error {
+	if _, err := io.WriteString(w, "event: closed\ndata:\n\n"); err != nil {
+		return fmt.Errorf("write sse closed frame: %w", err)
 	}
 	f.Flush()
 	return nil

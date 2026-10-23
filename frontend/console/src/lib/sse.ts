@@ -20,8 +20,11 @@ export interface SSEEvent {
  * events; the unterminated trailing data is returned as `remaining` so
  * the caller can prepend it to the next chunk.
  *
- * This replaces the previous split responsibility: callers no longer
- * need lastIndexOf('\n\n') buffer tracking — `remaining` handles it.
+ * An event is emitted when it carries either a typed payload (`event:`)
+ * or a data payload (`data:`). Untyped data-only frames with empty
+ * data are filtered — those are server heartbeats ("data:\n\n"), and
+ * the frontend should treat absence of any event as the watchdog
+ * signal instead.
  */
 export function parseSSEEvents(text: string): { events: SSEEvent[]; remaining: string } {
   const parts = text.split('\n\n');
@@ -37,7 +40,9 @@ export function parseSSEEvents(text: string): { events: SSEEvent[]; remaining: s
         type = line.slice(line[6] === ' ' ? 7 : 6);
       }
     }
-    if (data !== '') events.push({ type, data });
+    // Emit any event that has either a type or non-empty data.
+    // Heartbeats (untyped + empty data) are filtered.
+    if (data !== '' || type !== '') events.push({ type, data });
   }
   return { events, remaining };
 }

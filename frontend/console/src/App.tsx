@@ -299,8 +299,8 @@ export default function App() {
   });
   const termRef = useRef<HTMLDivElement>(null);
   const shellContainerRef = useRef<HTMLDivElement>(null);
-  const shellLineBufRef = useRef<string>('');
   const shellPersistentIdRef = useRef<string>('');
+  const shellAgentIDRef = useRef<string>(''); // tracks the agent for auto-reconnect after session death
   const xtermRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
   const shellAbortRef = useRef<AbortController | null>(null);
@@ -551,6 +551,7 @@ export default function App() {
     setShellSessionId('');
     setShellPersistentId('');
     shellPersistentIdRef.current = '';
+    shellAgentIDRef.current = '';
     setShellReattached(false);
     fetchShellSessions();
   }, [fetchShellSessions]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -618,6 +619,14 @@ export default function App() {
 
     const abort = new AbortController();
     shellAbortRef.current = abort;
+    // Track the agent ID for auto-reconnect after session death.
+    // Cleared by disconnectShell (explicit user action) so auto-
+    // reconnect does not fire when the user intentionally disconnects.
+    shellAgentIDRef.current = agentID;
+    // Flag raised by the reader loop (or its catch) when the stream
+    // ends unexpectedly. Consulted in the finally block to decide
+    // between auto-reconnect and full cleanup.
+    let shouldAutoReconnect = false;
 
     // Generate a random connect session ID.
     const sid = Array.from(crypto.getRandomValues(new Uint8Array(16)))
@@ -639,37 +648,22 @@ export default function App() {
     // as one POST when the in-flight request completes. This avoids both
     // connection-pool saturation (at most one input POST in flight) and
     // the frame-rate latency that previously caused vim to appear hung.
-    shellLineBufRef.current = '';
-    const trackLineInput = (data: string) => {
-      // Track typed line to detect exit/logout commands.
-      // Reset on line-cancel controls (Ctrl-U/Ctrl-C/etc.) so stale
-      // buffer content doesn't trigger a false disconnect.
-      for (const ch of data) {
-        if (ch === '\r' || ch === '\n') {
-          const cmd = shellLineBufRef.current.trim();
-          shellLineBufRef.current = '';
-          if (cmd === 'exit' || cmd === 'logout') {
-            setTimeout(() => disconnectShell(), 500);
-          }
-        } else if (ch === '\x7f' || ch === '\b') {
-          shellLineBufRef.current = shellLineBufRef.current.slice(0, -1);
-        } else if (ch === '\x04') {
-          // Ctrl-D: EOF — disconnect immediately.
-          shellLineBufRef.current = '';
-          setTimeout(() => disconnectShell(), 300);
-        } else if (ch < ' ') {
-          // Control characters (Ctrl-U, Ctrl-C, ESC, etc.): reset line buffer.
-          shellLineBufRef.current = '';
-        } else {
-          shellLineBufRef.current += ch;
-        }
-      }
-    };
+    //
+    // Input interception removed: the previous implementation parsed
+    // Ctrl-D / `exit` / `logout` out of the raw PTY byte stream and
+    // triggered a disconnect. Ctrl-D is vim's half-page-down key; `exit`
+    // typed inside psql or nested SSH is legitimate input. The UI has
+    // explicit disconnect affordances; raw PTY bytes belong to the
+    // remote shell, not the browser.
     // Closed-over local state (not a React ref): scoped to this connection,
     // so each reconnect gets a fresh sender with no stale queue.
     let pending = '';
     let inFlight = false;
     let needsFlush = false;
+    // Per-POST timeout: if the upload hangs (half-open TCP, server
+    // gone silent), fail fast and auto-reconnect instead of leaving
+    // inFlight=true forever and silently dropping subsequent keystrokes.
+    const INPUT_POST_TIMEOUT = 10_000;
     const flush = async () => {
       if (inFlight) {
         // A POST is already running; coalesce into the next flush.
@@ -684,6 +678,17 @@ export default function App() {
         pending = '';
         needsFlush = false;
         inFlight = true;
+        let sendFailed = false;
+        // Arm a hard timeout that aborts the entire connection on POST
+        // hang. Aborting the outer controller kills both the POST and
+        // the SSE reader loop, which drops us into the auto-reconnect
+        // path in the finally block.
+        const timer = setTimeout(() => {
+          if (!abort.signal.aborted) {
+            term.writeln('\x1b[31m[Input send timeout]\x1b[0m');
+            abort.abort();
+          }
+        }, INPUT_POST_TIMEOUT);
         try {
           const resp = await fetch('/console/api/v1/shell/connect-up', {
             method: 'POST',
@@ -691,22 +696,38 @@ export default function App() {
             body: data,
             signal: abort.signal,
           });
+          clearTimeout(timer);
           if (!resp.ok && !abort.signal.aborted) {
             term.writeln(`\x1b[31m[Input send error: ${resp.status}]\x1b[0m`);
+            sendFailed = true;
           }
         } catch (e) {
+          clearTimeout(timer);
           if (!abort.signal.aborted) {
-            term.writeln('\x1b[31m[Send error]\x1b[0m');
+            term.writeln('\x1b[31m[Send network error]\x1b[0m');
+            sendFailed = true;
           }
         } finally {
           inFlight = false;
         }
+        // If the POST failed, the server session is likely stale.
+        // Abort the connection so the reader loop below triggers
+        // auto-reconnect rather than silently dropping bytes (which
+        // would permanently desync a TUI mid-escape-sequence).
+        if (sendFailed && !abort.signal.aborted) {
+          abort.abort();
+          return;
+        }
+        // Bail out of the flush loop if the connection was aborted
+        // (either by our timeout or by the reader loop detecting
+        // stream death). Continuing would re-enqueue into `pending`
+        // that nobody will flush.
+        if (abort.signal.aborted) return;
         // If nothing was coalesced during the POST, `pending` is empty and
         // `needsFlush` is false — the loop exits naturally.
       }
     };
     const sendInput = (data: string) => {
-      trackLineInput(data);
       pending += data;
       void flush();
     };
@@ -789,7 +810,17 @@ export default function App() {
         buffer = remaining;
 
         for (const evt of events) {
-          if (evt.data === '') continue; // heartbeat
+          // Server-side death signal: the backing session died while
+          // attached (agent disconnect, stream error, explicit kill).
+          // The server now terminates the SSE response deliberately
+          // (F1 fix) instead of orphaning it forever; honor that
+          // signal by breaking into the auto-reconnect path.
+          if (evt.type === 'closed') {
+            shouldAutoReconnect = true;
+            term.writeln('\r\n\x1b[33m[Session ended — reconnecting...]\x1b[0m');
+            break;
+          }
+          if (evt.data === '') continue; // heartbeat (untyped empty frame)
           // Decode base64 data (SSE frames contain base64-encoded binary data).
           // Convert to Uint8Array to preserve all byte values — passing a JS
           // string to term.write() causes UTF-8 re-encoding which corrupts
@@ -806,14 +837,22 @@ export default function App() {
             term.write(evt.data);
           }
         }
+        if (shouldAutoReconnect) break;
       }
 
-      if (!abort.signal.aborted) {
-        term.writeln('\r\n\x1b[33m[Connection closed by server]\x1b[0m');
+      // Stream ended without a closed event — either server-side
+      // abort (handler returned for another reason) or the HTTP
+      // response terminated cleanly. Auto-reconnect defensively:
+      // if the user did not initiate the disconnect, treat stream
+      // end as a recoverable failure.
+      if (!shouldAutoReconnect && !abort.signal.aborted) {
+        shouldAutoReconnect = true;
+        term.writeln('\r\n\x1b[33m[Connection closed — reconnecting...]\x1b[0m');
       }
     } catch (e) {
       if (!abort.signal.aborted) {
-        term.writeln(`\r\n\x1b[31m[Connection error: ${e}]\x1b[0m`);
+        shouldAutoReconnect = true;
+        term.writeln(`\r\n\x1b[31m[Connection error: ${e} — reconnecting...]\x1b[0m`);
       }
     } finally {
       if (inputDisposableRef.current) {
@@ -824,13 +863,47 @@ export default function App() {
         resizeDisposableRef.current.dispose();
         resizeDisposableRef.current = null;
       }
-      setShellPaletteOpen(false);
-      setShellConnected(false);
-      setShellSessionId('');
-      setShellPersistentId('');
-      shellPersistentIdRef.current = '';
       if (shellAbortRef.current === abort) shellAbortRef.current = null;
-      fetchShellSessions();
+
+      if (shouldAutoReconnect) {
+        // Auto-reconnect path: keep shellConnected=true so the UI
+        // does not flash "disconnected" during reattach. The
+        // recursive connectShell below will find the existing
+        // persistent session on the server (FindByUserAgent) and
+        // reattach with ring-buffer replay, or create a fresh one
+        // if the server already reaped it (404 fallback inside
+        // connectShell handles this case).
+        const reconnectAgent = shellAgentIDRef.current;
+        if (reconnectAgent) {
+          setTimeout(() => {
+            connectShell(reconnectAgent).catch(() => {
+              // Auto-reconnect failed — surface the failure and
+              // drop back to the disconnected state.
+              if (xtermRef.current) {
+                xtermRef.current.writeln('\x1b[31m[Reconnect failed]\x1b[0m');
+              }
+              setShellConnected(false);
+              shellAgentIDRef.current = '';
+            });
+          }, 1000);
+        } else {
+          // No agent to reconnect to (explicit disconnect path).
+          setShellPaletteOpen(false);
+          setShellConnected(false);
+          setShellSessionId('');
+          setShellPersistentId('');
+          shellPersistentIdRef.current = '';
+          fetchShellSessions();
+        }
+      } else {
+        // Explicit disconnect (user action or disconnectShell call).
+        setShellPaletteOpen(false);
+        setShellConnected(false);
+        setShellSessionId('');
+        setShellPersistentId('');
+        shellPersistentIdRef.current = '';
+        fetchShellSessions();
+      }
     }
   }, [sessionToken, fetchShellSessions, shellThemeKey]); // eslint-disable-line react-hooks/exhaustive-deps
 

@@ -23,6 +23,14 @@ import (
 // before backpressure stalls the SSE stream.
 const downPipeCap = 256 << 10
 
+// defaultPostWriteDeadline bounds a single upstream POST so a
+// black-holed upload (half-open TCP, peer gone silent) fails fast
+// instead of hanging the batcher's sender goroutine forever. 90 s is
+// generous enough for a 1 MiB batch at ~12 KiB/s while still catching
+// wedged connections before yamux's ConnectionWriteTimeout (120 s)
+// trips and tears the session down for a stuck upload it cannot see.
+const defaultPostWriteDeadline = 90 * time.Second
+
 // ErrUnauthorized is returned by DialAgent when the server rejects the
 // agent with 401 Unauthorized. This is an unrecoverable error — the
 // token is invalid and retrying will not help.
@@ -428,11 +436,14 @@ func (c *Conn) post(seq uint64, batch []byte) error {
 	dl := c.writeDeadline
 	wantGzip := c.gzip
 	c.writeMu.Unlock()
-	if !dl.IsZero() {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithDeadline(ctx, dl)
-		defer cancel()
+	// Apply a default deadline when the caller did not set one, so a
+	// black-holed POST fails fast instead of hanging the sender forever.
+	if dl.IsZero() {
+		dl = time.Now().Add(defaultPostWriteDeadline)
 	}
+	var cancel context.CancelFunc
+	ctx, cancel = context.WithDeadline(ctx, dl)
+	defer cancel()
 	body := batch
 	var flags string
 	if wantGzip {

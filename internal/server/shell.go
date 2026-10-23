@@ -120,7 +120,11 @@ func (h *Handler) ShellConnectHandler() http.Handler {
 
 // shellReattach reattaches a client to an existing persistent shell session.
 // It registers the session's up-pipe in connectSessions (so connect-up works),
-// calls Attach to replay buffer + stream, and blocks until disconnect.
+// calls Attach to replay buffer + stream, and blocks until the client
+// disconnects OR the backing session dies. In the latter case, a terminal
+// SSE "event: closed" frame is written before the handler returns so the
+// browser's reader loop gets a clean termination signal and can auto-
+// reconnect instead of freezing silently on a half-open stream.
 func (h *Handler) shellReattach(w http.ResponseWriter, r *http.Request, ss *ShellSession, connectID string, sessInfo *auth.UserSessionInfo) {
 	f, ok := w.(http.Flusher)
 	if !ok {
@@ -147,7 +151,7 @@ func (h *Handler) shellReattach(w http.ResponseWriter, r *http.Request, ss *Shel
 	transport.WriteHeaders(w)
 	f.Flush()
 
-	// Attach: atomically drains ring buffer as SSE + sets live writer.
+	// Attach: installs the writer and drains ring buffer as SSE.
 	// Headers are already flushed — if Attach fails, we cannot change the
 	// HTTP status. Log the error and return; the client sees the stream close.
 	if err := ss.Attach(w, f); err != nil {
@@ -155,11 +159,28 @@ func (h *Handler) shellReattach(w http.ResponseWriter, r *http.Request, ss *Shel
 		return
 	}
 
-	// Block until client disconnects.
-	<-r.Context().Done()
+	// Block until client disconnects OR the backing session dies.
+	// Selecting on ss.Done() closes the P1 gap: previously the handler
+	// parked solely on r.Context().Done(), so a session death (agent
+	// reconnect, stream error) orphaned the SSE response forever and
+	// left the browser with a silent, frozen terminal.
+	var sessionDied bool
+	select {
+	case <-r.Context().Done():
+		// Client disconnected first — session stays alive for reattach.
+		ss.Detach()
+	case <-ss.Done():
+		// Backing session died while attached. Emit a terminal closed
+		// event so the frontend can auto-reconnect instead of freezing.
+		sessionDied = true
+		if err := transport.WriteClosedFrame(w, f); err != nil {
+			log.Printf("shell: write closed frame failed (session=%s): %v", ss.ID(), err)
+		}
+	}
 
-	// Detach: session stays alive, output continues buffering.
-	ss.Detach()
+	if sessionDied {
+		log.Printf("shell: session died while attached, handler returning (session=%s, agent=%s)", ss.ID(), ss.AgentID())
+	}
 }
 
 // shellCreate opens a new yamux stream to the agent, creates a persistent
@@ -260,13 +281,31 @@ func (h *Handler) shellCreate(w http.ResponseWriter, r *http.Request, agentID, c
 		return
 	}
 
-	// Block until client disconnects.
-	<-r.Context().Done()
+	// Block until client disconnects OR the backing session dies.
+	// Selecting on ss.Done() closes the P1 gap: previously the handler
+	// parked solely on r.Context().Done(), so a session death (agent
+	// reconnect, stream error) orphaned the SSE response forever and
+	// left the browser with a silent, frozen terminal.
+	var sessionDied bool
+	select {
+	case <-r.Context().Done():
+		// Client disconnected first — session stays alive for reattach.
+		h.connectSessions.Delete(connectID)
+		ss.Detach()
+	case <-ss.Done():
+		// Backing session died while attached. Emit a terminal closed
+		// event so the frontend can auto-reconnect instead of freezing.
+		sessionDied = true
+		h.connectSessions.Delete(connectID)
+		if err := transport.WriteClosedFrame(w, f); err != nil {
+			log.Printf("shell: write closed frame failed (session=%s): %v", ss.ID(), err)
+		}
+		h.shellSessions.Delete(shellID)
+	}
 
-	// Detach: session stays alive for potential reattach.
-	// Unregister from connectSessions (input won't arrive without a client).
-	h.connectSessions.Delete(connectID)
-	ss.Detach()
+	if sessionDied {
+		log.Printf("shell: session died while attached, handler returning (session=%s, agent=%s)", ss.ID(), ss.AgentID())
+	}
 }
 
 // ShellConnectUpHandler returns an http.Handler that serves the cloud shell
