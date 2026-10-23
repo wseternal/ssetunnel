@@ -68,8 +68,14 @@ func TestSSEHeadersAndFlushPerFrame(t *testing.T) {
 	if got := h.Get("Content-Type"); got != "text/event-stream" {
 		t.Errorf("Content-Type = %q, want text/event-stream", got)
 	}
-	if got := h.Get("Cache-Control"); got != "no-cache" {
-		t.Errorf("Cache-Control = %q, want no-cache", got)
+	if got := h.Get("Cache-Control"); got != "no-cache, no-store, must-revalidate" {
+		t.Errorf("Cache-Control = %q, want no-cache, no-store, must-revalidate", got)
+	}
+	if got := h.Get("Pragma"); got != "no-cache" {
+		t.Errorf("Pragma = %q, want no-cache", got)
+	}
+	if got := h.Get("Expires"); got != "0" {
+		t.Errorf("Expires = %q, want 0", got)
 	}
 	if got := h.Get("X-Accel-Buffering"); got != "no" {
 		t.Errorf("X-Accel-Buffering = %q, want no", got)

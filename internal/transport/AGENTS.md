@@ -46,7 +46,7 @@ Write coalescing with three flush triggers:
 2. **Idle**: Sender idle + data buffered → eager flush (interactive traffic pays no delay)
 3. **Timer**: Sender busy + data accumulating → flush at `maxWait` (25 ms default)
 
-Backpressure: `Write` blocks when queued bytes ≥ `maxQueued` (4 MiB default).
+Backpressure: `Write` blocks when queued bytes ≥ `maxQueued` (1 MiB default).
 
 ### `Pipe`
 Bounded in-memory byte pipe with deadline support. `io.Pipe` cannot express deadlines non-destructively; this can. Backed by `sync.Mutex` + cap-1 signal channels for reader/writer wakeup.

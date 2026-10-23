@@ -15,8 +15,12 @@ const (
 	DefaultMaxWait      = 25 * time.Millisecond
 	// DefaultMaxQueuedBytes bounds buffered+queued bytes so a writer
 	// faster than the serial-POST drain gets backpressure, not
-	// unbounded growth (4 MiB ≈ one yamux window ×4).
-	DefaultMaxQueuedBytes = 4 << 20
+	// unbounded growth. 1 MiB keeps yamux control-frame latency
+	// bounded on constrained uplinks: at 100 KiB/s drain rate the
+	// worst-case queue drain is ~10 s, well inside the 120 s
+	// ConnectionWriteTimeout. The previous 4 MiB cap allowed ~40 s
+	// of queueing on a slow link, which starved keepalive pongs.
+	DefaultMaxQueuedBytes = 1 << 20
 )
 
 // ErrBatcherClosed is returned by Write after Close.
