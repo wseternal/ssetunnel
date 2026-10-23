@@ -65,8 +65,9 @@ type ShellSession struct {
 
 	ring *RingBuffer // output ring buffer (always written to when detached)
 
-	wakeup chan struct{} // signal consumer to check new writer / flush
-	done   chan struct{} // closed when session is destroyed
+	wakeup       chan struct{} // signal consumer to check new writer / flush
+	done         chan struct{} // closed when session is destroyed
+	consumerDone chan struct{} // closed when outputConsumer exits
 
 	createdAt    time.Time
 	lastActivity time.Time
@@ -87,6 +88,7 @@ func NewShellSession(id, agentID string, userID int64, stream *yamux.Stream, mc 
 		ring:         NewRingBuffer(shellRingCap),
 		wakeup:       make(chan struct{}, 1),
 		done:         make(chan struct{}),
+		consumerDone: make(chan struct{}),
 		createdAt:    now,
 		lastActivity: now,
 	}
@@ -129,6 +131,13 @@ func (ss *ShellSession) Attached() bool {
 
 // Done returns a channel that is closed when the session is destroyed.
 func (ss *ShellSession) Done() <-chan struct{} { return ss.done }
+
+// ConsumerDone returns a channel that is closed when the outputConsumer
+// goroutine exits. Handlers wait on this after ss.Done() to ensure the
+// consumer has finished writing the terminal closed frame before the
+// handler returns (preventing concurrent writes to the same
+// http.ResponseWriter).
+func (ss *ShellSession) ConsumerDone() <-chan struct{} { return ss.consumerDone }
 
 // UpPipe returns the input pipe for this session. Connect-up handlers
 // write user keystrokes here.
@@ -315,6 +324,7 @@ func (ss *ShellSession) snapshotState() (dead, attached bool, lastAct time.Time)
 // on the first keystroke after any idle gap.
 func (ss *ShellSession) outputConsumer(heartbeat time.Duration) {
 	defer ss.Close()
+	defer close(ss.consumerDone)
 
 	buf := bufferPool.Get().(*[]byte)
 	defer bufferPool.Put(buf)
@@ -408,6 +418,19 @@ func (ss *ShellSession) outputConsumer(heartbeat time.Duration) {
 		// Stream closed (agent disconnect or error).
 		if !errors.Is(err, io.EOF) {
 			log.Printf("shell: stream closed (session=%s, agent=%s): %v", ss.id, ss.agentID, err)
+		}
+		// Write the terminal closed frame here (not in the handler) so
+		// the sole writer to the http.ResponseWriter is always the
+		// consumer. The handler waits on consumerDone after ss.Done()
+		// unblocks, ensuring no concurrent writes.
+		ss.mu.Lock()
+		w := ss.sseWriter
+		f := ss.flusher
+		ss.mu.Unlock()
+		if w != nil {
+			if werr := transport.WriteClosedFrame(w, f); werr != nil {
+				log.Printf("shell: write closed frame failed (session=%s): %v", ss.id, werr)
+			}
 		}
 		return
 	}

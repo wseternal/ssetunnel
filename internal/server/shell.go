@@ -164,21 +164,16 @@ func (h *Handler) shellReattach(w http.ResponseWriter, r *http.Request, ss *Shel
 	// parked solely on r.Context().Done(), so a session death (agent
 	// reconnect, stream error) orphaned the SSE response forever and
 	// left the browser with a silent, frozen terminal.
-	var sessionDied bool
 	select {
 	case <-r.Context().Done():
 		// Client disconnected first — session stays alive for reattach.
 		ss.Detach()
 	case <-ss.Done():
-		// Backing session died while attached. Emit a terminal closed
-		// event so the frontend can auto-reconnect instead of freezing.
-		sessionDied = true
-		if err := transport.WriteClosedFrame(w, f); err != nil {
-			log.Printf("shell: write closed frame failed (session=%s): %v", ss.ID(), err)
-		}
-	}
-
-	if sessionDied {
+		// Backing session died while attached. Wait for the consumer
+		// to finish writing the terminal closed frame — it is the sole
+		// writer to w, so no concurrent write can happen.
+		<-ss.ConsumerDone()
+		h.shellSessions.Delete(ss.ID())
 		log.Printf("shell: session died while attached, handler returning (session=%s, agent=%s)", ss.ID(), ss.AgentID())
 	}
 }
@@ -286,24 +281,18 @@ func (h *Handler) shellCreate(w http.ResponseWriter, r *http.Request, agentID, c
 	// parked solely on r.Context().Done(), so a session death (agent
 	// reconnect, stream error) orphaned the SSE response forever and
 	// left the browser with a silent, frozen terminal.
-	var sessionDied bool
 	select {
 	case <-r.Context().Done():
 		// Client disconnected first — session stays alive for reattach.
 		h.connectSessions.Delete(connectID)
 		ss.Detach()
 	case <-ss.Done():
-		// Backing session died while attached. Emit a terminal closed
-		// event so the frontend can auto-reconnect instead of freezing.
-		sessionDied = true
+		// Backing session died while attached. Wait for the consumer
+		// to finish writing the terminal closed frame — it is the sole
+		// writer to w, so no concurrent write can happen.
+		<-ss.ConsumerDone()
 		h.connectSessions.Delete(connectID)
-		if err := transport.WriteClosedFrame(w, f); err != nil {
-			log.Printf("shell: write closed frame failed (session=%s): %v", ss.ID(), err)
-		}
 		h.shellSessions.Delete(shellID)
-	}
-
-	if sessionDied {
 		log.Printf("shell: session died while attached, handler returning (session=%s, agent=%s)", ss.ID(), ss.AgentID())
 	}
 }
