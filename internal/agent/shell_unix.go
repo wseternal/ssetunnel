@@ -23,7 +23,7 @@ import (
 // stdin/stdout. The data stream is a pure byte pipe — resize commands
 // arrive via the separate control stream (not interleaved on the data
 // stream). streamID is the yamux stream ID for control stream routing.
-// agent provides the stream registry and trace sender.
+// agent provides the stream registry for control message routing.
 func proxyShell(stream net.Conn, streamID uint32, agent *Agent) {
 	shell := os.Getenv("SHELL")
 	if shell == "" {
@@ -66,10 +66,9 @@ func proxyShell(stream net.Conn, streamID uint32, agent *Agent) {
 	// Register this data stream with the agent's control dispatcher
 	// so resize commands from the control stream are routed here.
 	sh := &shellHandler{
-		ptmx:      ptmx,
-		streamID:  streamID,
-		agent:     agent,
-		resizeCh:  make(chan resizeRequest, 16),
+		ptmx:     ptmx,
+		streamID: streamID,
+		resizeCh: make(chan resizeRequest, 16),
 	}
 	if agent != nil && agent.registry != nil {
 		agent.registry.Register(streamID, sh)
@@ -128,7 +127,6 @@ type resizeRequest struct {
 type shellHandler struct {
 	ptmx     *os.File
 	streamID uint32
-	agent    *Agent
 	resizeCh chan resizeRequest
 }
 
@@ -150,10 +148,10 @@ func (sh *shellHandler) HandleResize(cols, rows uint16) {
 	// round-trip on every resize event.
 }
 
-// HandleTrace is a no-op for shell sessions — the shell generates its
-// own trace events via the agent's SendTrace method.
+// HandleTrace is a no-op for shell sessions — shell sessions don't
+// receive trace events from the server.
 func (sh *shellHandler) HandleTrace(event mux.TraceEvent) {
-	// No-op: shell trace events originate from the shell handler itself.
+	// No-op: shell sessions don't receive trace events.
 }
 
 // resizeLoop drains resize requests and applies them to the PTY.
