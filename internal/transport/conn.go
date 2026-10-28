@@ -122,6 +122,9 @@ type Conn struct {
 	sendErrMu sync.Mutex
 	sendErr   error // sticky first pool POST failure (decision 1)
 
+	readErrMu sync.Mutex
+	readErr   error // sticky SSE stream close reason (for diagnostics)
+
 	writeMu       sync.Mutex
 	writeDeadline time.Time
 
@@ -340,6 +343,7 @@ func (c *Conn) readLoop(body io.ReadCloser) {
 		if n > 0 {
 			events, derr := dec.Feed(buf[:n])
 			if derr != nil {
+				c.setReadErr(fmt.Errorf("decode events stream: %w", derr))
 				c.down.CloseWithError(fmt.Errorf("decode events stream: %w", derr))
 				go c.Close() // async: Close waits on this goroutine
 				return
@@ -361,6 +365,10 @@ func (c *Conn) readLoop(body io.ReadCloser) {
 			rerr := err
 			if c.ctx.Err() != nil {
 				rerr = net.ErrClosed // closed by us, not by the peer
+			} else {
+				// Record the SSE stream close reason for diagnostics.
+				// The agent can query ReadErr() to log why the session died.
+				c.setReadErr(rerr)
 			}
 			c.down.CloseWithError(rerr)
 			go c.Close()
@@ -424,6 +432,23 @@ func (c *Conn) stickyErr() error {
 	c.sendErrMu.Lock()
 	defer c.sendErrMu.Unlock()
 	return c.sendErr
+}
+
+// ReadErr returns the reason the SSE downstream stream closed, or nil
+// if it has not closed or was closed by us (context cancellation).
+// Used by the agent to log the root cause of a session death.
+func (c *Conn) ReadErr() error {
+	c.readErrMu.Lock()
+	defer c.readErrMu.Unlock()
+	return c.readErr
+}
+
+func (c *Conn) setReadErr(err error) {
+	c.readErrMu.Lock()
+	if c.readErr == nil {
+		c.readErr = err
+	}
+	c.readErrMu.Unlock()
 }
 
 // post sends one upstream batch with the given seq. The write deadline

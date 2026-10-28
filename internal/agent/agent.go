@@ -224,7 +224,20 @@ func (a *Agent) runOnce(ctx context.Context) error {
 	for {
 		stream, err := sess.AcceptStream()
 		if err != nil {
-			return nil // session died; Run reconnects
+			// Context canceled = clean shutdown (Run will check ctx.Err()
+			// and return without logging). Otherwise, return the error
+			// so Run can log the actual reason the session died.
+			if ctx.Err() != nil {
+				return nil
+			}
+			// Enrich the error with transport-level context. The SSE
+			// stream close reason (ReadErr) is the most common root
+			// cause: the server closed the HTTP response, killing the
+			// agent's yamux session via the underlying conn.
+			if rerr := conn.ReadErr(); rerr != nil {
+				return fmt.Errorf("accept stream: %w (sse: %v)", err, rerr)
+			}
+			return fmt.Errorf("accept stream: %w", err)
 		}
 		go a.acceptStream(stream)
 	}
