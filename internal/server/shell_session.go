@@ -478,6 +478,10 @@ func (ss *ShellSession) inputForwarder() {
 // routes the resize message to the correct shell handler by stream ID.
 // This replaces the old in-band NUL-byte length-prefixed protocol that
 // multiplexed resize commands with PTY keystrokes on the data stream.
+//
+// Transient failures (control stream not yet established, momentary
+// write error) are logged but do NOT kill the session — resizes are
+// idempotent and the next event will retry.
 func (ss *ShellSession) resizeForwarder() {
 	defer ss.Close()
 	for {
@@ -485,12 +489,13 @@ func (ss *ShellSession) resizeForwarder() {
 		case ws := <-ss.resizeCh:
 			msg := mux.NewResizeMessage(ss.streamID, ws.Cols, ws.Rows)
 			if ss.agentSess == nil {
-				log.Printf("shell: resize send failed (session=%s, no agent session)", ss.id)
-				return
+				log.Printf("shell: resize dropped (session=%s, no agent session)", ss.id)
+				continue
 			}
 			if err := ss.agentSess.SendControl(msg); err != nil {
 				log.Printf("shell: resize send failed (session=%s, agent=%s): %v", ss.id, ss.agentID, err)
-				return
+				// Don't return — control stream may not be ready yet;
+				// next resize will retry.
 			}
 		case <-ss.done:
 			return

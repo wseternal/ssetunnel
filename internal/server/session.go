@@ -263,15 +263,15 @@ func (s *Session) SetControlStream(cs net.Conn) {
 
 // SendControl writes a control message to the session's control stream.
 // Thread-safe via controlMu. Returns an error if the control stream is
-// not available or the write fails.
+// not available or the write fails. The lock is held for the entire
+// write to prevent frame interleaving from concurrent callers.
 func (s *Session) SendControl(msg *mux.ControlMessage) error {
 	s.controlMu.Lock()
-	cs := s.controlStream
-	s.controlMu.Unlock()
-	if cs == nil {
+	defer s.controlMu.Unlock()
+	if s.controlStream == nil {
 		return fmt.Errorf("control stream not available")
 	}
-	return mux.WriteControlMessage(cs, msg)
+	return mux.WriteControlMessage(s.controlStream, msg)
 }
 
 // tunnelAddr is a placeholder net.Addr: a tunnel conn has no meaningful

@@ -32,7 +32,7 @@ Introduce a dedicated **control yamux stream** per agent session, alongside the 
 ### Architecture
 
 ```
-Server ──[control stream]──▶ Agent   (resize, trace, future commands)
+Agent  ──[control stream]──▶ Server   (agent opens; resize, trace, future commands)
 Server ──[data stream 1]──▶  Agent   (pure shell PTY bytes)
 Server ──[data stream 2]──▶  Agent   (pure TCP forwarding bytes)
 Server ──[data stream N]──▶  Agent   (pure remote desktop bytes)
@@ -48,8 +48,8 @@ Server ──[data stream N]──▶  Agent   (pure remote desktop bytes)
 |-----------|------|------|
 | Protocol types | `internal/mux/control.go` | `ControlMessage`, `ReadControlMessage`, `WriteControlMessage`, message type constants |
 | Agent control handler | `internal/agent/control.go` | `streamRegistry`, `handleControlStream`, `dispatchControlMessage`, `SendTrace` |
-| Agent accept loop | `internal/agent/agent.go` | `acceptStream()` reads first line, routes to control or data handler |
-| Server stream setup | `internal/server/server.go` | `attach()` opens control stream, writes marker |
+| Agent accept loop | `internal/agent/agent.go` | `openControlStream()` opens control stream; `acceptStream()` handles data streams only |
+| Server stream setup | `internal/server/server.go` | `attach()` accepts the agent-opened control stream, verifies marker |
 | Server control API | `internal/server/session.go` | `SetControlStream()`, `SendControl()` (thread-safe) |
 | Shell resize | `internal/server/shell_session.go` | `resizeForwarder` sends via `agentSess.SendControl()` |
 

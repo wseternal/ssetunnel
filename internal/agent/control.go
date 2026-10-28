@@ -81,8 +81,15 @@ func (a *Agent) openControlStream(sess *yamux.Session) {
 // It runs until the stream closes or an error occurs.
 func (a *Agent) handleControlStream(stream net.Conn, registry *streamRegistry) {
 	// Install the control sender so data streams can push trace events.
+	// A dedicated writeMu serializes concurrent writes (SendTrace) to
+	// the control stream, since WriteControlMessage is NOT atomic.
+	var writeMu sync.Mutex
 	a.controlMu.Lock()
+	a.controlGen++
+	gen := a.controlGen
 	a.sendControl = func(msg *mux.ControlMessage) {
+		writeMu.Lock()
+		defer writeMu.Unlock()
 		if err := mux.WriteControlMessage(stream, msg); err != nil {
 			log.Printf("agent: control send failed: %v", err)
 		}
@@ -90,7 +97,9 @@ func (a *Agent) handleControlStream(stream net.Conn, registry *streamRegistry) {
 	a.controlMu.Unlock()
 	defer func() {
 		a.controlMu.Lock()
-		a.sendControl = nil
+		if a.controlGen == gen {
+			a.sendControl = nil
+		}
 		a.controlMu.Unlock()
 	}()
 

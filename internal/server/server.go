@@ -144,13 +144,18 @@ func (s *Server) attach(sess *Session) {
 			log.Printf("server: accept control stream failed for session %s: %v", sess.ID(), err)
 			return
 		}
-		// Read and verify the control marker.
+		// Read and verify the control marker with a deadline.
+		// A stalled or malicious agent must not block this goroutine
+		// indefinitely.
+		const markerReadTimeout = 10 * time.Second
+		cs.SetReadDeadline(time.Now().Add(markerReadTimeout))
 		marker := make([]byte, len(mux.ControlStreamMarker))
 		if _, err := io.ReadFull(cs, marker); err != nil || string(marker) != mux.ControlStreamMarker {
 			log.Printf("server: bad control stream marker for session %s: %v", sess.ID(), err)
 			cs.Close()
 			return
 		}
+		cs.SetReadDeadline(time.Time{}) // clear deadline after marker verified
 		sess.SetControlStream(cs)
 		log.Printf("server: control stream accepted for session %s", sess.ID())
 	}()

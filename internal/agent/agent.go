@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"github.com/cenkalti/backoff/v4"
-	"github.com/hashicorp/yamux"
 	"github.com/wseternal/ssetunnel/internal/metrics"
 	"github.com/wseternal/ssetunnel/internal/mux"
 	"github.com/wseternal/ssetunnel/internal/remoteapp"
@@ -61,11 +60,13 @@ type Agent struct {
 	// control dispatcher can route resize/trace messages.
 	registry *streamRegistry
 
-	// controlMu protects sendControl. The control handler installs
-	// and clears the sender; data stream goroutines read it to push
-	// trace events.
+	// controlMu protects sendControl and controlGen. The control handler
+	// installs and clears the sender; data stream goroutines read it to
+	// push trace events. controlGen is a monotonic counter used to
+	// detect stale send cleanup across reconnects.
 	controlMu   sync.RWMutex
 	sendControl controlSender
+	controlGen  int
 }
 
 // Run connects and reconnects until ctx is canceled. Reconnect uses
@@ -266,13 +267,7 @@ func (a *Agent) proxyStream(stream net.Conn, target string) {
 
 	// Shell target: spawn a local shell with PTY instead of dialing TCP.
 	if target == TargetShell {
-		// Extract yamux stream ID for control stream correlation.
-		var streamID uint32
-		if ys, ok := stream.(*readerConn); ok {
-			if yms, ok := ys.Conn.(*yamux.Stream); ok {
-				streamID = yms.StreamID()
-			}
-		}
+		streamID := getStreamID(stream)
 		proxyShell(stream, streamID, a)
 		return
 	}
