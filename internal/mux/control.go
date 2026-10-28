@@ -27,6 +27,12 @@ const (
 // This prevents runaway memory from a misbehaving peer.
 const maxControlMessageSize = 64 << 10
 
+// maxControlTypeLen caps the ControlMessage.Type string at 64 characters.
+// Known types ("resize", "trace") are far shorter; this guards against
+// a peer sending an absurdly long type string that could exhaust memory
+// in logging or map lookups.
+const maxControlTypeLen = 64
+
 // ControlMessage is one framed message on the control stream.
 //
 // Wire format: [4-byte big-endian length][JSON payload]
@@ -66,7 +72,8 @@ type TraceEvent struct {
 
 // ReadControlMessage reads one length-prefixed JSON control message
 // from r. Returns an error if the message exceeds maxControlMessageSize
-// or the JSON is malformed.
+// or the JSON is malformed. Uses a stack buffer for small messages
+// (≤ 512 bytes) to avoid heap allocation on the hot path.
 func ReadControlMessage(r io.Reader) (*ControlMessage, error) {
 	var lenBuf [4]byte
 	if _, err := io.ReadFull(r, lenBuf[:]); err != nil {
@@ -79,13 +86,24 @@ func ReadControlMessage(r io.Reader) (*ControlMessage, error) {
 	if n > maxControlMessageSize {
 		return nil, fmt.Errorf("control: message too large: %d bytes (max %d)", n, maxControlMessageSize)
 	}
-	data := make([]byte, n)
+	// Use a stack buffer for small messages to avoid heap allocation.
+	// Real control messages (resize ~30B, trace ~100B) fit comfortably.
+	var stackBuf [512]byte
+	var data []byte
+	if int(n) <= len(stackBuf) {
+		data = stackBuf[:n]
+	} else {
+		data = make([]byte, n)
+	}
 	if _, err := io.ReadFull(r, data); err != nil {
 		return nil, err
 	}
 	var msg ControlMessage
 	if err := json.Unmarshal(data, &msg); err != nil {
 		return nil, fmt.Errorf("control: bad JSON: %w", err)
+	}
+	if len(msg.Type) > maxControlTypeLen {
+		return nil, fmt.Errorf("control: type too long: %d characters (max %d)", len(msg.Type), maxControlTypeLen)
 	}
 	return &msg, nil
 }
@@ -111,7 +129,8 @@ func WriteControlMessage(w io.Writer, msg *ControlMessage) error {
 }
 
 // NewResizeMessage creates a resize control message targeting the given
-// data stream.
+// data stream. The payload is pre-marshaled into json.RawMessage so that
+// WriteControlMessage can copy the bytes directly without re-marshaling.
 func NewResizeMessage(streamID uint32, cols, rows uint16) *ControlMessage {
 	payload, _ := json.Marshal(ResizePayload{Cols: cols, Rows: rows})
 	return &ControlMessage{
@@ -122,6 +141,8 @@ func NewResizeMessage(streamID uint32, cols, rows uint16) *ControlMessage {
 }
 
 // NewTraceMessage creates a trace control message for the given data stream.
+// The event is pre-marshaled into json.RawMessage for zero-copy inclusion
+// in WriteControlMessage.
 func NewTraceMessage(streamID uint32, event TraceEvent) *ControlMessage {
 	payload, _ := json.Marshal(event)
 	return &ControlMessage{

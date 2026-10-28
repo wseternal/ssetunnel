@@ -104,7 +104,7 @@ func TestDispatchControlMessage_Resize(t *testing.T) {
 		StreamID: 42,
 		Payload:  payload,
 	}
-	a.dispatchControlMessage(msg, a.registry)
+	a.dispatchControlMessage(msg)
 
 	ms.mu.Lock()
 	defer ms.mu.Unlock()
@@ -127,7 +127,7 @@ func TestDispatchControlMessage_UnknownStreamID(t *testing.T) {
 		Payload:  payload,
 	}
 	// Must not panic.
-	a.dispatchControlMessage(msg, a.registry)
+	a.dispatchControlMessage(msg)
 }
 
 // TestDispatchControlMessage_UnknownType verifies that an unknown
@@ -143,7 +143,7 @@ func TestDispatchControlMessage_UnknownType(t *testing.T) {
 		Payload:  json.RawMessage(`{}`),
 	}
 	// Must not panic.
-	a.dispatchControlMessage(msg, a.registry)
+	a.dispatchControlMessage(msg)
 
 	ms.mu.Lock()
 	defer ms.mu.Unlock()
@@ -168,7 +168,7 @@ func TestDispatchControlMessage_Trace(t *testing.T) {
 		StreamID: 5,
 		Payload:  payload,
 	}
-	a.dispatchControlMessage(msg, a.registry)
+	a.dispatchControlMessage(msg)
 
 	ms.mu.Lock()
 	defer ms.mu.Unlock()
@@ -193,7 +193,7 @@ func TestDispatchControlMessage_BadResizePayload(t *testing.T) {
 		Payload:  json.RawMessage(`{not valid`),
 	}
 	// Must not panic.
-	a.dispatchControlMessage(msg, a.registry)
+	a.dispatchControlMessage(msg)
 
 	ms.mu.Lock()
 	defer ms.mu.Unlock()

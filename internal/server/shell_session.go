@@ -73,22 +73,33 @@ type ShellSession struct {
 	lastActivity time.Time
 }
 
+// ShellSessionConfig carries the parameters for creating a new shell
+// session. Using a config struct keeps NewShellSession readable as the
+// set of dependencies grows.
+type ShellSessionConfig struct {
+	ID        string                     // connect session ID (client-generated)
+	AgentID   string                     // target agent identifier
+	UserID    int64                      // owning user's ID
+	Stream    *yamux.Stream              // yamux data stream to agent (shell PTY)
+	AgentSess *Session                   // agent session for SendControl; nil in tests
+	Metrics   *metrics.MetricsCollector  // nil when metrics disabled
+}
+
 // NewShellSession creates a persistent shell session wrapping the given
 // yamux data stream. The caller must call Start to begin the background
-// goroutines. agentSess is the agent's Session for sending control
-// messages (resize); it may be nil in tests.
-func NewShellSession(id, agentID string, userID int64, stream *yamux.Stream, agentSess *Session, mc *metrics.MetricsCollector) *ShellSession {
+// goroutines.
+func NewShellSession(cfg ShellSessionConfig) *ShellSession {
 	now := time.Now()
 	return &ShellSession{
-		id:        id,
-		agentID:   agentID,
-		userID:    userID,
-		stream:    stream,
-		streamID:  stream.StreamID(),
-		agentSess: agentSess,
+		id:        cfg.ID,
+		agentID:   cfg.AgentID,
+		userID:    cfg.UserID,
+		stream:    cfg.Stream,
+		streamID:  cfg.Stream.StreamID(),
+		agentSess: cfg.AgentSess,
 		upPipe:    transport.NewPipe(connectUpPipeCap),
 		resizeCh:  make(chan windowSize, 16),
-		metrics:   mc,
+		metrics:   cfg.Metrics,
 		ring:      NewRingBuffer(shellRingCap),
 		wakeup:    make(chan struct{}, 1),
 		done:      make(chan struct{}),
@@ -488,8 +499,9 @@ func (ss *ShellSession) resizeForwarder() {
 		select {
 		case ws := <-ss.resizeCh:
 			msg := mux.NewResizeMessage(ss.streamID, ws.Cols, ws.Rows)
+			// agentSess is always set in production (shellCreate); nil
+			// only in tests that exercise the forwarder in isolation.
 			if ss.agentSess == nil {
-				log.Printf("shell: resize dropped (session=%s, no agent session)", ss.id)
 				continue
 			}
 			if err := ss.agentSess.SendControl(msg); err != nil {

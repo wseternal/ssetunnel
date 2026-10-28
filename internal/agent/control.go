@@ -79,13 +79,13 @@ func (a *Agent) openControlStream(sess *yamux.Session) {
 		sess.Close()
 		return
 	}
-	go a.handleControlStream(cs, a.registry)
+	go a.handleControlStream(cs)
 }
 
 // handleControlStream reads control messages from the server and dispatches
 // them to the appropriate data stream handler via the stream registry.
 // It runs until the stream closes or an error occurs.
-func (a *Agent) handleControlStream(stream net.Conn, registry *streamRegistry) {
+func (a *Agent) handleControlStream(stream net.Conn) {
 	// Install the control sender so data streams can push trace events.
 	// A dedicated writeMu serializes concurrent writes (SendTrace) to
 	// the control stream, since WriteControlMessage is NOT atomic.
@@ -119,14 +119,14 @@ func (a *Agent) handleControlStream(stream net.Conn, registry *streamRegistry) {
 			log.Printf("agent: control stream closed: %v", err)
 			return
 		}
-		a.dispatchControlMessage(msg, registry)
+		a.dispatchControlMessage(msg)
 	}
 }
 
 // dispatchControlMessage routes one control message to the target
 // data stream handler based on stream ID.
-func (a *Agent) dispatchControlMessage(msg *mux.ControlMessage, registry *streamRegistry) {
-	target, ok := registry.Lookup(msg.StreamID)
+func (a *Agent) dispatchControlMessage(msg *mux.ControlMessage) {
+	target, ok := a.registry.Lookup(msg.StreamID)
 	if !ok {
 		// Stream may have closed before the message arrived. Log at debug
 		// level — this is expected during session teardown.
@@ -164,6 +164,11 @@ func (a *Agent) dispatchControlMessage(msg *mux.ControlMessage, registry *stream
 // SendTrace sends a diagnostic trace event via the control stream.
 // Non-blocking: drops if the control stream is not available. Logs a
 // warning on the first drop per control stream cycle to aid diagnosis.
+//
+// Reserved for the agent-side diagnostic tracing feature described in
+// ADR-001 ("What's Still To Come"). Currently has no callers; will be
+// used by shell and data stream handlers to report PTY I/O timing,
+// shell lifecycle events, and other diagnostic data.
 func (a *Agent) SendTrace(streamID uint32, eventType string, durationMs int64, bytes int64, message string) {
 	a.controlMu.RLock()
 	send := a.sendControl
