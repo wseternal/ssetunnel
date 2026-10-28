@@ -62,15 +62,21 @@ type controlSender func(msg *mux.ControlMessage)
 // identify the stream. A background goroutine reads commands (resize)
 // from the server while the installed sendControl function lets data
 // streams push trace events back.
+//
+// On failure, the yamux session is closed so Run reconnects with a
+// fresh session — a degraded session (no control channel) is worse
+// than a transient disconnect.
 func (a *Agent) openControlStream(sess *yamux.Session) {
 	cs, err := sess.OpenStream()
 	if err != nil {
-		log.Printf("agent: open control stream: %v", err)
+		log.Printf("agent: open control stream failed (session will reconnect): %v", err)
+		sess.Close()
 		return
 	}
 	if _, err := cs.Write([]byte(mux.ControlStreamMarker)); err != nil {
-		log.Printf("agent: write control marker: %v", err)
+		log.Printf("agent: write control marker failed (session will reconnect): %v", err)
 		cs.Close()
+		sess.Close()
 		return
 	}
 	go a.handleControlStream(cs, a.registry)
@@ -94,6 +100,7 @@ func (a *Agent) handleControlStream(stream net.Conn, registry *streamRegistry) {
 			log.Printf("agent: control send failed: %v", err)
 		}
 	}
+	a.traceDropLogged.Store(false) // reset drop log for new control stream
 	a.controlMu.Unlock()
 	defer func() {
 		a.controlMu.Lock()
@@ -134,6 +141,13 @@ func (a *Agent) dispatchControlMessage(msg *mux.ControlMessage, registry *stream
 			log.Printf("agent: bad resize payload: %v", err)
 			return
 		}
+		// Bounds-validate dimensions to prevent PTY ioctl issues.
+		// 0×0 or extreme values (e.g. 65535×65535) can cause division
+		// by zero or excessive memory use in terminal emulators.
+		if payload.Cols == 0 || payload.Rows == 0 || payload.Cols > 1024 || payload.Rows > 1024 {
+			log.Printf("agent: rejecting unreasonable resize: %dx%d (stream=%d)", payload.Cols, payload.Rows, msg.StreamID)
+			return
+		}
 		target.HandleResize(payload.Cols, payload.Rows)
 	case mux.MsgTrace:
 		var event mux.TraceEvent
@@ -143,18 +157,22 @@ func (a *Agent) dispatchControlMessage(msg *mux.ControlMessage, registry *stream
 		}
 		target.HandleTrace(event)
 	default:
-		log.Printf("agent: unknown control message type: %s", msg.Type)
+		log.Printf("agent: unknown control message type=%s stream=%d", msg.Type, msg.StreamID)
 	}
 }
 
 // SendTrace sends a diagnostic trace event via the control stream.
-// Non-blocking: silently drops if the control stream is not available.
+// Non-blocking: drops if the control stream is not available. Logs a
+// warning on the first drop per control stream cycle to aid diagnosis.
 func (a *Agent) SendTrace(streamID uint32, eventType string, durationMs int64, bytes int64, message string) {
 	a.controlMu.RLock()
 	send := a.sendControl
 	a.controlMu.RUnlock()
 	if send == nil {
-		return // control stream not available
+		if !a.traceDropLogged.Swap(true) {
+			log.Printf("agent: trace dropped (control stream unavailable): stream=%d event=%s", streamID, eventType)
+		}
+		return
 	}
 	event := mux.TraceEvent{
 		TS:         time.Now().UTC().Format(time.RFC3339Nano),

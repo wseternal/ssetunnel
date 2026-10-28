@@ -145,10 +145,9 @@ func (sh *shellHandler) HandleResize(cols, rows uint16) {
 		}
 		sh.resizeCh <- resizeRequest{cols: cols, rows: rows}
 	}
-	// Send trace event for the resize.
-	if sh.agent != nil {
-		sh.agent.SendTrace(sh.streamID, "resize", 0, 0, "")
-	}
+	// No trace here: the resize originated from the server, which
+	// already knows it was sent. Tracing it would produce a redundant
+	// round-trip on every resize event.
 }
 
 // HandleTrace is a no-op for shell sessions — the shell generates its

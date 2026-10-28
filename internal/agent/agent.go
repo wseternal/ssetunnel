@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/cenkalti/backoff/v4"
@@ -67,6 +68,10 @@ type Agent struct {
 	controlMu   sync.RWMutex
 	sendControl controlSender
 	controlGen  int
+
+	// traceDropLogged suppresses repeated "trace dropped" logs.
+	// Reset when a new control stream is established.
+	traceDropLogged atomic.Bool
 }
 
 // Run connects and reconnects until ctx is canceled. Reconnect uses

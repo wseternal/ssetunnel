@@ -265,12 +265,15 @@ func (s *Session) SetControlStream(cs net.Conn) {
 // Thread-safe via controlMu. Returns an error if the control stream is
 // not available or the write fails. The lock is held for the entire
 // write to prevent frame interleaving from concurrent callers.
+// A 5-second write deadline bounds the stall from a stalled control
+// stream (instead of the yamux 120s ConnectionWriteTimeout).
 func (s *Session) SendControl(msg *mux.ControlMessage) error {
 	s.controlMu.Lock()
 	defer s.controlMu.Unlock()
 	if s.controlStream == nil {
 		return fmt.Errorf("control stream not available")
 	}
+	s.controlStream.SetWriteDeadline(time.Now().Add(5 * time.Second))
 	return mux.WriteControlMessage(s.controlStream, msg)
 }
 
