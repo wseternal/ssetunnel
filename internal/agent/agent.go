@@ -10,6 +10,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -50,6 +51,11 @@ type Agent struct {
 	// are ignored and the agent keeps its static CLI flags.
 	NoAutoTune bool
 
+	// Verbose enables detailed tracing of shell session lifecycle,
+	// data flow (byte counts, periodic summaries), and control
+	// channel activity. Useful for diagnosing cloud shell issues.
+	Verbose bool
+
 	// OnTokenRefresh, when set, is called before each reconnect attempt
 	// to refresh the session token. It returns the new raw token or an
 	// error. On success the agent's Token field is updated; on failure
@@ -72,6 +78,11 @@ type Agent struct {
 	// traceDropLogged suppresses repeated "trace dropped" logs.
 	// Reset when a new control stream is established.
 	traceDropLogged atomic.Bool
+
+	// logBuf captures recent log output so the server can request it
+	// via the control channel (MsgLogRequest). Installed as a tee
+	// target in Run().
+	logBuf *logBuffer
 }
 
 // Run connects and reconnects until ctx is canceled. Reconnect uses
@@ -80,6 +91,12 @@ type Agent struct {
 // a drop after long uptime was a network event, not a flapping server,
 // so reconnect immediately.
 func (a *Agent) Run(ctx context.Context) error {
+	// Install log capture: all log.Printf output goes to both stderr
+	// and the ring buffer. The server can request recent lines via
+	// the control channel (MsgLogRequest).
+	a.logBuf = newLogBuffer(256)
+	log.SetOutput(io.MultiWriter(os.Stderr, a.logBuf))
+
 	b := newAgentBackoff()
 	if a.MaxBackoff > 0 {
 		b.MaxInterval = a.MaxBackoff
@@ -249,6 +266,10 @@ func (a *Agent) runOnce(ctx context.Context) error {
 // the target address as the first line. In fixed mode, the stream
 // carries raw data with no header.
 func (a *Agent) acceptStream(stream net.Conn) {
+	sid := getStreamID(stream)
+	if a.Verbose {
+		verboseTrace("stream accepted: yamux_id=%d dynamic=%v", sid, a.Target == "")
+	}
 	// In dynamic mode, read the target header line from the server.
 	if a.Target == "" {
 		reader := bufio.NewReader(stream)
@@ -258,8 +279,12 @@ func (a *Agent) acceptStream(stream net.Conn) {
 			stream.Close()
 			return
 		}
+		target := strings.TrimSpace(line)
+		if a.Verbose {
+			verboseTrace("stream target header: yamux_id=%d target=%q", sid, target)
+		}
 		wrapped := &readerConn{Reader: reader, Conn: stream}
-		a.proxyStream(wrapped, strings.TrimSpace(line))
+		a.proxyStream(wrapped, target)
 		return
 	}
 
@@ -277,16 +302,27 @@ func (a *Agent) proxyStream(stream net.Conn, target string) {
 		target = a.Target
 	}
 
+	sid := getStreamID(stream)
+
 	if target == "" || target == "*" {
 		log.Printf("agent: empty or wildcard target header, closing stream")
 		stream.Close()
 		return
 	}
 
+	if a.Verbose {
+		verboseTrace("stream routing: yamux_id=%d target=%q", sid, target)
+	}
+
 	// Shell target: spawn a local shell with PTY instead of dialing TCP.
 	if target == TargetShell {
-		streamID := getStreamID(stream)
-		proxyShell(stream, streamID, a)
+		if a.Verbose {
+			verboseTrace("shell proxy entering: yamux_id=%d", sid)
+		}
+		proxyShell(stream, sid, a)
+		if a.Verbose {
+			verboseTrace("shell proxy exited: yamux_id=%d", sid)
+		}
 		return
 	}
 

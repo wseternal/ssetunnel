@@ -123,6 +123,11 @@ func NewRouter(store *auth.Store, reg *server.Registry) *Router {
 	r.Handle("/api/v1/metrics/agents/{agentID}/samples", userAuth(http.HandlerFunc(api.handleMetricsSamples))).Methods("GET")
 	r.Handle("/api/v1/metrics/agents/{agentID}/decisions", userAuth(http.HandlerFunc(api.handleMetricsDecisions))).Methods("GET")
 
+	// Agent log retrieval: request recent log lines from a connected agent
+	// via the control channel. Any authenticated user (scoped by user_id
+	// for non-admins).
+	r.Handle("/api/v1/agent-logs", userAuth(http.HandlerFunc(api.handleAgentLogs))).Methods("GET")
+
 	return &Router{Router: r, api: api}
 }
 
@@ -664,6 +669,68 @@ func (a *API) handleConnectedAgents(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(agents)
+}
+
+// handleAgentLogs requests recent log lines from a connected agent via
+// the control channel. Query parameters: agent_id (required), lines
+// (optional, default 50, max 200).
+func (a *API) handleAgentLogs(w http.ResponseWriter, r *http.Request) {
+	sessInfo := server.UserSessionFromContext(r)
+	if sessInfo == nil {
+		http.Error(w, "not authenticated", http.StatusUnauthorized)
+		return
+	}
+	isAdmin := auth.HasPermission(sessInfo.Role, auth.PermAdmin)
+	agentID := r.URL.Query().Get("agent_id")
+	if agentID == "" {
+		http.Error(w, "agent_id is required", http.StatusBadRequest)
+		return
+	}
+
+	// Parse optional lines parameter.
+	lines := 50
+	if linesStr := r.URL.Query().Get("lines"); linesStr != "" {
+		if l, err := strconv.Atoi(linesStr); err == nil && l > 0 {
+			lines = l
+		}
+	}
+	if lines > 200 {
+		lines = 200
+	}
+
+	// Find the session for this agent.
+	var target *server.Session
+	if a.reg != nil {
+		a.reg.Range(func(s *server.Session) bool {
+			if s.AgentID() == agentID {
+				// Non-admin users only see logs from their own sessions.
+				if !isAdmin && s.UserID() != sessInfo.UserID {
+					return true
+				}
+				target = s
+				return false // found
+			}
+			return true
+		})
+	}
+	if target == nil {
+		http.Error(w, "agent not found or not connected", http.StatusNotFound)
+		return
+	}
+
+	// Send the log request via the control channel and wait for the response.
+	logLines, err := target.SendLogRequest(lines)
+	if err != nil {
+		http.Error(w, "failed to retrieve agent logs: "+err.Error(), http.StatusGatewayTimeout)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"agent_id": agentID,
+		"lines":    logLines,
+		"count":    len(logLines),
+	})
 }
 
 func (a *API) handleAgents(w http.ResponseWriter, r *http.Request) {

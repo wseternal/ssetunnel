@@ -366,6 +366,11 @@ export default function App() {
   const [textEditorOpen, setTextEditorOpen] = useState(false);
   const [textEditorContent, setTextEditorContent] = useState('');
 
+  // Agent logs dialog state (Show Agent Logs command palette action)
+  const [agentLogsOpen, setAgentLogsOpen] = useState(false);
+  const [agentLogsLines, setAgentLogsLines] = useState<string[]>([]);
+  const [agentLogsLoading, setAgentLogsLoading] = useState(false);
+
   // Magnifier lens state
   const [magnifierOn, setMagnifierOn] = useState(false);
   const magnifierPosRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
@@ -1420,6 +1425,30 @@ export default function App() {
     });
   }, []);
 
+  // Fetch agent logs from the control channel via the API.
+  const fetchAgentLogs = useCallback(async () => {
+    if (!shellAgent) return;
+    setAgentLogsLoading(true);
+    setAgentLogsLines([]);
+    setAgentLogsOpen(true);
+    try {
+      const res = await fetch(
+        `/console/api/v1/agent-logs?agent_id=${encodeURIComponent(shellAgent)}&lines=100`,
+        { headers: authHeaders() },
+      );
+      if (res.ok) {
+        const data = await res.json();
+        setAgentLogsLines(data.lines || []);
+      } else {
+        setAgentLogsLines([`Error: ${res.status} ${res.statusText}`]);
+      }
+    } catch (e) {
+      setAgentLogsLines([`Fetch failed: ${e}`]);
+    } finally {
+      setAgentLogsLoading(false);
+    }
+  }, [shellAgent, authHeaders]);
+
   // Shell command palette action handler
   const handleShellPaletteAction = useCallback((actionId: string) => {
     if (!shellConnected) return; // guard against double-disconnect
@@ -1428,9 +1457,10 @@ export default function App() {
     switch (actionId) {
       case 'toggle-theme': cycleShellTheme(); break;
       case 'toggle-fullscreen': toggleShellFullscreen(); break;
+      case 'agent-logs': fetchAgentLogs(); break;
       case 'disconnect': disconnectShell(); break;
     }
-  }, [cycleShellTheme, toggleShellFullscreen, disconnectShell, shellConnected]);
+  }, [cycleShellTheme, toggleShellFullscreen, fetchAgentLogs, disconnectShell, shellConnected]);
 
   // Shell command palette keyboard handler.
   // Registered in capture phase on window so it fires BEFORE xterm.js's
@@ -1473,6 +1503,7 @@ export default function App() {
         switch (e.key.toLowerCase()) {
           case 't': handleShellPaletteAction('toggle-theme'); return;
           case 'f': handleShellPaletteAction('toggle-fullscreen'); return;
+          case 'l': handleShellPaletteAction('agent-logs'); return;
           case 'q': handleShellPaletteAction('disconnect'); return;
         }
         return;
@@ -1624,6 +1655,7 @@ export default function App() {
             {[
               { id: 'toggle-theme', label: 'Toggle Theme', shortcut: 'T' },
               { id: 'toggle-fullscreen', label: 'Toggle Fullscreen', shortcut: 'F' },
+              { id: 'agent-logs', label: 'Show Agent Logs', shortcut: 'L' },
               { id: 'disconnect', label: 'Disconnect', shortcut: 'Q' },
             ].map((item) => (
               <Box
@@ -1658,6 +1690,87 @@ export default function App() {
               <Typography variant="caption" color="text.secondary">
                 Press <strong>Esc</strong> to close • <strong>{navigator.platform.includes('Mac') ? '⌘' : 'Ctrl'}</strong> to toggle
               </Typography>
+            </Box>
+          </Paper>
+        </Box>
+      )}
+
+      {/* Agent logs dialog overlay */}
+      {agentLogsOpen && (
+        <Box
+          sx={{
+            position: 'fixed',
+            inset: 0,
+            zIndex: 1300,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            bgcolor: 'rgba(0, 0, 0, 0.5)',
+          }}
+          onClick={() => setAgentLogsOpen(false)}
+        >
+          <Paper
+            elevation={12}
+            sx={{
+              width: '80%',
+              maxWidth: 900,
+              maxHeight: '80vh',
+              display: 'flex',
+              flexDirection: 'column',
+              borderRadius: 2,
+              overflow: 'hidden',
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <Box sx={{ px: 2.5, py: 1.5, borderBottom: 1, borderColor: 'divider', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+              <Box>
+                <Typography variant="subtitle2">Agent Logs</Typography>
+                <Typography variant="caption" color="text.secondary">
+                  {shellAgent} — {agentLogsLines.length} lines
+                </Typography>
+              </Box>
+              <Box sx={{ display: 'flex', gap: 1 }}>
+                <IconButton
+                  size="small"
+                  onClick={fetchAgentLogs}
+                  disabled={agentLogsLoading}
+                  title="Refresh"
+                >
+                  <span style={{ fontSize: 18 }}>↻</span>
+                </IconButton>
+                <IconButton size="small" onClick={() => setAgentLogsOpen(false)} title="Close">
+                  <span style={{ fontSize: 18 }}>×</span>
+                </IconButton>
+              </Box>
+            </Box>
+            <Box
+              sx={{
+                flex: 1,
+                overflow: 'auto',
+                bgcolor: 'grey.900',
+                px: 2,
+                py: 1.5,
+                fontFamily: 'monospace',
+                fontSize: '0.75rem',
+                lineHeight: 1.6,
+                color: 'grey.100',
+                whiteSpace: 'pre-wrap',
+                wordBreak: 'break-all',
+              }}
+            >
+              {agentLogsLoading ? (
+                <Typography variant="body2" color="grey.400" sx={{ fontFamily: 'monospace' }}>
+                  Loading...
+                </Typography>
+              ) : agentLogsLines.length === 0 ? (
+                <Typography variant="body2" color="grey.400" sx={{ fontFamily: 'monospace' }}>
+                  No log lines available.
+                </Typography>
+              ) : (
+                agentLogsLines.map((line, i) => (
+                  <Box key={i} component="div">{line}</Box>
+                ))
+              )}
             </Box>
           </Paper>
         </Box>

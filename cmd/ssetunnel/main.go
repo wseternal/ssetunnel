@@ -295,6 +295,7 @@ func runAgent(ctx context.Context, args []string) error {
 	concurrency := fs.Int("concurrency", 1, "upstream POST sender depth (1..4)")
 	compress := fs.Bool("compress", false, "negotiate gzip-per-batch upstream encoding")
 	noAutoTune := fs.Bool("no-auto-tune", false, "disable server auto-tuning (keep static CLI flags)")
+	verbose := fs.Bool("verbose", false, "enable detailed shell/control tracing logs")
 
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -375,6 +376,7 @@ func runAgent(ctx context.Context, args []string) error {
 		Concurrency:      conc,
 		Compress:         *compress,
 		NoAutoTune:       *noAutoTune,
+		Verbose:          *verbose,
 		OnTokenRefresh:   refreshFn,
 	}
 	return ag.Run(ctx)

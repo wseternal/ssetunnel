@@ -3,6 +3,7 @@
 package agent
 
 import (
+	"fmt"
 	"io"
 	"log"
 	"net"
@@ -29,6 +30,7 @@ func proxyShell(stream net.Conn, streamID uint32, agent *Agent) {
 	if shell == "" {
 		shell = "/bin/sh"
 	}
+	verbose := agent != nil && agent.Verbose
 
 	cmd := exec.Command(shell)
 	// Prefix argv[0] with '-' to invoke a login shell. This causes
@@ -51,6 +53,12 @@ func proxyShell(stream net.Conn, streamID uint32, agent *Agent) {
 	env = append(env, "TERM=xterm-256color")
 	cmd.Env = env
 
+	if verbose {
+		verboseTrace("shell starting: shell=%s argv0=%s stream=%d pid=pending",
+			shell, cmd.Args[0], streamID)
+		verboseTrace("shell env: TERM=xterm-256color (env entries=%d)", len(env))
+	}
+
 	// Start the command with a PTY. The returned file is the master
 	// side of the pseudo-terminal — reads yield shell output, writes
 	// feed shell input.
@@ -62,6 +70,10 @@ func proxyShell(stream net.Conn, streamID uint32, agent *Agent) {
 	}
 
 	log.Printf("agent: shell session started (pid=%d, shell=%s, stream=%d)", cmd.Process.Pid, shell, streamID)
+	if verbose {
+		verboseTrace("shell started: pid=%d ptmx_fd=%d stream_id=%d",
+			cmd.Process.Pid, ptmx.Fd(), streamID)
+	}
 
 	// Register this data stream with the agent's control dispatcher
 	// so resize commands from the control stream are routed here.
@@ -69,6 +81,7 @@ func proxyShell(stream net.Conn, streamID uint32, agent *Agent) {
 		ptmx:     ptmx,
 		streamID: streamID,
 		resizeCh: make(chan resizeRequest, 16),
+		verbose:  verbose,
 	}
 	if agent != nil && agent.registry != nil {
 		agent.registry.Register(streamID, sh)
@@ -87,7 +100,14 @@ func proxyShell(stream net.Conn, streamID uint32, agent *Agent) {
 	// seconds (e.g., traps SIGHUP), force-kill it.
 	go func() {
 		defer wg.Done()
-		io.Copy(ptmx, stream)
+		if verbose {
+			tracedCopy(fmt.Sprintf("stream->pty (s=%d)", streamID), ptmx, stream)
+		} else {
+			io.Copy(ptmx, stream)
+		}
+		if verbose {
+			verboseTrace("stream->pty (s=%d): closed, signaling EOF to shell", streamID)
+		}
 		ptmx.Close() // signal EOF to shell (sends SIGHUP)
 
 		// Give the shell 2 seconds to exit gracefully, then force-kill.
@@ -95,6 +115,9 @@ func proxyShell(stream net.Conn, streamID uint32, agent *Agent) {
 		defer timer.Stop()
 		select {
 		case <-timer.C:
+			if verbose {
+				verboseTrace("shell (s=%d pid=%d): graceful exit timeout, force-killing", streamID, cmd.Process.Pid)
+			}
 			cmd.Process.Kill() // force-kill: closes slave FD → unblocks output goroutine
 		}
 	}()
@@ -103,7 +126,14 @@ func proxyShell(stream net.Conn, streamID uint32, agent *Agent) {
 	// closes, close the stream so the connect client sees EOF.
 	go func() {
 		defer wg.Done()
-		io.Copy(stream, ptmx)
+		if verbose {
+			tracedCopy(fmt.Sprintf("pty->stream (s=%d)", streamID), stream, ptmx)
+		} else {
+			io.Copy(stream, ptmx)
+		}
+		if verbose {
+			verboseTrace("pty->stream (s=%d): closed, closing stream", streamID)
+		}
 		stream.Close()
 	}()
 
@@ -111,7 +141,11 @@ func proxyShell(stream net.Conn, streamID uint32, agent *Agent) {
 
 	// Reap the shell process. It should already be dead (exited
 	// naturally from EOF or force-killed by the input goroutine).
-	cmd.Wait()
+	waitErr := cmd.Wait()
+	if verbose {
+		verboseTrace("shell exited: pid=%d stream=%d status=%s",
+			cmd.Process.Pid, streamID, formatExitStatus(waitErr))
+	}
 }
 
 // resizeRequest carries a PTY resize from the control dispatcher to
@@ -128,6 +162,7 @@ type shellHandler struct {
 	ptmx     *os.File
 	streamID uint32
 	resizeCh chan resizeRequest
+	verbose  bool
 }
 
 // HandleResize enqueues a resize request for the applier goroutine.
@@ -157,12 +192,18 @@ func (sh *shellHandler) HandleTrace(event mux.TraceEvent) {
 // resizeLoop drains resize requests and applies them to the PTY.
 func (sh *shellHandler) resizeLoop() {
 	for req := range sh.resizeCh {
+		if sh.verbose {
+			verboseTrace("resize applying: stream=%d cols=%d rows=%d", sh.streamID, req.cols, req.rows)
+		}
 		if err := pty.Setsize(sh.ptmx, &pty.Winsize{
 			Rows: req.rows,
 			Cols: req.cols,
 		}); err != nil {
 			log.Printf("agent: pty resize (stream=%d): %v", sh.streamID, err)
 		}
+	}
+	if sh.verbose {
+		verboseTrace("resize loop ended: stream=%d (channel closed)", sh.streamID)
 	}
 }
 

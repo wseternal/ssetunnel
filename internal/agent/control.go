@@ -124,8 +124,20 @@ func (a *Agent) handleControlStream(stream net.Conn) {
 }
 
 // dispatchControlMessage routes one control message to the target
-// data stream handler based on stream ID.
+// data stream handler based on stream ID. Agent-level messages
+// (log_req) are handled before the stream registry lookup.
 func (a *Agent) dispatchControlMessage(msg *mux.ControlMessage) {
+	if a.Verbose {
+		verboseTrace("control recv: type=%s stream_id=%d payload_len=%d",
+			msg.Type, msg.StreamID, len(msg.Payload))
+	}
+	// Agent-level messages use stream_id=0 and are handled directly.
+	switch msg.Type {
+	case mux.MsgLogRequest:
+		a.handleLogRequest(msg)
+		return
+	}
+
 	target, ok := a.registry.Lookup(msg.StreamID)
 	if !ok {
 		// Stream may have closed before the message arrived. Log at debug
@@ -140,6 +152,10 @@ func (a *Agent) dispatchControlMessage(msg *mux.ControlMessage) {
 		if err := json.Unmarshal(msg.Payload, &payload); err != nil {
 			log.Printf("agent: bad resize payload: %v", err)
 			return
+		}
+		if a.Verbose {
+			verboseTrace("resize dispatch: stream=%d cols=%d rows=%d",
+				msg.StreamID, payload.Cols, payload.Rows)
 		}
 		// Bounds-validate dimensions to prevent PTY ioctl issues.
 		// 0×0 or extreme values (e.g. 65535×65535) can cause division
@@ -158,6 +174,44 @@ func (a *Agent) dispatchControlMessage(msg *mux.ControlMessage) {
 		target.HandleTrace(event)
 	default:
 		log.Printf("agent: unknown control message type=%s stream=%d", msg.Type, msg.StreamID)
+	}
+}
+
+// handleLogRequest responds to a server request for recent agent log
+// lines. It reads from the log buffer and sends the response via the
+// control stream. The request_id correlates the response.
+func (a *Agent) handleLogRequest(msg *mux.ControlMessage) {
+	var payload mux.LogRequestPayload
+	if err := json.Unmarshal(msg.Payload, &payload); err != nil {
+		log.Printf("agent: bad log request payload: %v", err)
+		return
+	}
+	lines := int(payload.Lines)
+	if lines <= 0 {
+		lines = 50 // default
+	}
+	if lines > 200 {
+		lines = 200 // cap to keep control messages small
+	}
+	logLines := a.logBuf.Read(lines)
+	if logLines == nil {
+		logLines = []string{"(no log lines captured yet)"}
+	}
+	resp := mux.LogResponsePayload{
+		RequestID: payload.RequestID,
+		Lines:     logLines,
+	}
+	respPayload, _ := json.Marshal(resp)
+	respMsg := &mux.ControlMessage{
+		Type:     mux.MsgLogResponse,
+		StreamID: 0,
+		Payload:  respPayload,
+	}
+	a.controlMu.RLock()
+	send := a.sendControl
+	a.controlMu.RUnlock()
+	if send != nil {
+		send(respMsg)
 	}
 }
 

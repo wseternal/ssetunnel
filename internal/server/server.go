@@ -158,6 +158,11 @@ func (s *Server) attach(sess *Session) {
 		cs.SetReadDeadline(time.Time{}) // clear deadline after marker verified
 		sess.SetControlStream(cs)
 		log.Printf("server: control stream accepted for session %s", sess.ID())
+
+		// Read loop: receive control messages from the agent (e.g.,
+		// log responses, future trace events). Runs until the stream
+		// closes or the session dies.
+		sess.readControlLoop(cs)
 	}()
 }
 

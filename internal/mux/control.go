@@ -20,6 +20,14 @@ const (
 	// MsgTrace carries a diagnostic trace event (bidirectional: agent →
 	// server for shell tracing, server → agent for server-side events).
 	MsgTrace = "trace"
+
+	// MsgLogRequest asks the agent to return recent log lines.
+	// Sent server→agent with stream_id=0 (agent-level).
+	MsgLogRequest = "log_req"
+
+	// MsgLogResponse carries recent log lines from agent→server.
+	// Sent in reply to a MsgLogRequest, with the same request_id.
+	MsgLogResponse = "log_resp"
 )
 
 // maxControlMessageSize caps a single control message at 64 KiB.
@@ -40,7 +48,7 @@ const maxControlTypeLen = 64
 // JSON payload:
 //
 //	{
-//	  "type":      "resize" | "trace" | ...,
+//	  "type":      "resize" | "trace" | "log_req" | "log_resp" | ...,
 //	  "stream_id": <yamux stream ID of the target data stream>,
 //	  "payload":   { type-specific fields }
 //	}
@@ -48,7 +56,8 @@ const maxControlTypeLen = 64
 // stream_id correlates the message to a specific data stream. For
 // agent→server trace messages, it identifies which data session the
 // trace originated from. For server→agent resize, it targets the
-// data stream whose PTY should be resized.
+// data stream whose PTY should be resized. Agent-level messages
+// (log_req, log_resp) use stream_id=0.
 type ControlMessage struct {
 	Type     string          `json:"type"`
 	StreamID uint32          `json:"stream_id"`
@@ -68,6 +77,20 @@ type TraceEvent struct {
 	DurationMs int64  `json:"duration_ms,omitempty"`
 	Bytes      int64  `json:"bytes,omitempty"`
 	Message    string `json:"message,omitempty"`
+}
+
+// LogRequestPayload is the JSON payload for MsgLogRequest messages.
+// stream_id is 0 (agent-level); request_id correlates the response.
+type LogRequestPayload struct {
+	RequestID string `json:"request_id"` // UUID for response correlation
+	Lines     int    `json:"lines"`      // number of recent log lines to return
+}
+
+// LogResponsePayload is the JSON payload for MsgLogResponse messages.
+// request_id matches the originating LogRequestPayload.
+type LogResponsePayload struct {
+	RequestID string   `json:"request_id"` // matches LogRequestPayload.RequestID
+	Lines     []string `json:"lines"`      // recent log lines, oldest first
 }
 
 // ReadControlMessage reads one length-prefixed JSON control message
