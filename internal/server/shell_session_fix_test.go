@@ -3,12 +3,9 @@ package server
 import (
 	"bytes"
 	"encoding/base64"
-	"net"
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/wseternal/ssetunnel/internal/mux"
 )
 
 // TestShellSession_DoneClosedAfterClose proves the P1 invariant:
@@ -83,52 +80,41 @@ func TestShellSession_AttachNoByteSkip(t *testing.T) {
 	}
 }
 
-// TestShellSession_ResizeForwarderClosesSession proves the A6 invariant:
-// a resize write failure terminates the session instead of leaving
-// resize handling silently dead for the session's remaining life.
-//
-// The previous implementation returned from resizeForwarder on error
-// without calling ss.Close(), so a single transient stream error
-// killed resize handling permanently while the other forwarders kept
-// working and resize POSTs still returned 200.
-func TestShellSession_ResizeForwarderClosesSession(t *testing.T) {
-	// Build a yamux stream pair and close the server side so any write
-	// from the agent side fails immediately.
-	c1, c2 := net.Pipe()
-	defer c2.Close()
-	serverSess, err := mux.Server(c1)
-	if err != nil {
-		t.Fatalf("mux.Server: %v", err)
-	}
-	clientSess, err := mux.Client(c2)
-	if err != nil {
-		t.Fatalf("mux.Client: %v", err)
-	}
-	defer clientSess.Close()
-	// Accept on the server side to complete the handshake, then open
-	// a stream from the client to use as the shell session's stream.
-	go func() { _, _ = serverSess.Accept() }()
-	stream, err := clientSess.OpenStream()
-	if err != nil {
-		t.Fatalf("OpenStream: %v", err)
-	}
-	// Close the server session so the agent-side stream is broken.
-	serverSess.Close()
-
+// TestShellSession_ResizeForwarderSurvivesTransientError proves that a
+// resize send failure does NOT terminate the session. The previous
+// implementation exited permanently on the first error, killing resize
+// handling for the session's remaining life. The new behavior logs and
+// continues — resizes are idempotent, so the next event will retry.
+func TestShellSession_ResizeForwarderSurvivesTransientError(t *testing.T) {
 	ss := &ShellSession{
-		id: "resize-close-1", agentID: "a", userID: 1,
-		stream:   stream,
+		id: "resize-survive-1", agentID: "a", userID: 1,
 		ring:     NewRingBuffer(64),
 		wakeup:   make(chan struct{}, 1),
 		done:     make(chan struct{}),
-		resizeCh: make(chan windowSize, 1),
+		resizeCh: make(chan windowSize, 2),
 		createdAt: time.Now(), lastActivity: time.Now(),
+		// agentSess is nil — simulates control stream not yet ready.
 	}
 	go ss.resizeForwarder()
+
+	// Send a resize; agentSess is nil so it should be dropped.
 	ss.resizeCh <- windowSize{Cols: 80, Rows: 24}
+
+	// Give the forwarder time to process.
+	time.Sleep(100 * time.Millisecond)
+
+	// Session must NOT be closed — the forwarder should still be running.
+	select {
+	case <-ss.Done():
+		t.Fatal("resizeForwarder killed session on transient error — should have continued")
+	default:
+	}
+
+	// Close the session to clean up.
+	ss.Close()
 	select {
 	case <-ss.Done():
 	case <-time.After(2 * time.Second):
-		t.Fatal("resizeForwarder did not close session on write error — A6 regression")
+		t.Fatal("session did not close after Close()")
 	}
 }

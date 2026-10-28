@@ -220,7 +220,7 @@ func (h *Handler) shellCreate(w http.ResponseWriter, r *http.Request, agentID, c
 		return
 	}
 
-	// Write target header (__shell__).
+	// Write target header (__shell__) if the agent wants it.
 	if agentSess != nil && agentSess.WantTarget() {
 		if _, err := fmt.Fprintf(stream, "%s\n", TargetShell); err != nil {
 			stream.Close()
@@ -232,7 +232,14 @@ func (h *Handler) shellCreate(w http.ResponseWriter, r *http.Request, agentID, c
 
 	// Create the persistent shell session with an independent ID.
 	shellID := generateShellID()
-	ss := NewShellSession(shellID, agentID, sessInfo.UserID, stream, h.metrics)
+	ss := NewShellSession(ShellSessionConfig{
+		ID:        shellID,
+		AgentID:   agentID,
+		UserID:    sessInfo.UserID,
+		Stream:    stream,
+		AgentSess: agentSess,
+		Metrics:   h.metrics,
+	})
 	h.shellSessions.Store(ss)
 	ss.Start(h.heartbeat)
 	log.Printf("shell: created session %s (agent=%s, user=%d)", shellID, agentID, sessInfo.UserID)

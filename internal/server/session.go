@@ -1,6 +1,7 @@
 package server
 
 import (
+	"fmt"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -8,6 +9,7 @@ import (
 
 	"github.com/hashicorp/yamux"
 	"github.com/wseternal/ssetunnel/internal/metrics"
+	"github.com/wseternal/ssetunnel/internal/mux"
 	"github.com/wseternal/ssetunnel/internal/transport"
 )
 
@@ -59,6 +61,12 @@ type Session struct {
 
 	yamuxMu   sync.Mutex
 	yamuxSess *yamux.Session // per-session yamux; set by attach after mux.Server
+
+	// controlMu serializes writes to the control stream.
+	// The control stream is opened by the agent and accepted by
+	// Server.attach(); shared by all data streams for resize/trace.
+	controlMu     sync.Mutex
+	controlStream net.Conn // nil until opened; closed with yamux session
 
 	// tuneCh carries tuning parameter updates from the auto-tuner to the
 	// SSE loop. The handleEvents goroutine selects on this channel and
@@ -242,6 +250,31 @@ func (s *Session) YamuxSession() *yamux.Session {
 	ms := s.yamuxSess
 	s.yamuxMu.Unlock()
 	return ms
+}
+
+// SetControlStream installs the control stream for this session.
+// Called by Server.attach() after accepting the control stream from
+// the agent.
+func (s *Session) SetControlStream(cs net.Conn) {
+	s.controlMu.Lock()
+	s.controlStream = cs
+	s.controlMu.Unlock()
+}
+
+// SendControl writes a control message to the session's control stream.
+// Thread-safe via controlMu. Returns an error if the control stream is
+// not available or the write fails. The lock is held for the entire
+// write to prevent frame interleaving from concurrent callers.
+// A 5-second write deadline bounds the stall from a stalled control
+// stream (instead of the yamux 120s ConnectionWriteTimeout).
+func (s *Session) SendControl(msg *mux.ControlMessage) error {
+	s.controlMu.Lock()
+	defer s.controlMu.Unlock()
+	if s.controlStream == nil {
+		return fmt.Errorf("control stream not available")
+	}
+	s.controlStream.SetWriteDeadline(time.Now().Add(5 * time.Second))
+	return mux.WriteControlMessage(s.controlStream, msg)
 }
 
 // tunnelAddr is a placeholder net.Addr: a tunnel conn has no meaningful

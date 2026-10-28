@@ -463,6 +463,18 @@ func (h *Handler) handleConnect(w http.ResponseWriter, r *http.Request) {
 	if ft, ok := r.Context().Value(forcedTargetKey).(string); ok && ft != "" {
 		targetHeader = ft
 	}
+
+	// Guard: __shell__ and __remote_app__ targets must use their
+	// dedicated handlers (ShellConnectHandler / RemoteAppHandler), not
+	// the ephemeral connect path. The ephemeral bridge still uses the
+	// legacy in-band NUL-byte resize protocol which is incompatible
+	// with the new control-stream-based resize used by shell sessions.
+	if targetHeader == TargetShell || targetHeader == TargetRemoteApp {
+		stream.Close()
+		http.Error(w, fmt.Sprintf("target %q requires dedicated handler", targetHeader), http.StatusBadRequest)
+		return
+	}
+
 	if targetHeader != "" && sess != nil && sess.WantTarget() {
 		if _, err := fmt.Fprintf(stream, "%s\n", targetHeader); err != nil {
 			stream.Close()

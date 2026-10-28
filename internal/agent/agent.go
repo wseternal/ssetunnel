@@ -11,6 +11,8 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/cenkalti/backoff/v4"
@@ -54,6 +56,22 @@ type Agent struct {
 	// the current token is kept and the reconnect proceeds (the server
 	// will reject an actually-expired token with 401).
 	OnTokenRefresh func() (newToken string, err error)
+
+	// registry maps yamux stream IDs to data stream handlers so the
+	// control dispatcher can route resize/trace messages.
+	registry *streamRegistry
+
+	// controlMu protects sendControl and controlGen. The control handler
+	// installs and clears the sender; data stream goroutines read it to
+	// push trace events. controlGen is a monotonic counter used to
+	// detect stale send cleanup across reconnects.
+	controlMu   sync.RWMutex
+	sendControl controlSender
+	controlGen  int
+
+	// traceDropLogged suppresses repeated "trace dropped" logs.
+	// Reset when a new control stream is established.
+	traceDropLogged atomic.Bool
 }
 
 // Run connects and reconnects until ctx is canceled. Reconnect uses
@@ -186,6 +204,14 @@ func (a *Agent) runOnce(ctx context.Context) error {
 		return fmt.Errorf("mux client: %w", err)
 	}
 	defer sess.Close()
+	a.registry = newStreamRegistry()
+
+	// Open the control stream: agent → server. The server's accept
+	// loop picks it up and identifies it by the marker. This runs
+	// before the data stream accept loop so the control channel is
+	// ready before any data streams arrive.
+	a.openControlStream(sess)
+
 	done := make(chan struct{})
 	defer close(done)
 	go func() {
@@ -200,19 +226,18 @@ func (a *Agent) runOnce(ctx context.Context) error {
 		if err != nil {
 			return nil // session died; Run reconnects
 		}
-		go a.proxy(stream)
+		go a.acceptStream(stream)
 	}
 }
 
-// proxy forwards one stream to a target, bidirectionally.
-// In fixed-target mode (a.Target != ""), dials a.Target directly.
-// In dynamic mode (a.Target == ""), reads the target address from the
-// first \n-terminated line of the stream, then dials it.
-func (a *Agent) proxy(stream net.Conn) {
-	target := a.Target
-
-	if target == "" {
-		// Dynamic mode: read target from stream header.
+// acceptStream handles a newly accepted yamux data stream. The control
+// stream is opened separately in openControlStream and never reaches
+// this function. In dynamic mode (a.Target == ""), the server writes
+// the target address as the first line. In fixed mode, the stream
+// carries raw data with no header.
+func (a *Agent) acceptStream(stream net.Conn) {
+	// In dynamic mode, read the target header line from the server.
+	if a.Target == "" {
 		reader := bufio.NewReader(stream)
 		line, err := reader.ReadString('\n')
 		if err != nil {
@@ -220,22 +245,35 @@ func (a *Agent) proxy(stream net.Conn) {
 			stream.Close()
 			return
 		}
-		target = strings.TrimSpace(line)
-		if target == "" || target == "*" {
-			log.Printf("agent: empty or wildcard target header, closing stream")
-			stream.Close()
-			return
-		}
+		wrapped := &readerConn{Reader: reader, Conn: stream}
+		a.proxyStream(wrapped, strings.TrimSpace(line))
+		return
+	}
 
-		// Wrap stream to preserve buffered data for the bidirectional copy.
-		// Any bytes the bufio.Reader consumed beyond the \n are prepended
-		// to subsequent reads from the stream.
-		stream = &readerConn{Reader: reader, Conn: stream}
+	// Fixed mode: proxy directly, no header to read.
+	a.proxyStream(stream, a.Target)
+}
+
+// proxyStream forwards one data stream to a target, bidirectionally.
+// target is the trimmed first line of the stream (from acceptStream).
+// In fixed-target mode (a.Target != ""), target is ignored and a.Target
+// is used directly.
+func (a *Agent) proxyStream(stream net.Conn, target string) {
+	// In fixed-target mode, override the target from the stream header.
+	if a.Target != "" {
+		target = a.Target
+	}
+
+	if target == "" || target == "*" {
+		log.Printf("agent: empty or wildcard target header, closing stream")
+		stream.Close()
+		return
 	}
 
 	// Shell target: spawn a local shell with PTY instead of dialing TCP.
 	if target == TargetShell {
-		proxyShell(stream)
+		streamID := getStreamID(stream)
+		proxyShell(stream, streamID, a)
 		return
 	}
 
