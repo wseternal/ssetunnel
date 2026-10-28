@@ -1,7 +1,6 @@
 package server
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -14,6 +13,7 @@ import (
 
 	"github.com/hashicorp/yamux"
 	"github.com/wseternal/ssetunnel/internal/metrics"
+	"github.com/wseternal/ssetunnel/internal/mux"
 	"github.com/wseternal/ssetunnel/internal/transport"
 )
 
@@ -41,13 +41,13 @@ type ShellSession struct {
 	agentID string
 	userID  int64
 
-	stream *yamux.Stream   // yamux stream to agent (shell PTY)
-	upPipe *transport.Pipe // POST bodies → yamux stream (input)
+	stream   *yamux.Stream   // yamux data stream to agent (shell PTY)
+	streamID uint32           // yamux stream ID for control stream routing
+	agentSess *Session        // agent session (for SendControl); nil-safe
+	upPipe   *transport.Pipe // POST bodies → yamux stream (input)
 
-	// writeMu serializes all writes to the yamux stream (from inputForwarder
-	// and resizeForwarder). It is separate from mu to avoid holding the SSE
-	// writer lock during blocking stream writes.
-	writeMu  sync.Mutex
+	// resizeCh carries PTY resize events from the HTTP handler to the
+	// resizeForwarder, which sends them via the control stream.
 	resizeCh chan windowSize // PTY resize events drained by resizeForwarder
 	metrics  *metrics.MetricsCollector // nil when metrics disabled
 
@@ -74,20 +74,24 @@ type ShellSession struct {
 }
 
 // NewShellSession creates a persistent shell session wrapping the given
-// yamux stream. The caller must call Start to begin the background goroutines.
-func NewShellSession(id, agentID string, userID int64, stream *yamux.Stream, mc *metrics.MetricsCollector) *ShellSession {
+// yamux data stream. The caller must call Start to begin the background
+// goroutines. agentSess is the agent's Session for sending control
+// messages (resize); it may be nil in tests.
+func NewShellSession(id, agentID string, userID int64, stream *yamux.Stream, agentSess *Session, mc *metrics.MetricsCollector) *ShellSession {
 	now := time.Now()
 	return &ShellSession{
-		id:           id,
-		agentID:      agentID,
-		userID:       userID,
-		stream:       stream,
-		upPipe:       transport.NewPipe(connectUpPipeCap),
-		resizeCh:     make(chan windowSize, 16),
-		metrics:      mc,
-		ring:         NewRingBuffer(shellRingCap),
-		wakeup:       make(chan struct{}, 1),
-		done:         make(chan struct{}),
+		id:        id,
+		agentID:   agentID,
+		userID:    userID,
+		stream:    stream,
+		streamID:  stream.StreamID(),
+		agentSess: agentSess,
+		upPipe:    transport.NewPipe(connectUpPipeCap),
+		resizeCh:  make(chan windowSize, 16),
+		metrics:   mc,
+		ring:      NewRingBuffer(shellRingCap),
+		wakeup:    make(chan struct{}, 1),
+		done:      make(chan struct{}),
 		consumerDone: make(chan struct{}),
 		createdAt:    now,
 		lastActivity: now,
@@ -437,7 +441,8 @@ func (ss *ShellSession) outputConsumer(heartbeat time.Duration) {
 }
 
 // inputForwarder reads from the up-pipe (user keystrokes from POST) and
-// writes to the yamux stream (agent PTY).
+// writes to the yamux data stream (agent PTY). This is the sole writer
+// to the data stream — resize commands go through the control stream.
 func (ss *ShellSession) inputForwarder() {
 	defer ss.Close()
 
@@ -453,9 +458,7 @@ func (ss *ShellSession) inputForwarder() {
 		ss.upPipe.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
 		n, err := ss.upPipe.Read(*buf)
 		if n > 0 {
-			ss.writeMu.Lock()
 			_, werr := ss.stream.Write((*buf)[:n])
-			ss.writeMu.Unlock()
 			if werr != nil {
 				return // stream broken
 			}
@@ -470,33 +473,23 @@ func (ss *ShellSession) inputForwarder() {
 	}
 }
 
-// resizeForwarder drains PTY resize events from resizeCh and writes
-// length-prefixed JSON resize messages to the yamux stream. The wire
-// format is: 0x00 | uint16be(len) | JSON payload. The 2-byte length
-// bounds the agent-side read so a stray NUL byte (e.g. from
-// Ctrl-Space) costs at most a bounded hiccup instead of swallowing
-// keystrokes into an unbounded buffer until '\n'.
-//
-// Unlike the other two forwarders, this one historically died silently
-// on the first write error without calling ss.Close(), leaving resize
-// handling dead for the session's remaining life while resize POSTs
-// kept returning 200. Now it calls ss.Close() on failure, matching
-// inputForwarder and outputConsumer.
+// resizeForwarder drains PTY resize events from resizeCh and sends them
+// via the control stream to the agent. The agent's control dispatcher
+// routes the resize message to the correct shell handler by stream ID.
+// This replaces the old in-band NUL-byte length-prefixed protocol that
+// multiplexed resize commands with PTY keystrokes on the data stream.
 func (ss *ShellSession) resizeForwarder() {
 	defer ss.Close()
 	for {
 		select {
 		case ws := <-ss.resizeCh:
-			msg, _ := json.Marshal(ws)
-			resizeMsg := transport.EncodeResize(msg)
-			if resizeMsg == nil {
-				log.Printf("shell: resize message too large (%d bytes), dropping", len(msg))
-				continue
+			msg := mux.NewResizeMessage(ss.streamID, ws.Cols, ws.Rows)
+			if ss.agentSess == nil {
+				log.Printf("shell: resize send failed (session=%s, no agent session)", ss.id)
+				return
 			}
-			ss.writeMu.Lock()
-			_, err := ss.stream.Write(resizeMsg)
-			ss.writeMu.Unlock()
-			if err != nil {
+			if err := ss.agentSess.SendControl(msg); err != nil {
+				log.Printf("shell: resize send failed (session=%s, agent=%s): %v", ss.id, ss.agentID, err)
 				return
 			}
 		case <-ss.done:

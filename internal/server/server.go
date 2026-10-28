@@ -1,6 +1,8 @@
 package server
 
 import (
+	"io"
+	"log"
 	"net"
 	"net/http"
 	"strings"
@@ -120,8 +122,10 @@ func (s *Server) AttachConn(conn net.Conn) {
 	s.Reg.Replace(sess)
 }
 
-// attach wraps a newly registered tunnel session in a yamux server and
-// stores it on the session. Each session has its own independent yamux.
+// attach wraps a newly registered tunnel session in a yamux server,
+// then accepts the control stream that the agent opens. The agent
+// opens the control stream (not the server) so the server's accept
+// loop never needs to distinguish control from data streams.
 func (s *Server) attach(sess *Session) {
 	ms, err := mux.Server(sess)
 	if err != nil {
@@ -129,6 +133,27 @@ func (s *Server) attach(sess *Session) {
 		return
 	}
 	sess.SetYamuxSession(ms)
+
+	// Accept the control stream from the agent. The agent opens it
+	// immediately after the yamux session is established, so Accept
+	// returns quickly. If the connection drops, Accept returns an
+	// error and the session dies naturally.
+	go func() {
+		cs, err := ms.Accept()
+		if err != nil {
+			log.Printf("server: accept control stream failed for session %s: %v", sess.ID(), err)
+			return
+		}
+		// Read and verify the control marker.
+		marker := make([]byte, len(mux.ControlStreamMarker))
+		if _, err := io.ReadFull(cs, marker); err != nil || string(marker) != mux.ControlStreamMarker {
+			log.Printf("server: bad control stream marker for session %s: %v", sess.ID(), err)
+			cs.Close()
+			return
+		}
+		sess.SetControlStream(cs)
+		log.Printf("server: control stream accepted for session %s", sess.ID())
+	}()
 }
 
 // HTTPHandler returns the tunnel endpoint handler (/events, /up).

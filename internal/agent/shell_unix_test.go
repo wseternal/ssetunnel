@@ -55,11 +55,19 @@ func readMarker(t *testing.T, c net.Conn, marker string, timeout time.Duration) 
 	}
 }
 
+// newTestAgent creates an Agent with a stream registry for testing.
+func newTestAgent(target string) *Agent {
+	return &Agent{
+		Target:   target,
+		registry: newStreamRegistry(),
+	}
+}
+
 // TestProxy_ShellTarget_FixedMode verifies that when Agent.Target is
-// set to TargetShell, proxy() spawns a PTY shell and pipes I/O
+// set to TargetShell, proxyStream spawns a PTY shell and pipes I/O
 // bidirectionally through the stream.
 func TestProxy_ShellTarget_FixedMode(t *testing.T) {
-	a := &Agent{Target: TargetShell}
+	a := newTestAgent(TargetShell)
 
 	cAgent, cTest := newTCPpair(t)
 	defer cTest.Close()
@@ -67,7 +75,7 @@ func TestProxy_ShellTarget_FixedMode(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		a.proxy(cAgent)
+		a.proxyStream(cAgent, TargetShell)
 		close(done)
 	}()
 
@@ -97,7 +105,7 @@ func TestProxy_ShellTarget_FixedMode(t *testing.T) {
 // master is closed. Without a kill timeout, cmd.Wait() would block
 // indefinitely on such a process.
 func TestProxy_ShellTarget_SIGHUPTrap(t *testing.T) {
-	a := &Agent{Target: TargetShell}
+	a := newTestAgent(TargetShell)
 
 	cAgent, cTest := newTCPpair(t)
 	defer cTest.Close()
@@ -109,7 +117,7 @@ func TestProxy_ShellTarget_SIGHUPTrap(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		a.proxy(cAgent)
+		a.proxyStream(cAgent, TargetShell)
 		close(done)
 	}()
 
@@ -135,9 +143,9 @@ func TestProxy_ShellTarget_SIGHUPTrap(t *testing.T) {
 
 // TestProxy_ShellTarget_DynamicMode verifies that when Agent.Target is
 // empty (dynamic mode) and the stream header line is TargetShell,
-// proxy() dispatches to proxyShell instead of dialing TCP.
+// acceptStream dispatches to proxyShell instead of dialing TCP.
 func TestProxy_ShellTarget_DynamicMode(t *testing.T) {
-	a := &Agent{Target: ""} // dynamic mode
+	a := newTestAgent("") // dynamic mode
 
 	cAgent, cTest := newTCPpair(t)
 	defer cTest.Close()
@@ -145,11 +153,11 @@ func TestProxy_ShellTarget_DynamicMode(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		a.proxy(cAgent)
+		a.acceptStream(cAgent)
 		close(done)
 	}()
 
-	// Send the target header line.
+	// Send the target header line (read by acceptStream).
 	if _, err := cTest.Write([]byte(TargetShell + "\n")); err != nil {
 		t.Fatalf("write target header: %v", err)
 	}
@@ -177,7 +185,7 @@ func TestProxy_ShellTarget_DynamicMode(t *testing.T) {
 
 // TestProxy_ShellTarget_LoginShell verifies that the spawned shell is
 // invoked as a login shell (argv[0] prefixed with '-'), which causes
-// zsh/bash to source profile files (.zprofile, .profile, etc.) in
+// zsh/bash to source profile files (.zprofile, .profile) in
 // addition to the interactive startup files (.zshrc, .bashrc).
 func TestProxy_ShellTarget_LoginShell(t *testing.T) {
 	// Create a temp HOME with a .profile that sets a marker env var.
@@ -194,14 +202,14 @@ func TestProxy_ShellTarget_LoginShell(t *testing.T) {
 	t.Setenv("SHELL", "/bin/bash")
 	t.Setenv("HOME", tmpHome)
 
-	a := &Agent{Target: TargetShell}
+	a := newTestAgent(TargetShell)
 	cAgent, cTest := newTCPpair(t)
 	defer cTest.Close()
 	defer cAgent.Close()
 
 	done := make(chan struct{})
 	go func() {
-		a.proxy(cAgent)
+		a.proxyStream(cAgent, TargetShell)
 		close(done)
 	}()
 
