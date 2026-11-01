@@ -1,7 +1,9 @@
 package agent
 
 import (
+	"fmt"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -119,5 +121,51 @@ func TestLogBuffer_CarriageReturnStripped(t *testing.T) {
 	}
 	if got[0] != "line1" || got[1] != "line2" {
 		t.Errorf("Read = %v, want [\"line1\", \"line2\"]", got)
+	}
+}
+
+// TestLogBuffer_ConcurrentWriteRead exercises the mutex-guarded buffer
+// with 2 writer goroutines and 1 reader goroutine running concurrently.
+// The race detector catches any data races.
+func TestLogBuffer_ConcurrentWriteRead(t *testing.T) {
+	lb := newLogBuffer(256)
+	const linesPerWriter = 100
+
+	var wg sync.WaitGroup
+	wg.Add(3)
+
+	// Writer 1
+	go func() {
+		defer wg.Done()
+		for i := 0; i < linesPerWriter; i++ {
+			lb.Write([]byte(fmt.Sprintf("writer1-line%d\n", i)))
+		}
+	}()
+
+	// Writer 2
+	go func() {
+		defer wg.Done()
+		for i := 0; i < linesPerWriter; i++ {
+			lb.Write([]byte(fmt.Sprintf("writer2-line%d\n", i)))
+		}
+	}()
+
+	// Reader: periodically reads while writers are active.
+	// Read() is a snapshot (returns all buffered lines), so we just
+	// verify it doesn't panic or race.
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 50; i++ {
+			_ = lb.Read(10)
+		}
+	}()
+
+	wg.Wait()
+
+	// Final read: all 2*linesPerWriter lines should be in the buffer
+	// (capacity 256 > 200 lines).
+	all := lb.Read(1000)
+	if len(all) != 2*linesPerWriter {
+		t.Errorf("final read = %d lines, want %d", len(all), 2*linesPerWriter)
 	}
 }

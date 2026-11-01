@@ -26,6 +26,11 @@ func TestRedactSensitive(t *testing.T) {
 		// Non-matching patterns (no = or : separator)
 		{"password in sentence", "password authentication enabled", "password authentication enabled"},
 		{"token in sentence", "token rotation scheduled", "token rotation scheduled"},
+		// Connection strings (should NOT match — no key=value pattern).
+		{"postgres connection string", "postgres://user:pass@host/db", "postgres://user:pass@host/db"},
+		{"mysql connection string", "mysql://root:secret@tcp(host:3306)/db", "mysql://root:secret@tcp(host:3306)/db"},
+		// Standalone JWT without Bearer prefix (should NOT match).
+		{"bare jwt", "eyJhbGciOiJIUzI1NiJ9.abc123.def456", "eyJhbGciOiJIUzI1NiJ9.abc123.def456"},
 		{"no secrets", "normal log line with no secrets", "normal log line with no secrets"},
 		{"empty line", "", ""},
 		// Multiple matches in one line

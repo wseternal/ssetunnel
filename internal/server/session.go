@@ -324,7 +324,9 @@ func (s *Session) handleControlMessage(msg *mux.ControlMessage) {
 func (s *Session) SendLogRequest(lines int) ([]string, error) {
 	// Use a random request ID to prevent prediction by a compromised agent.
 	var randBytes [8]byte
-	_, _ = rand.Read(randBytes[:])
+	if _, err := rand.Read(randBytes[:]); err != nil {
+		return nil, fmt.Errorf("generate request ID: %w", err)
+	}
 	requestID := fmt.Sprintf("%s-%d", hex.EncodeToString(randBytes[:]), lines)
 
 	// Register the response channel before sending the request.

@@ -624,6 +624,7 @@ func TestShellSession_ConcurrentTakeoverNoDeadlock(t *testing.T) {
 		ring: NewRingBuffer(64), done: make(chan struct{}),
 		createdAt: time.Now(), lastActivity: time.Now(),
 	}
+	defer ss.Close()
 
 	// slowWriter simulates a slow SSE write that holds frameMu for a while.
 	type slowWriter struct {
@@ -751,6 +752,9 @@ func TestShellSession_ReplayFailureReWritesToRing(t *testing.T) {
 	ringLen := ss.ring.Len()
 	if ringLen == 0 {
 		t.Fatal("ring is empty after replay failure — unsent data was lost")
+	}
+	if ringLen != len(payload) {
+		t.Errorf("ring len = %d, want %d (full payload re-written)", ringLen, len(payload))
 	}
 
 	// Reattach with a good writer and verify the original payload appears.

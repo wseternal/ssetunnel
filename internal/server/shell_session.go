@@ -465,10 +465,17 @@ func (ss *ShellSession) writeAttached(w io.Writer, deadlineErr error, touchActiv
 	// We cannot hold ss.mu while acquiring frameMu: Attach() holds ss.mu
 	// and calls drainFrameWrite() which acquires frameMu, so acquiring
 	// both locks here in reversed order would deadlock.
+	//
+	// TOCTOU window: between releasing ss.mu (stale check) and acquiring
+	// frameMu, a concurrent Attach(takeover) can replace the writer. The
+	// stale check already passed, so at most one frame reaches the
+	// departing client per takeover — an accepted trade-off (the frame is
+	// a terminal render update, not a state mutation).
 	ss.mu.Lock()
 	stale := ss.sseWriter != w
 	ss.mu.Unlock()
 	if stale {
+		log.Printf("shell: stale writer detected, dropping frame (session=%s, agent=%s, kind=%s)", ss.id, ss.agentID, kind)
 		return
 	}
 	ss.frameMu.Lock()
@@ -492,6 +499,8 @@ func (ss *ShellSession) writeAttached(w io.Writer, deadlineErr error, touchActiv
 // idle read timeout, which added up to a 15 s echo stall on the first
 // keystroke after any idle gap.
 func (ss *ShellSession) outputConsumer(heartbeat time.Duration) {
+	log.Printf("shell: output consumer started (session=%s, agent=%s)", ss.id, ss.agentID)
+	defer log.Printf("shell: output consumer exited (session=%s, agent=%s)", ss.id, ss.agentID)
 	defer ss.Close()
 	defer close(ss.consumerDone)
 
@@ -517,7 +526,7 @@ func (ss *ShellSession) outputConsumer(heartbeat time.Duration) {
 			ss.ring.Write((*buf)[:n])
 			evicted := ss.ring.Evicted()
 			if evicted && !prevEvicted {
-				log.Printf("shell: ring buffer overflowed (session=%s, agent=%s), oldest output evicted", ss.id, ss.agentID)
+				log.Printf("shell: ring buffer overflowed (session=%s, agent=%s), oldest output evicted, current_len=%d", ss.id, ss.agentID, ss.ring.Len())
 			}
 			prevEvicted = evicted
 			ss.lastActivity = time.Now()
@@ -595,6 +604,12 @@ func (ss *ShellSession) outputConsumer(heartbeat time.Duration) {
 		// the sole writer to the http.ResponseWriter is always the
 		// consumer. The handler waits on consumerDone after ss.Done()
 		// unblocks, ensuring no concurrent writes.
+		//
+		// Stale-writer guard: w is read under ss.mu, the same lock
+		// Attach uses to swap writers. If w is non-nil here it is the
+		// current writer; no separate stale check is needed because
+		// this is the last write the consumer ever performs — no
+		// further frames can race past it.
 		ss.mu.Lock()
 		w := ss.sseWriter
 		f := ss.flusher
@@ -768,6 +783,8 @@ func (r *ShellSessionRegistry) CleanupIdle(timeout time.Duration) {
 	for _, ss := range all {
 		dead, attached, lastAct := ss.snapshotState()
 		if dead {
+			// Dead sessions were already closed by outputConsumer's
+			// defer ss.Close(); just remove from the registry map.
 			log.Printf("shell: reaping dead session %s (agent=%s)", ss.id, ss.agentID)
 			toDelete = append(toDelete, ss.id)
 			continue
@@ -791,9 +808,16 @@ func (r *ShellSessionRegistry) CleanupIdle(timeout time.Duration) {
 	// may have been reattached by a concurrent ShellConnectHandler. Closing
 	// a live session would kill an active client connection.
 	for _, ss := range toClose {
-		if _, attached, _ := ss.snapshotState(); attached {
+		dead, attached, _ := ss.snapshotState()
+		if dead {
+			// Session was closed between snapshot and re-verify;
+			// Close() is a no-op on an already-closed session.
+			continue
+		}
+		if attached {
 			// Session was reattached; re-register it in the map since we
 			// deleted it above.
+			log.Printf("shell: re-registering session %s (agent=%s) — reattached during cleanup", ss.id, ss.agentID)
 			r.Store(ss)
 			continue
 		}

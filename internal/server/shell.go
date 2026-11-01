@@ -201,8 +201,10 @@ func (h *Handler) serveShellSSE(w http.ResponseWriter, r *http.Request, f http.F
 	if err != nil {
 		log.Printf("shell: attach failed after headers sent (session=%s): %v", ss.ID(), err)
 		// Write an error event so the client knows why the stream is empty
-		// rather than receiving a bare 200 with zero frames.
-		_ = transport.WriteEventFrame(w, f, "error", []byte(err.Error()))
+		// rather than receiving a bare 200 with zero frames. Use a generic
+		// message to avoid leaking implementation details (net.OpError, etc.)
+		// to the browser.
+		_ = transport.WriteEventFrame(w, f, "error", []byte("failed to attach to shell session"))
 		return shellSSEAborted
 	}
 

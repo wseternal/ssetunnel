@@ -380,6 +380,10 @@ func TestSafeReplayStart(t *testing.T) {
 		{"tab start", []byte("\tindented"), 0},
 		// High bytes (UTF-8 continuation): passed through.
 		{"utf8 start", []byte{0xC3, 0xA9}, 0},
+		// Bare ESC byte (0x1B): not a CSI sequence, pass through.
+		{"bare esc", []byte{0x1B}, 0},
+		// ESC followed by non-CSI byte: pass through.
+		{"esc then letter", []byte{0x1B, 'A'}, 0},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
