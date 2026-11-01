@@ -75,3 +75,17 @@ When `NoAutoTune` is false, the agent installs a `conn.OnTune` callback that:
 * **AgentID** identifies the machine for server-side routing — required when multiple agents are registered.
 * **Dynamic target mode** reads target from stream header; rejects empty or `*` targets.
 * **`NoAutoTune`**: When true, `event: tune` frames are ignored; agent keeps its static CLI flags.
+
+## Control Stream: Log Retrieval
+
+The agent captures recent `log.Printf` output into a bounded ring buffer (`logBuffer`, 256 lines) via `io.MultiWriter(os.Stderr, logBuf)`. The server retrieves these lines on demand via `MsgLogRequest`/`MsgLogResponse` on the control stream.
+
+- **Request**: server sends `MsgLogRequest` with `request_id` (random hex) and `lines` count
+- **Response**: agent reads up to `lines` from `logBuffer.Read(lines)` and sends back as `MsgLogResponse`
+- **Timeout**: server has a 10s timeout; old agents that don't support log retrieval silently drop the request
+
+## Control Stream: Tracing (Reserved)
+
+`Agent.SendTrace(streamID, eventType, ...)` sends diagnostic trace events via the control stream (`MsgTrace`). Non-blocking: drops if the control stream is unavailable (logs a warning on first drop per control stream cycle). Reserved for future shell and data stream lifecycle instrumentation.
+
+Shell sessions can enable verbose tracing (`Agent.Verbose`) which adds lifecycle and byte-count logging via `tracedReader`/`tracedWriter`/`tracedCopy` wrappers.
