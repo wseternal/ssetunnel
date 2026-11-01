@@ -322,9 +322,16 @@ func (ss *ShellSession) Attach(w io.Writer, f http.Flusher, takeover bool) (<-ch
 	// unsent tail is re-written to the ring so it survives for the next
 	// reattach rather than being silently lost.
 	sent := 0
+	rewindAndLog := func(off int, reason string) {
+		remaining := len(data) - off
+		if remaining > 0 {
+			log.Printf("shell: replay interrupted, re-wrote %d unsent bytes to ring (session=%s, reason=%s)", remaining, ss.id, reason)
+			ss.ring.Write(data[off:])
+		}
+	}
 	for off := 0; off < len(data); off += replayChunkSize {
 		if ss.closed.Load() {
-			ss.ring.Write(data[off:])
+			rewindAndLog(off, "session closed")
 			ss.clearWriterLocked(false)
 			return nil, fmt.Errorf("session closed during replay")
 		}
@@ -335,13 +342,13 @@ func (ss *ShellSession) Attach(w io.Writer, f http.Flusher, takeover bool) (<-ch
 		if rc := ss.rc; rc != nil {
 			if err := deadlineError(rc.SetWriteDeadline(time.Now().Add(sseWriteDeadline))); err != nil {
 				log.Printf("shell: set write deadline during replay failed (session=%s): %v", ss.id, err)
-				ss.ring.Write(data[off:])
+				rewindAndLog(off, "deadline error")
 				ss.clearWriterLocked(false)
 				return nil, fmt.Errorf("replay set deadline: %w", err)
 			}
 		}
 		if err := transport.WriteFrame(w, f, data[off:end]); err != nil {
-			ss.ring.Write(data[off:])
+			rewindAndLog(off, "write error")
 			ss.clearWriterLocked(false)
 			return nil, fmt.Errorf("replay buffer: %w", err)
 		}
@@ -780,7 +787,16 @@ func (r *ShellSessionRegistry) CleanupIdle(timeout time.Duration) {
 		r.mu.Unlock()
 	}
 
+	// Re-check before closing: between the snapshot and now, the session
+	// may have been reattached by a concurrent ShellConnectHandler. Closing
+	// a live session would kill an active client connection.
 	for _, ss := range toClose {
+		if _, attached, _ := ss.snapshotState(); attached {
+			// Session was reattached; re-register it in the map since we
+			// deleted it above.
+			r.Store(ss)
+			continue
+		}
 		ss.Close()
 	}
 }

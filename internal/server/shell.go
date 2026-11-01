@@ -141,6 +141,8 @@ func (h *Handler) shellReattach(w http.ResponseWriter, r *http.Request, ss *Shel
 	h.connectSessions.Store(connectID, cs)
 	defer h.connectSessions.Delete(connectID)
 
+	// Outcome intentionally ignored: this is an existing persistent session;
+	// the caller (shellConnectHandler) does not own its lifecycle.
 	h.serveShellSSE(w, r, f, ss, connectID, takeover)
 }
 

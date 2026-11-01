@@ -643,54 +643,164 @@ func TestShellSession_ConcurrentTakeoverNoDeadlock(t *testing.T) {
 
 	// Phase 1: attach client A with a slow writer.
 	wA := sw(10 * time.Millisecond)
-	lostA, err := ss.Attach(wA, &nopFlusher{}, false)
+	_, err := ss.Attach(wA, &nopFlusher{}, false)
 	if err != nil {
 		t.Fatalf("Attach A: %v", err)
 	}
 
-	// Phase 2: concurrently run writeAttached and takeover in a tight loop.
+	// Phase 2: run writeAttached and takeover in separate goroutines so
+	// they truly overlap — writeAttached holds frameMu while Attach holds
+	// ss.mu and calls drainFrameWrite. This is the only way to exercise
+	// the lock-ordering inversion.
 	const iterations = 50
-	done := make(chan struct{})
+	writerDone := make(chan struct{})
+	takeoverDone := make(chan struct{})
+
+	// Writer goroutine: simulates outputConsumer.
 	go func() {
-		defer close(done)
+		defer close(writerDone)
 		for i := 0; i < iterations; i++ {
-			// Simulate outputConsumer calling writeAttached.
 			ss.mu.Lock()
 			w := ss.sseWriter
 			ss.mu.Unlock()
 			if w != nil {
-				ss.writeAttached(w, nil, false, "test write", writeFn(sw(1*time.Millisecond)))
+				ss.writeAttached(w, nil, false, "test write", writeFn(sw(5*time.Millisecond)))
 			}
+		}
+	}()
 
-			// Simulate a concurrent takeover.
+	// Takeover goroutine: simulates concurrent Attach(takeover).
+	go func() {
+		defer close(takeoverDone)
+		for i := 0; i < iterations; i++ {
 			newW := sw(1 * time.Millisecond)
-			newLost, err := ss.Attach(newW, &nopFlusher{}, true)
+			_, err := ss.Attach(newW, &nopFlusher{}, true)
 			if err != nil {
 				// Session may have been closed; that's OK.
 				return
 			}
-			_ = newLost
-			wA = newW
-			lostA = newLost
 		}
 	}()
 
 	// Verify no deadlock within a generous timeout.
-	select {
-	case <-done:
-	case <-time.After(10 * time.Second):
-		t.Fatal("deadlock detected: concurrent writeAttached + Attach(takeover) did not complete")
+	timeout := time.After(10 * time.Second)
+	for i := 0; i < 2; i++ {
+		select {
+		case <-writerDone:
+		case <-takeoverDone:
+		case <-timeout:
+			t.Fatal("deadlock detected: concurrent writeAttached + Attach(takeover) did not complete")
+		}
 	}
 
 	// Verify the session is still attached (last takeover succeeded).
 	if !ss.Attached() {
 		t.Fatal("session should still be attached after takeovers")
 	}
+}
 
-	// Clean up: the last lost channel should be open.
-	select {
-	case <-lostA:
-		// OK — may have been closed by a late write failure.
-	default:
+// failingAfterNWriter succeeds for the first n bytes then fails. Used to
+// simulate a mid-replay write failure so the ring re-write path is exercised.
+type failingAfterNWriter struct {
+	buf       bytes.Buffer
+	remaining int
+}
+
+func (f *failingAfterNWriter) Header() http.Header { return http.Header{} }
+func (f *failingAfterNWriter) Flush()              {}
+func (f *failingAfterNWriter) Write(p []byte) (int, error) {
+	if f.remaining <= 0 {
+		return 0, errors.New("write failed after N bytes")
+	}
+	n := len(p)
+	if n > f.remaining {
+		// Write up to the limit, then fail.
+		f.buf.Write(p[:f.remaining])
+		f.remaining = 0
+		return f.remaining, errors.New("write failed after N bytes")
+	}
+	f.buf.Write(p)
+	f.remaining -= n
+	return n, nil
+}
+
+// TestShellSession_ReplayFailureReWritesToRing verifies that when a replay
+// write fails mid-stream, the unsent tail is re-written to the ring buffer
+// so a subsequent reattach can replay it.
+func TestShellSession_ReplayFailureReWritesToRing(t *testing.T) {
+	const payload = "HELLO WORLD 1234567890 ABCDEF"
+	ss := &ShellSession{
+		id: "replay-rewind-1", agentID: "a", userID: 1,
+		ring: NewRingBuffer(4096), done: make(chan struct{}),
+		createdAt: time.Now(), lastActivity: time.Now(),
+	}
+
+	// Pre-fill the ring with known data.
+	ss.ring.Write([]byte(payload))
+
+	// Attach with a writer that fails after the first chunk. replayChunkSize
+	// is 64 KiB, so even a small payload will be in one chunk. Use a writer
+	// that fails immediately to exercise the failure path.
+	w := &failingAfterNWriter{remaining: 0}
+	_, err := ss.Attach(w, &nopFlusher{}, false)
+	if err == nil {
+		t.Fatal("expected replay failure, got nil")
+	}
+
+	// The unsent data should be back in the ring.
+	ringLen := ss.ring.Len()
+	if ringLen == 0 {
+		t.Fatal("ring is empty after replay failure — unsent data was lost")
+	}
+
+	// Reattach with a good writer and verify the original payload appears.
+	var buf bytes.Buffer
+	lost, err := ss.Attach(&buf, &nopFlusher{}, true)
+	if err != nil {
+		t.Fatalf("reattach: %v", err)
+	}
+	_ = lost
+
+	// The replay should include the original payload (base64-encoded in SSE frame).
+	got := buf.String()
+	if !strings.HasPrefix(got, "data: ") || !strings.HasSuffix(got, "\n\n") {
+		t.Fatalf("replay is not a single SSE data frame: %q", got)
+	}
+	encoded := strings.TrimPrefix(strings.TrimSuffix(got, "\n\n"), "data: ")
+	decoded, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		t.Fatalf("decode base64 payload: %v", err)
+	}
+	if !bytes.Contains(decoded, []byte(payload)) {
+		t.Errorf("reattach replay missing original payload; decoded=%q", decoded)
+	}
+}
+
+// TestHandleConnectResize_NilChannel_Returns400 verifies that resize requests
+// targeting non-shell connect sessions (resize == nil) are rejected with 400
+// rather than silently dropped with 200.
+func TestHandleConnectResize_NilChannel_Returns400(t *testing.T) {
+	h := &Handler{}
+
+	// Store a connect session with nil resize channel (non-shell).
+	// userID=0 skips the user-session-required check.
+	h.connectSessions.Store("test-conn", &connectSession{
+		agentID: "agent-1",
+		userID:  0,
+		resize:  nil,
+	})
+
+	body := `{"id":"test-conn","cols":80,"rows":24}`
+	req := httptest.NewRequest(http.MethodPost, "/shell/resize", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	h.handleConnectResize(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 Bad Request for nil resize channel, got %d", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "resize not supported") {
+		t.Errorf("expected error message about resize not supported, got %q", rec.Body.String())
 	}
 }
