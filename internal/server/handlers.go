@@ -349,12 +349,10 @@ func parseCapsConcurrency(h string) int {
 // POST-up) to the agent's yamux stream. It is NOT registered in the
 // session registry (which is for agent tunnel sessions only).
 type connectSession struct {
-	id      string
 	agentID string          // target agent ID for metrics attribution
 	userID  int64           // owning user ID for access control (0 = unset)
 	up      *transport.Pipe // POST bodies → yamux stream
-	resize  chan windowSize // PTY resize requests from the console
-	cancel  context.CancelFunc
+	resize  chan windowSize // PTY resize requests from the console (nil for the ephemeral bridge)
 }
 
 // windowSize holds terminal dimensions for PTY resize.
@@ -457,18 +455,12 @@ func (h *Handler) handleConnect(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Write target header if the agent wants it (dynamic target mode).
-	// Check for a forced target from context (shell handler injects
-	// __shell__ via context key to bypass agent config validation).
 	targetHeader := target
-	if ft, ok := r.Context().Value(forcedTargetKey).(string); ok && ft != "" {
-		targetHeader = ft
-	}
 
-	// Guard: __shell__ and __remote_app__ targets must use their
-	// dedicated handlers (ShellConnectHandler / RemoteAppHandler), not
-	// the ephemeral connect path. The ephemeral bridge still uses the
-	// legacy in-band NUL-byte resize protocol which is incompatible
-	// with the new control-stream-based resize used by shell sessions.
+	// Guard: __shell__ and __remote_app__ targets must use their dedicated
+	// handlers (ShellConnectHandler / RemoteAppHandler), not this ephemeral
+	// connect bridge. Those drive PTY resize over the control stream; this
+	// bridge is a plain byte pipe for TCP targets.
 	if targetHeader == TargetShell || targetHeader == TargetRemoteApp {
 		stream.Close()
 		http.Error(w, fmt.Sprintf("target %q requires dedicated handler", targetHeader), http.StatusBadRequest)
@@ -492,12 +484,9 @@ func (h *Handler) handleConnect(w http.ResponseWriter, r *http.Request) {
 		ownerID = si.UserID
 	}
 	cs := &connectSession{
-		id:      id,
 		agentID: agentID,
 		userID:  ownerID,
 		up:      transport.NewPipe(connectUpPipeCap),
-		resize:  make(chan windowSize, 1),
-		cancel:  func() {}, // no-op; cleanup is handled by the deferred teardown below
 	}
 	h.connectSessions.Store(id, cs)
 	defer func() {
@@ -506,53 +495,24 @@ func (h *Handler) handleConnect(w http.ResponseWriter, r *http.Request) {
 		h.connectSessions.Delete(id)
 	}()
 
-	// Goroutine: multiplex upstream data and resize events → yamux stream.
-	// Resize messages use a length-prefixed wire format:
-	//   0x00 | uint16be(len) | JSON payload
-	// The previous newline-terminated format (0x00 JSON '\n') was
-	// ambiguous with user-generated NUL bytes (Ctrl-Space, Ctrl-@):
-	// xterm.js emits \x00 for those keys, and in a raw PTY Enter
-	// produces \r not \n, so a stray NUL would swallow all subsequent
-	// keystrokes into an unbounded buffer until a literal 0x0A. The
-	// 2-byte length bounds the agent-side read so a stray NUL costs
-	// at most a bounded hiccup.
+	// Goroutine: bridge the POST-up pipe to the yamux stream. This is a
+	// plain byte pipe — the ephemeral connect path serves TCP targets only
+	// (shell and remote-app PTY resize go over the control stream in their
+	// own handlers), so there is no resize multiplexing here.
 	go func() {
 		buf := bufferPool.Get().(*[]byte)
 		defer bufferPool.Put(buf)
 		for {
-			select {
-			case ws := <-cs.resize:
-				msg, _ := json.Marshal(ws)
-				resizeMsg := transport.EncodeResize(msg)
-				if resizeMsg == nil {
-					continue
-				}
-				if _, err := stream.Write(resizeMsg); err != nil {
+			n, err := cs.up.Read(*buf)
+			if n > 0 {
+				if _, werr := stream.Write((*buf)[:n]); werr != nil {
 					stream.Close()
 					return
 				}
-			default:
-				// No pending resize — read from the up pipe with a deadline
-				// so we periodically re-check the resize channel (prevents
-				// resize events from being stuck behind a blocking read
-				// during idle periods).
-				cs.up.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
-				n, err := cs.up.Read(*buf)
-				if n > 0 {
-					if _, werr := stream.Write((*buf)[:n]); werr != nil {
-						stream.Close()
-						return
-					}
-				}
-				if err != nil {
-					// Timeout: re-check resize channel on next iteration.
-					var ne net.Error
-					if errors.As(err, &ne) && ne.Timeout() {
-						continue
-					}
-					stream.Close() // signal EOF to agent
-					return
-				}
+			}
+			if err != nil {
+				stream.Close() // signal EOF to agent
+				return
 			}
 		}
 	}()
@@ -687,10 +647,12 @@ func (h *Handler) handleConnectUp(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
-// handleConnectResize serves POST /connect-resize: forwards PTY resize
-// requests from the console frontend to the agent via the connect session's
-// resize channel. The bridge goroutine encodes the resize as a length-
-// prefixed JSON message on the yamux stream (0x00 | uint16be(len) | JSON).
+// handleConnectResize serves the cloud-shell resize POST (reached via
+// ShellConnectResizeHandler at /console/api/v1/shell/resize): it forwards
+// PTY resize requests from the shell frontend into the target session's
+// resize channel. For shell sessions that channel is the ShellSession's
+// resizeCh, drained by resizeForwarder and sent to the agent over the
+// control stream. The ephemeral connect bridge does not use resize.
 func (h *Handler) handleConnectResize(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)

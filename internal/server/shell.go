@@ -8,19 +8,13 @@ import (
 	"log"
 	"net/http"
 	"sort"
+	"strconv"
 	"time"
 
 	"github.com/hashicorp/yamux"
 	"github.com/wseternal/ssetunnel/internal/auth"
 	"github.com/wseternal/ssetunnel/internal/transport"
 )
-
-// forcedTargetKey is a context key that ShellConnectHandler uses to pass
-// the forced target (__shell__) to handleConnect without going through
-// query parameters (which would fail agent config validation).
-type forcedTargetKeyType struct{}
-
-var forcedTargetKey = forcedTargetKeyType{}
 
 // generateShellID returns a 32-character hex string for use as a persistent
 // shell session ID, decoupled from the ephemeral connect session ID.
@@ -108,8 +102,10 @@ func (h *Handler) ShellConnectHandler() http.Handler {
 		}
 
 		if ss != nil && !ss.IsDead() {
-			// Reattach to existing persistent session.
-			h.shellReattach(w, r, ss, id, sessInfo)
+			// Reattach to existing persistent session. takeover=1 is set by
+			// a client whose stream went silent (watchdog) and evicts the
+			// stale attachment; one-shot, never repeated on normal retries.
+			h.shellReattach(w, r, ss, id, sessInfo, q.Get("takeover") == "1")
 			return
 		}
 
@@ -121,11 +117,13 @@ func (h *Handler) ShellConnectHandler() http.Handler {
 // shellReattach reattaches a client to an existing persistent shell session.
 // It registers the session's up-pipe in connectSessions (so connect-up works),
 // calls Attach to replay buffer + stream, and blocks until the client
-// disconnects OR the backing session dies. In the latter case, a terminal
-// SSE "event: closed" frame is written before the handler returns so the
-// browser's reader loop gets a clean termination signal and can auto-
-// reconnect instead of freezing silently on a half-open stream.
-func (h *Handler) shellReattach(w http.ResponseWriter, r *http.Request, ss *ShellSession, connectID string, sessInfo *auth.UserSessionInfo) {
+// disconnects, the attached writer fails, OR the backing session dies. In
+// the latter case, a terminal SSE "event: closed" frame is written before
+// the handler returns so the browser's reader loop gets a clean termination
+// signal and can auto-reconnect instead of freezing silently on a
+// half-open stream. takeover replaces an existing attachment whose client
+// went silent (frontend watchdog).
+func (h *Handler) shellReattach(w http.ResponseWriter, r *http.Request, ss *ShellSession, connectID string, sessInfo *auth.UserSessionInfo, takeover bool) {
 	f, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
@@ -133,41 +131,72 @@ func (h *Handler) shellReattach(w http.ResponseWriter, r *http.Request, ss *Shel
 	}
 
 	// Register the persistent session's up-pipe as a connectSession
-	// so that POST /connect-up and POST /connect-resize can find it.
+	// so that the shell connect-up and resize POSTs can find it.
 	cs := &connectSession{
-		id:      connectID,
 		agentID: ss.AgentID(),
 		userID:  ss.UserID(),
 		up:      ss.UpPipe(),
 		resize:  ss.resizeCh, // share ShellSession's resize channel
-		cancel:  func() {},
 	}
 	h.connectSessions.Store(connectID, cs)
 	defer h.connectSessions.Delete(connectID)
 
-	// Set SSE response headers.
+	h.serveShellSSE(w, r, f, ss, connectID, takeover)
+}
+
+// serveShellSSE writes the SSE response headers, attaches the client to ss
+// (replaying the ring buffer), then blocks until the client disconnects, the
+// attached writer fails, or the backing session dies. It is the shared tail of
+// shellReattach and shellCreate so the teardown select lives in one place.
+//
+// Returns false without starting the stream when the session is already
+// attached by someone else (409), and false after flushed headers when Attach
+// itself fails (the status can no longer change), so the caller can run its own
+// cleanup — shellCreate closes the session it just made. On success the handler
+// blocks in the select and returns true.
+//
+// On writer failure the session stays alive for reattach; returning ends the
+// SSE response so the browser reconnects and replays the ring buffer instead of
+// freezing on a silent stream.
+func (h *Handler) serveShellSSE(w http.ResponseWriter, r *http.Request, f http.Flusher, ss *ShellSession, connectID string, takeover bool) bool {
+	// Refuse a busy session before committing to the SSE stream. Once headers
+	// are flushed the status cannot change, and a 200 with an empty body is
+	// indistinguishable from a stream that ended — the client reconnects and
+	// the two clients thrash forever. A takeover request is the watchdog's
+	// deliberate eviction of a stalled attachment and proceeds.
+	//
+	// Attached() and Attach() are not one atomic step, so two clients racing
+	// for the same free session can still lose after headers are flushed and
+	// fall back to the old empty-stream end. That window needs two tabs
+	// connecting in the same instant; the steady-state case above is the one
+	// that actually loops.
+	if !takeover && ss.Attached() {
+		log.Printf("shell: refused attach for session %s (agent=%s, user=%d, connect=%s): already attached",
+			ss.ID(), ss.AgentID(), ss.UserID(), connectID)
+		http.Error(w, "shell session in use by another client", http.StatusConflict)
+		return false
+	}
+
 	w.Header().Set("X-SSET-Session", connectID)
 	w.Header().Set("X-SSET-Shell-Session", ss.ID())
+	w.Header().Set("X-SSET-Heartbeat-Ms", strconv.FormatInt(h.heartbeat.Milliseconds(), 10))
 	transport.WriteHeaders(w)
 	f.Flush()
 
-	// Attach: installs the writer and drains ring buffer as SSE.
-	// Headers are already flushed — if Attach fails, we cannot change the
-	// HTTP status. Log the error and return; the client sees the stream close.
-	if err := ss.Attach(w, f); err != nil {
+	lost, err := ss.Attach(w, f, takeover)
+	if err != nil {
 		log.Printf("shell: attach failed after headers sent (session=%s): %v", ss.ID(), err)
-		return
+		return false
 	}
 
-	// Block until client disconnects OR the backing session dies.
-	// Selecting on ss.Done() closes the P1 gap: previously the handler
-	// parked solely on r.Context().Done(), so a session death (agent
-	// reconnect, stream error) orphaned the SSE response forever and
-	// left the browser with a silent, frozen terminal.
 	select {
 	case <-r.Context().Done():
 		// Client disconnected first — session stays alive for reattach.
-		ss.Detach()
+		if ss.detachWriter(w, true) {
+			log.Printf("shell: detached session %s (agent=%s)", ss.ID(), ss.AgentID())
+		}
+	case <-lost:
+		log.Printf("shell: client attachment ended (writer failure or takeover), ending SSE response (session=%s, agent=%s)", ss.ID(), ss.AgentID())
 	case <-ss.Done():
 		// Backing session died while attached. Wait for the consumer
 		// to finish writing the terminal closed frame — it is the sole
@@ -176,6 +205,7 @@ func (h *Handler) shellReattach(w http.ResponseWriter, r *http.Request, ss *Shel
 		h.shellSessions.Delete(ss.ID())
 		log.Printf("shell: session died while attached, handler returning (session=%s, agent=%s)", ss.ID(), ss.AgentID())
 	}
+	return true
 }
 
 // shellCreate opens a new yamux stream to the agent, creates a persistent
@@ -244,16 +274,15 @@ func (h *Handler) shellCreate(w http.ResponseWriter, r *http.Request, agentID, c
 	ss.Start(h.heartbeat)
 	log.Printf("shell: created session %s (agent=%s, user=%d)", shellID, agentID, sessInfo.UserID)
 
-	// Register in connectSessions for connect-up/connect-resize compatibility.
+	// Register in connectSessions for connect-up and resize compatibility.
 	cs := &connectSession{
-		id:      connectID,
 		agentID: agentID,
 		userID:  sessInfo.UserID,
 		up:      ss.UpPipe(),
 		resize:  ss.resizeCh, // share ShellSession's resize channel
-		cancel:  func() {},
 	}
 	h.connectSessions.Store(connectID, cs)
+	defer h.connectSessions.Delete(connectID)
 
 	// Monitor agent session death to close the shell session promptly.
 	if agentSess != nil {
@@ -267,40 +296,12 @@ func (h *Handler) shellCreate(w http.ResponseWriter, r *http.Request, agentID, c
 		}()
 	}
 
-	// Set SSE response headers.
-	w.Header().Set("X-SSET-Session", connectID)
-	w.Header().Set("X-SSET-Shell-Session", ss.ID())
-	transport.WriteHeaders(w)
-	f.Flush()
-
-	// Attach: drains buffer (empty for new session) + sets live writer.
-	// Headers are already flushed — if Attach fails, clean up and return.
-	if err := ss.Attach(w, f); err != nil {
-		h.connectSessions.Delete(connectID)
+	// Attach and run the shared SSE response loop. On Attach failure, tear
+	// down the session we just created (headers were already flushed, so no
+	// HTTP status change is possible).
+	if !h.serveShellSSE(w, r, f, ss, connectID, false) {
 		ss.Close()
 		h.shellSessions.Delete(shellID)
-		log.Printf("shell: attach failed after headers sent (session=%s): %v", shellID, err)
-		return
-	}
-
-	// Block until client disconnects OR the backing session dies.
-	// Selecting on ss.Done() closes the P1 gap: previously the handler
-	// parked solely on r.Context().Done(), so a session death (agent
-	// reconnect, stream error) orphaned the SSE response forever and
-	// left the browser with a silent, frozen terminal.
-	select {
-	case <-r.Context().Done():
-		// Client disconnected first — session stays alive for reattach.
-		h.connectSessions.Delete(connectID)
-		ss.Detach()
-	case <-ss.Done():
-		// Backing session died while attached. Wait for the consumer
-		// to finish writing the terminal closed frame — it is the sole
-		// writer to w, so no concurrent write can happen.
-		<-ss.ConsumerDone()
-		h.connectSessions.Delete(connectID)
-		h.shellSessions.Delete(shellID)
-		log.Printf("shell: session died while attached, handler returning (session=%s, agent=%s)", ss.ID(), ss.AgentID())
 	}
 }
 

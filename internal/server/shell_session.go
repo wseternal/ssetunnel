@@ -41,14 +41,14 @@ type ShellSession struct {
 	agentID string
 	userID  int64
 
-	stream   *yamux.Stream   // yamux data stream to agent (shell PTY)
-	streamID uint32           // yamux stream ID for control stream routing
+	stream    *yamux.Stream   // yamux data stream to agent (shell PTY)
+	streamID  uint32          // yamux stream ID for control stream routing
 	agentSess *Session        // agent session (for SendControl); nil-safe
-	upPipe   *transport.Pipe // POST bodies → yamux stream (input)
+	upPipe    *transport.Pipe // POST bodies → yamux stream (input)
 
 	// resizeCh carries PTY resize events from the HTTP handler to the
 	// resizeForwarder, which sends them via the control stream.
-	resizeCh chan windowSize // PTY resize events drained by resizeForwarder
+	resizeCh chan windowSize           // PTY resize events drained by resizeForwarder
 	metrics  *metrics.MetricsCollector // nil when metrics disabled
 
 	// mu protects sseWriter, flusher, and rc. The consumer goroutine
@@ -58,14 +58,25 @@ type ShellSession struct {
 	// atomic.Bool so IsDead() can be read lock-free (avoids nested lock
 	// acquisition in FindByUserAgent and CleanupIdle).
 	mu        sync.Mutex
-	sseWriter io.Writer              // non-nil when a client is attached
-	flusher   http.Flusher           // flusher for the attached SSE writer
+	sseWriter io.Writer                // non-nil when a client is attached
+	flusher   http.Flusher             // flusher for the attached SSE writer
 	rc        *http.ResponseController // per-conn write-deadline controller; nil when detached
 	closed    atomic.Bool
 
+	// frameMu serializes SSE frame writes (data, heartbeat, closed) and
+	// lets a takeover or handler exit drain an in-flight write to the
+	// previous writer before returning the response.
+	frameMu sync.Mutex
+
+	// clientLost is created per successful Attach and closed by
+	// detachWriter when the attached client's SSE writer fails. The
+	// handler selects on it and returns, terminating the HTTP response
+	// so the browser reconnects. A fresh channel per attach prevents a
+	// stale closed channel from ending a later client's response.
+	clientLost chan struct{}
+
 	ring *RingBuffer // output ring buffer (always written to when detached)
 
-	wakeup       chan struct{} // signal consumer to check new writer / flush
 	done         chan struct{} // closed when session is destroyed
 	consumerDone chan struct{} // closed when outputConsumer exits
 
@@ -77,12 +88,12 @@ type ShellSession struct {
 // session. Using a config struct keeps NewShellSession readable as the
 // set of dependencies grows.
 type ShellSessionConfig struct {
-	ID        string                     // connect session ID (client-generated)
-	AgentID   string                     // target agent identifier
-	UserID    int64                      // owning user's ID
-	Stream    *yamux.Stream              // yamux data stream to agent (shell PTY)
-	AgentSess *Session                   // agent session for SendControl; nil in tests
-	Metrics   *metrics.MetricsCollector  // nil when metrics disabled
+	ID        string                    // connect session ID (client-generated)
+	AgentID   string                    // target agent identifier
+	UserID    int64                     // owning user's ID
+	Stream    *yamux.Stream             // yamux data stream to agent (shell PTY)
+	AgentSess *Session                  // agent session for SendControl; nil in tests
+	Metrics   *metrics.MetricsCollector // nil when metrics disabled
 }
 
 // NewShellSession creates a persistent shell session wrapping the given
@@ -91,18 +102,17 @@ type ShellSessionConfig struct {
 func NewShellSession(cfg ShellSessionConfig) *ShellSession {
 	now := time.Now()
 	return &ShellSession{
-		id:        cfg.ID,
-		agentID:   cfg.AgentID,
-		userID:    cfg.UserID,
-		stream:    cfg.Stream,
-		streamID:  cfg.Stream.StreamID(),
-		agentSess: cfg.AgentSess,
-		upPipe:    transport.NewPipe(connectUpPipeCap),
-		resizeCh:  make(chan windowSize, 16),
-		metrics:   cfg.Metrics,
-		ring:      NewRingBuffer(shellRingCap),
-		wakeup:    make(chan struct{}, 1),
-		done:      make(chan struct{}),
+		id:           cfg.ID,
+		agentID:      cfg.AgentID,
+		userID:       cfg.UserID,
+		stream:       cfg.Stream,
+		streamID:     cfg.Stream.StreamID(),
+		agentSess:    cfg.AgentSess,
+		upPipe:       transport.NewPipe(connectUpPipeCap),
+		resizeCh:     make(chan windowSize, 16),
+		metrics:      cfg.Metrics,
+		ring:         NewRingBuffer(shellRingCap),
+		done:         make(chan struct{}),
 		consumerDone: make(chan struct{}),
 		createdAt:    now,
 		lastActivity: now,
@@ -111,16 +121,83 @@ func NewShellSession(cfg ShellSessionConfig) *ShellSession {
 
 // sseWriteDeadline bounds a single SSE frame write to an attached
 // client. Refreshed per write; if the write does not complete within
-// this window the client is treated as wedged and silently detached.
+// this window the client is detached and its handler ends the response
+// so the browser reconnects (see clientLost).
 // 30 s matches the heartbeat cadence so a healthy client always beats
 // the deadline, while a half-open TCP socket fails within one tick.
 const sseWriteDeadline = 30 * time.Second
+
+// deadlineError normalises an http.ResponseController.SetWriteDeadline failure.
+// http.ErrNotSupported means the attached ResponseWriter cannot express
+// deadlines at all — a wrapped writer, a proxy shim, or a test recorder — which
+// says nothing about whether the client is alive. Treating it as a dead writer
+// would detach every healthy client that happens to lack deadline support, so
+// it collapses to nil and the frame is written unguarded. Any other error is a
+// real failure and is returned unchanged, keeping the detach-and-reconnect path.
+//
+// Trade-off: an unguarded write to a client that stops reading can park the
+// consumer inside transport.WriteFrame while it holds frameMu, and Attach holds
+// ss.mu across the replay. net/http's own write path supports deadlines, so no
+// production writer reaches this branch today; it exists for wrapped writers and
+// for tests. If a reverse proxy ever hands the shell a deadline-incapable
+// ResponseWriter, bound the stall there rather than reverting this.
+func deadlineError(err error) error {
+	if errors.Is(err, http.ErrNotSupported) {
+		return nil
+	}
+	return err
+}
 
 // replayChunkSize bounds each SSE frame emitted during Attach ring
 // replay. Chunking amortizes lock pressure and lets a wedged client
 // fail faster (one deadline tick per chunk instead of one for the
 // entire 256 KiB ring).
 const replayChunkSize = 64 << 10
+
+// safeReplayStart returns the offset into data where a terminal replay can begin
+// without rendering junk, and is called ONLY when the ring evicted older bytes
+// (see Attach), so a replay of a never-overflowed buffer is never trimmed.
+//
+// An eviction advances the head by an arbitrary byte count with no notion of
+// message boundaries, so the retained prefix can be the tail of an ANSI sequence
+// whose introducer was overwritten — "1;31mABC" is what survives of
+// "\x1b[1;31mABC". A terminal shows those bytes literally and the garbage then
+// persists in the scrollback.
+//
+// Best effort, not a VT parser. It skips a leading run of CSI parameter bytes
+// (0x30-0x3F: digits, ':', ';', '<', '=', '>', '?') that is terminated by a CSI
+// final byte (0x40-0x7E), and a leading BEL (the terminator of an evicted
+// OSC/DCS). Both are strong truncation signals once an eviction is known to have
+// happened. Known limits, accepted deliberately because a wider rule would drop
+// real output:
+//   - the intermediate range 0x20-0x2F is excluded: a leading space is ordinary
+//     indented output, which is far more common than a truncated intermediate;
+//   - a tail that begins with a non-parameter byte (a bare final byte, "[" from a
+//     one-byte eviction, or continuation bytes of split UTF-8) is passed through
+//     and still renders as junk;
+//   - evicted output that happens to start with parameters followed by a letter
+//     ("512M") is treated as a tail and skipped.
+//
+// Whatever is skipped is unrecoverable: the buffer has already been drained.
+func safeReplayStart(data []byte) int {
+	off := 0
+	for off < len(data) && data[off] == 0x07 {
+		off++
+	}
+	if off >= len(data) {
+		return off
+	}
+	if b := data[off]; b >= 0x30 && b <= 0x3F {
+		end := off
+		for end < len(data) && data[end] >= 0x30 && data[end] <= 0x3F {
+			end++
+		}
+		if end < len(data) && data[end] >= 0x40 && data[end] <= 0x7E {
+			return end + 1
+		}
+	}
+	return off
+}
 
 // ID returns the session identifier.
 func (ss *ShellSession) ID() string { return ss.id }
@@ -172,7 +249,19 @@ func (ss *ShellSession) Start(heartbeat time.Duration) {
 // lock acquisition so no output bytes are skipped or duplicated across
 // the attach transition, and no concurrent writes can race the replay.
 // The caller must hold no locks and must block until the client
-// disconnects, then call Detach.
+// disconnects, then call detachWriter.
+//
+// The returned channel is closed if the attached client's SSE writer
+// fails (write error or deadline). The handler must select on it and
+// return so the HTTP response terminates and the browser reconnects;
+// the session itself stays alive for reattach.
+//
+// takeover=true replaces an existing attachment: the previous client's
+// loss channel is closed and its handler ends its response. The stalled
+// client that triggered the frontend watchdog sets takeover explicitly;
+// a plain second client still gets "already attached" — serveShellSSE
+// turns that into a 409 before flushing SSE headers — preventing two
+// healthy viewers from evicting each other in a reconnect loop.
 //
 // Byte ordering invariant: every byte that was in the ring reaches the
 // HTTP response before any subsequent consumer byte. The consumer
@@ -181,14 +270,23 @@ func (ss *ShellSession) Start(heartbeat time.Duration) {
 // without deadlocking on a wedged browser, the replay applies a
 // per-frame write deadline (sseWriteDeadline) — a wedged client
 // detaches within one tick rather than blocking Attach indefinitely.
-func (ss *ShellSession) Attach(w io.Writer, f http.Flusher) error {
+func (ss *ShellSession) Attach(w io.Writer, f http.Flusher, takeover bool) (<-chan struct{}, error) {
 	ss.mu.Lock()
 	defer ss.mu.Unlock()
 	if ss.closed.Load() {
-		return fmt.Errorf("session closed")
+		return nil, fmt.Errorf("session closed")
 	}
 	if ss.sseWriter != nil {
-		return fmt.Errorf("already attached")
+		if !takeover {
+			return nil, fmt.Errorf("already attached")
+		}
+		// Drain any in-flight frame write to the previous writer before
+		// signalling its handler, so the response cannot be closed while
+		// the consumer is still writing to it. Safe under ss.mu: the
+		// consumer releases frameMu before it next acquires ss.mu.
+		ss.drainFrameWrite()
+		ss.clearWriterLocked(true)
+		log.Printf("shell: client takeover for session %s (agent=%s)", ss.id, ss.agentID)
 	}
 
 	// Install the writer first, then drain the ring under the same lock.
@@ -204,7 +302,16 @@ func (ss *ShellSession) Attach(w io.Writer, f http.Flusher) error {
 	}
 	ss.lastActivity = time.Now()
 
-	data := ss.ring.ReadAll()
+	data, evicted := ss.ring.Drained()
+	// Only an eviction can leave the retained head inside a message; a ring
+	// that never overflowed starts at a real write boundary and must be replayed
+	// untouched, so genuine output is never trimmed.
+	if evicted {
+		if start := safeReplayStart(data); start > 0 {
+			log.Printf("shell: dropped %d truncated bytes from replay (session=%s, agent=%s)", start, ss.id, ss.agentID)
+			data = data[start:]
+		}
+	}
 	// Replay the ring buffer in chunks. Each chunk gets its own write
 	// deadline so a wedged browser fails within one tick per chunk
 	// rather than stalling the entire replay. The lock is held for the
@@ -212,54 +319,55 @@ func (ss *ShellSession) Attach(w io.Writer, f http.Flusher) error {
 	// bytes reach the HTTP response before any subsequent consumer byte.
 	for off := 0; off < len(data); off += replayChunkSize {
 		if ss.closed.Load() {
-			ss.sseWriter = nil
-			ss.flusher = nil
-			ss.rc = nil
-			return fmt.Errorf("session closed during replay")
+			ss.clearWriterLocked(false)
+			return nil, fmt.Errorf("session closed during replay")
 		}
 		end := off + replayChunkSize
 		if end > len(data) {
 			end = len(data)
 		}
 		if rc := ss.rc; rc != nil {
-			if err := rc.SetWriteDeadline(time.Now().Add(sseWriteDeadline)); err != nil {
+			if err := deadlineError(rc.SetWriteDeadline(time.Now().Add(sseWriteDeadline))); err != nil {
 				log.Printf("shell: set write deadline during replay failed (session=%s): %v", ss.id, err)
-				ss.sseWriter = nil
-				ss.flusher = nil
-				ss.rc = nil
-				return fmt.Errorf("replay set deadline: %w", err)
+				ss.clearWriterLocked(false)
+				return nil, fmt.Errorf("replay set deadline: %w", err)
 			}
 		}
 		if err := transport.WriteFrame(w, f, data[off:end]); err != nil {
-			ss.sseWriter = nil
-			ss.flusher = nil
-			ss.rc = nil
-			return fmt.Errorf("replay buffer: %w", err)
+			ss.clearWriterLocked(false)
+			return nil, fmt.Errorf("replay buffer: %w", err)
 		}
 	}
 
+	lost := make(chan struct{})
+	ss.clientLost = lost
+
 	log.Printf("shell: attached client to session %s (agent=%s, replay=%d bytes)", ss.id, ss.agentID, len(data))
 
-	// Signal consumer to wake up (in case it was waiting on a nil writer).
-	// Non-blocking: the channel has a 1-slot buffer; a pending signal is
-	// enough to nudge the consumer.
-	select {
-	case ss.wakeup <- struct{}{}:
-	default:
-	}
-	return nil
+	return lost, nil
 }
 
-// Detach disconnects the client from this session. The yamux stream
-// stays alive and output continues buffering into the ring buffer.
-func (ss *ShellSession) Detach() {
-	ss.mu.Lock()
+// drainFrameWrite waits for any in-flight SSE frame write to finish.
+// It may be called while holding ss.mu: the consumer releases frameMu
+// before it next acquires ss.mu, so the wait cannot deadlock.
+func (ss *ShellSession) drainFrameWrite() {
+	ss.frameMu.Lock()
+	ss.frameMu.Unlock()
+}
+
+// clearWriterLocked clears the attached client's writer state. The
+// per-attach clientLost channel is closed only when signalLost is true
+// (writer-failure and takeover paths); normal detach and session close
+// must not signal loss because their handlers are already returning or
+// the Done path handles cleanup.
+func (ss *ShellSession) clearWriterLocked(signalLost bool) {
 	ss.sseWriter = nil
 	ss.flusher = nil
 	ss.rc = nil
-	ss.lastActivity = time.Now()
-	ss.mu.Unlock()
-	log.Printf("shell: detached session %s (agent=%s)", ss.id, ss.agentID)
+	if signalLost && ss.clientLost != nil {
+		close(ss.clientLost)
+	}
+	ss.clientLost = nil
 }
 
 // Close permanently destroys the session: closes the yamux stream,
@@ -270,9 +378,7 @@ func (ss *ShellSession) Close() error {
 	}
 
 	ss.mu.Lock()
-	ss.sseWriter = nil
-	ss.flusher = nil
-	ss.rc = nil
+	ss.clearWriterLocked(false)
 	ss.mu.Unlock()
 
 	if ss.upPipe != nil {
@@ -294,26 +400,26 @@ func (ss *ShellSession) IsDead() bool {
 
 // detachWriter clears the SSE writer if it still matches w, preventing
 // a new client's writer from being cleared by a stale failure from the
-// previous client. When touchActivity is true, lastActivity is updated
-// (used on heartbeat failures to delay idle cleanup).
-func (ss *ShellSession) detachWriter(w io.Writer, touchActivity bool) {
+// previous client. The current attachment's clientLost channel is
+// closed so the handler ends the response and the browser reconnects.
+// When touchActivity is true, lastActivity is updated (used on heartbeat
+// failures to delay idle cleanup). It reports whether it detached and,
+// when it did, waits out any in-flight frame write to w so the caller
+// can return the HTTP response without a concurrent writer.
+func (ss *ShellSession) detachWriter(w io.Writer, touchActivity bool) bool {
 	ss.mu.Lock()
-	if ss.sseWriter == w {
-		ss.sseWriter = nil
-		ss.flusher = nil
-		ss.rc = nil
+	matched := ss.sseWriter == w
+	if matched {
+		ss.clearWriterLocked(true)
 		if touchActivity {
 			ss.lastActivity = time.Now()
 		}
 	}
 	ss.mu.Unlock()
-}
-
-// LastActivity returns the time of the last client activity.
-func (ss *ShellSession) LastActivity() time.Time {
-	ss.mu.Lock()
-	defer ss.mu.Unlock()
-	return ss.lastActivity
+	if matched {
+		ss.drainFrameWrite()
+	}
+	return matched
 }
 
 // snapshotState returns the session's closed, attached, and lastActivity
@@ -326,17 +432,39 @@ func (ss *ShellSession) snapshotState() (dead, attached bool, lastAct time.Time)
 	return dead, ss.sseWriter != nil, ss.lastActivity
 }
 
+// writeAttached emits one SSE frame to the writer snapshot w and enforces
+// the detach-on-failure discipline that the output-freeze hardening relies
+// on: if the caller's deadline refresh failed (deadlineErr non-nil) or the
+// write itself errors, w is detached via detachWriter so the handler ends
+// the HTTP response and the browser reconnects. The write runs under frameMu
+// so a concurrent takeover cannot drain it mid-frame. kind labels the log
+// line ("write error" / "heartbeat error"); touchActivity refreshes the idle
+// clock on heartbeat-driven detaches.
+func (ss *ShellSession) writeAttached(w io.Writer, deadlineErr error, touchActivity bool, kind string, write func() error) {
+	if deadlineErr != nil {
+		ss.detachWriter(w, touchActivity)
+		return
+	}
+	ss.frameMu.Lock()
+	err := write()
+	ss.frameMu.Unlock()
+	if err != nil {
+		log.Printf("shell: detaching session %s (agent=%s, user=%d): %s: %v", ss.id, ss.agentID, ss.userID, kind, err)
+		ss.detachWriter(w, touchActivity)
+	}
+}
+
 // outputConsumer reads from the yamux stream and either writes SSE
 // frames to the attached client or buffers raw bytes into the ring
 // buffer when detached. Per-frame write deadlines bound the stall a
-// wedged browser can inflict on the consumer, so Close/Detach are
-// reachable within one heartbeat tick even under TCP backpressure.
+// wedged browser can inflict on the consumer, so Close is reachable
+// within one heartbeat tick even under TCP backpressure.
 //
 // Stall-free loop: after sending a heartbeat, the consumer loops back
-// to the stream read immediately rather than sleeping on the wakeup
-// channel. The previous implementation slept an extra heartbeat tick
-// after every idle read timeout, which added up to a 15 s echo stall
-// on the first keystroke after any idle gap.
+// to the stream read immediately rather than sleeping an extra tick.
+// The previous implementation slept a full heartbeat tick after every
+// idle read timeout, which added up to a 15 s echo stall on the first
+// keystroke after any idle gap.
 func (ss *ShellSession) outputConsumer(heartbeat time.Duration) {
 	defer ss.Close()
 	defer close(ss.consumerDone)
@@ -363,7 +491,7 @@ func (ss *ShellSession) outputConsumer(heartbeat time.Duration) {
 			f := ss.flusher
 			var deadlineErr error
 			if w != nil && ss.rc != nil {
-				deadlineErr = ss.rc.SetWriteDeadline(time.Now().Add(sseWriteDeadline))
+				deadlineErr = deadlineError(ss.rc.SetWriteDeadline(time.Now().Add(sseWriteDeadline)))
 				if deadlineErr != nil {
 					log.Printf("shell: set write deadline failed (session=%s, agent=%s): %v", ss.id, ss.agentID, deadlineErr)
 				}
@@ -375,12 +503,9 @@ func (ss *ShellSession) outputConsumer(heartbeat time.Duration) {
 			}
 
 			if w != nil {
-				if deadlineErr != nil {
-					ss.detachWriter(w, false)
-				} else if werr := transport.WriteFrame(w, f, (*buf)[:n]); werr != nil {
-					log.Printf("shell: detaching session %s (agent=%s, user=%d): write error: %v", ss.id, ss.agentID, ss.userID, werr)
-					ss.detachWriter(w, false)
-				}
+				ss.writeAttached(w, deadlineErr, false, "write error", func() error {
+					return transport.WriteFrame(w, f, (*buf)[:n])
+				})
 				ss.metrics.RecordConnectBytes(ss.agentID, 0, n)
 			} else {
 				ss.metrics.RecordConnectBytes(ss.agentID, 0, n)
@@ -409,17 +534,14 @@ func (ss *ShellSession) outputConsumer(heartbeat time.Duration) {
 			if w != nil {
 				var deadlineErr error
 				if rc != nil {
-					deadlineErr = rc.SetWriteDeadline(time.Now().Add(sseWriteDeadline))
+					deadlineErr = deadlineError(rc.SetWriteDeadline(time.Now().Add(sseWriteDeadline)))
 					if deadlineErr != nil {
 						log.Printf("shell: set write deadline for heartbeat failed (session=%s, agent=%s): %v", ss.id, ss.agentID, deadlineErr)
 					}
 				}
-				if deadlineErr != nil {
-					ss.detachWriter(w, true)
-				} else if werr := transport.WriteHeartbeat(w, f); werr != nil {
-					log.Printf("shell: detaching session %s (agent=%s, user=%d): heartbeat error: %v", ss.id, ss.agentID, ss.userID, werr)
-					ss.detachWriter(w, true)
-				}
+				ss.writeAttached(w, deadlineErr, true, "heartbeat error", func() error {
+					return transport.WriteHeartbeat(w, f)
+				})
 			}
 
 			// Loop back to the read immediately — no post-heartbeat
@@ -443,7 +565,10 @@ func (ss *ShellSession) outputConsumer(heartbeat time.Duration) {
 		f := ss.flusher
 		ss.mu.Unlock()
 		if w != nil {
-			if werr := transport.WriteClosedFrame(w, f); werr != nil {
+			ss.frameMu.Lock()
+			werr := transport.WriteClosedFrame(w, f)
+			ss.frameMu.Unlock()
+			if werr != nil {
 				log.Printf("shell: write closed frame failed (session=%s): %v", ss.id, werr)
 			}
 		}

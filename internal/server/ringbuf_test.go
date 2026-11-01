@@ -130,6 +130,36 @@ func TestRingBuffer_Concurrent(t *testing.T) {
 	// No panics or data races = pass.
 }
 
+// Drained must report eviction so a caller can tell a truncated head from a real
+// write boundary, and must clear the flag when the buffer empties.
+func TestRingBuffer_DrainedReportsEviction(t *testing.T) {
+	rb := NewRingBuffer(8)
+
+	// Fits without overwriting: head is a genuine write boundary.
+	rb.Write([]byte("abcdefg"))
+	if data, evicted := rb.Drained(); evicted || !bytes.Equal(data, []byte("abcdefg")) {
+		t.Fatalf("no-overflow Drained = (%q, %v), want (abcdefg, false)", data, evicted)
+	}
+
+	// Wrap-around overwrite: last 8 of "0123456789".
+	rb.Write([]byte("012345"))
+	rb.Write([]byte("6789"))
+	if data, evicted := rb.Drained(); !evicted || !bytes.Equal(data, []byte("23456789")) {
+		t.Fatalf("wrap Drained = (%q, %v), want (23456789, true)", data, evicted)
+	}
+
+	// One write larger than capacity clips the head.
+	rb.Write([]byte("0123456789AB"))
+	if data, evicted := rb.Drained(); !evicted || !bytes.Equal(data, []byte("456789AB")) {
+		t.Fatalf("clip Drained = (%q, %v), want (456789AB, true)", data, evicted)
+	}
+
+	// The flag resets with the buffer.
+	if data, evicted := rb.Drained(); evicted || data != nil {
+		t.Fatalf("empty Drained = (%q, %v), want (nil, false)", data, evicted)
+	}
+}
+
 func TestRingBuffer_Cap(t *testing.T) {
 	rb := NewRingBuffer(42)
 	if rb.Cap() != 42 {

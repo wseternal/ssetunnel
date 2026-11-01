@@ -29,11 +29,9 @@ func injectUserSession(r *http.Request, si *auth.UserSessionInfo) *http.Request 
 func newTestConnectSession(t *testing.T, h *Handler, id, agentID string, userID int64) *connectSession {
 	t.Helper()
 	cs := &connectSession{
-		id:      id,
 		agentID: agentID,
 		userID:  userID,
 		up:      transport.NewPipe(1 << 16),
-		cancel:  func() {},
 	}
 	h.connectSessions.Store(id, cs)
 	t.Cleanup(func() { h.connectSessions.Delete(id) })
