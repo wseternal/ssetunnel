@@ -1,7 +1,9 @@
 package server
 
 import (
+	"encoding/json"
 	"fmt"
+	"log"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -73,6 +75,12 @@ type Session struct {
 	// injects event: tune frames into the downstream SSE stream.
 	tuneCh chan metrics.TransportParams
 
+	// pendingLogs correlates in-flight log requests with their responses.
+	// SendLogRequest registers a channel keyed by request_id; the control
+	// read loop delivers the response via handleLogResponse.
+	pendingLogsMu sync.Mutex
+	pendingLogs   map[string]chan []string
+
 	closeOnce sync.Once
 	closeCh   chan struct{} // closed by Close(); for monitor goroutines
 }
@@ -96,6 +104,7 @@ func NewSession(id string) *Session {
 		createdAt:    time.Now().UTC(),
 		closeCh:      make(chan struct{}),
 		tuneCh:       make(chan metrics.TransportParams, 1),
+		pendingLogs:  make(map[string]chan []string),
 	}
 }
 
@@ -275,6 +284,99 @@ func (s *Session) SendControl(msg *mux.ControlMessage) error {
 	}
 	s.controlStream.SetWriteDeadline(time.Now().Add(5 * time.Second))
 	return mux.WriteControlMessage(s.controlStream, msg)
+}
+
+// readControlLoop reads control messages from the agent and dispatches
+// them. Runs until the control stream closes or a read error occurs.
+// Called from Server.attach() after the control stream is installed.
+func (s *Session) readControlLoop(cs net.Conn) {
+	for {
+		msg, err := mux.ReadControlMessage(cs)
+		if err != nil {
+			// Expected when the session dies or the stream closes.
+			log.Printf("server: control read closed for session %s: %v", s.id, err)
+			return
+		}
+		s.handleControlMessage(msg)
+	}
+}
+
+// handleControlMessage dispatches an incoming control message from the
+// agent. Currently handles log responses; future messages (traces) go
+// in the default case.
+func (s *Session) handleControlMessage(msg *mux.ControlMessage) {
+	switch msg.Type {
+	case mux.MsgLogResponse:
+		s.handleLogResponse(msg)
+	case mux.MsgTrace:
+		// Reserved for ADR-001 diagnostic tracing.
+	default:
+		log.Printf("server: unexpected control message type=%s from agent session %s",
+			msg.Type, s.id)
+	}
+}
+
+// SendLogRequest sends a log request to the agent via the control
+// channel and waits for the response. Returns the agent's recent log
+// lines or an error on timeout / control stream unavailability.
+func (s *Session) SendLogRequest(lines int) ([]string, error) {
+	requestID := fmt.Sprintf("%d-%d", time.Now().UnixNano(), lines)
+
+	// Register the response channel before sending the request.
+	respCh := make(chan []string, 1)
+	s.pendingLogsMu.Lock()
+	s.pendingLogs[requestID] = respCh
+	s.pendingLogsMu.Unlock()
+
+	// Build and send the control message.
+	payload, _ := json.Marshal(mux.LogRequestPayload{
+		RequestID: requestID,
+		Lines:     lines,
+	})
+	msg := &mux.ControlMessage{
+		Type:     mux.MsgLogRequest,
+		StreamID: 0,
+		Payload:  payload,
+	}
+	if err := s.SendControl(msg); err != nil {
+		s.pendingLogsMu.Lock()
+		delete(s.pendingLogs, requestID)
+		s.pendingLogsMu.Unlock()
+		return nil, fmt.Errorf("send log request: %w", err)
+	}
+
+	// Wait for the response with a timeout.
+	select {
+	case resp, ok := <-respCh:
+		if !ok {
+			return nil, fmt.Errorf("response channel closed")
+		}
+		return resp, nil
+	case <-time.After(10 * time.Second):
+		s.pendingLogsMu.Lock()
+		delete(s.pendingLogs, requestID)
+		s.pendingLogsMu.Unlock()
+		return nil, fmt.Errorf("log request timed out")
+	}
+}
+
+// handleLogResponse delivers a log response to the waiting
+// SendLogRequest goroutine via the pendingLogs channel.
+func (s *Session) handleLogResponse(msg *mux.ControlMessage) {
+	var resp mux.LogResponsePayload
+	if err := json.Unmarshal(msg.Payload, &resp); err != nil {
+		log.Printf("server: bad log response payload: %v", err)
+		return
+	}
+	s.pendingLogsMu.Lock()
+	ch, ok := s.pendingLogs[resp.RequestID]
+	if ok {
+		delete(s.pendingLogs, resp.RequestID)
+	}
+	s.pendingLogsMu.Unlock()
+	if ok {
+		ch <- resp.Lines
+	}
 }
 
 // tunnelAddr is a placeholder net.Addr: a tunnel conn has no meaningful
