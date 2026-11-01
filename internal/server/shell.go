@@ -144,6 +144,18 @@ func (h *Handler) shellReattach(w http.ResponseWriter, r *http.Request, ss *Shel
 	h.serveShellSSE(w, r, f, ss, connectID, takeover)
 }
 
+// shellSSEOutcome describes the result of serveShellSSE.
+type shellSSEOutcome bool
+
+const (
+	// shellSSECompleted means the handler ran the full select loop
+	// (client attached, then disconnected or session died).
+	shellSSECompleted shellSSEOutcome = true
+	// shellSSEAborted means the handler returned early — either a
+	// pre-headers 409 refusal or a post-headers Attach failure.
+	shellSSEAborted shellSSEOutcome = false
+)
+
 // serveShellSSE writes the SSE response headers, attaches the client to ss
 // (replaying the ring buffer), then blocks until the client disconnects, the
 // attached writer fails, or the backing session dies. It is the shared tail of
@@ -158,7 +170,7 @@ func (h *Handler) shellReattach(w http.ResponseWriter, r *http.Request, ss *Shel
 // On writer failure the session stays alive for reattach; returning ends the
 // SSE response so the browser reconnects and replays the ring buffer instead of
 // freezing on a silent stream.
-func (h *Handler) serveShellSSE(w http.ResponseWriter, r *http.Request, f http.Flusher, ss *ShellSession, connectID string, takeover bool) bool {
+func (h *Handler) serveShellSSE(w http.ResponseWriter, r *http.Request, f http.Flusher, ss *ShellSession, connectID string, takeover bool) shellSSEOutcome {
 	// Refuse a busy session before committing to the SSE stream. Once headers
 	// are flushed the status cannot change, and a 200 with an empty body is
 	// indistinguishable from a stream that ended — the client reconnects and
@@ -174,7 +186,7 @@ func (h *Handler) serveShellSSE(w http.ResponseWriter, r *http.Request, f http.F
 		log.Printf("shell: refused attach for session %s (agent=%s, user=%d, connect=%s): already attached",
 			ss.ID(), ss.AgentID(), ss.UserID(), connectID)
 		http.Error(w, "shell session in use by another client", http.StatusConflict)
-		return false
+		return shellSSEAborted
 	}
 
 	w.Header().Set("X-SSET-Session", connectID)
@@ -189,7 +201,7 @@ func (h *Handler) serveShellSSE(w http.ResponseWriter, r *http.Request, f http.F
 		// Write an error event so the client knows why the stream is empty
 		// rather than receiving a bare 200 with zero frames.
 		_ = transport.WriteEventFrame(w, f, "error", []byte(err.Error()))
-		return false
+		return shellSSEAborted
 	}
 
 	select {
@@ -208,7 +220,7 @@ func (h *Handler) serveShellSSE(w http.ResponseWriter, r *http.Request, f http.F
 		h.shellSessions.Delete(ss.ID())
 		log.Printf("shell: session died while attached, handler returning (session=%s, agent=%s)", ss.ID(), ss.AgentID())
 	}
-	return true
+	return shellSSECompleted
 }
 
 // shellCreate opens a new yamux stream to the agent, creates a persistent
@@ -302,7 +314,7 @@ func (h *Handler) shellCreate(w http.ResponseWriter, r *http.Request, agentID, c
 	// Attach and run the shared SSE response loop. On Attach failure, tear
 	// down the session we just created (headers were already flushed, so no
 	// HTTP status change is possible).
-	if !h.serveShellSSE(w, r, f, ss, connectID, false) {
+	if h.serveShellSSE(w, r, f, ss, connectID, false) == shellSSEAborted {
 		ss.Close()
 		h.shellSessions.Delete(shellID)
 	}

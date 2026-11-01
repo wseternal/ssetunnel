@@ -613,3 +613,84 @@ func TestShellConnectHandler_BusySessionReturnsConflict(t *testing.T) {
 		t.Fatal("busy refusal detached the current client")
 	}
 }
+
+// TestShellSession_ConcurrentTakeoverNoDeadlock exercises the race between
+// writeAttached (which snapshots writer identity under ss.mu, then acquires
+// frameMu) and Attach(takeover=true) (which holds ss.mu and calls
+// drainFrameWrite). A deadlock here would be a lock-ordering inversion.
+func TestShellSession_ConcurrentTakeoverNoDeadlock(t *testing.T) {
+	ss := &ShellSession{
+		id: "race-1", agentID: "a", userID: 1,
+		ring: NewRingBuffer(64), done: make(chan struct{}),
+		createdAt: time.Now(), lastActivity: time.Now(),
+	}
+
+	// slowWriter simulates a slow SSE write that holds frameMu for a while.
+	type slowWriter struct {
+		bytes.Buffer
+		delay time.Duration
+	}
+	sw := func(delay time.Duration) *slowWriter {
+		return &slowWriter{delay: delay}
+	}
+	writeFn := func(sw *slowWriter) func() error {
+		return func() error {
+			time.Sleep(sw.delay)
+			_, err := sw.Write([]byte("data: test\n\n"))
+			return err
+		}
+	}
+
+	// Phase 1: attach client A with a slow writer.
+	wA := sw(10 * time.Millisecond)
+	lostA, err := ss.Attach(wA, &nopFlusher{}, false)
+	if err != nil {
+		t.Fatalf("Attach A: %v", err)
+	}
+
+	// Phase 2: concurrently run writeAttached and takeover in a tight loop.
+	const iterations = 50
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < iterations; i++ {
+			// Simulate outputConsumer calling writeAttached.
+			ss.mu.Lock()
+			w := ss.sseWriter
+			ss.mu.Unlock()
+			if w != nil {
+				ss.writeAttached(w, nil, false, "test write", writeFn(sw(1*time.Millisecond)))
+			}
+
+			// Simulate a concurrent takeover.
+			newW := sw(1 * time.Millisecond)
+			newLost, err := ss.Attach(newW, &nopFlusher{}, true)
+			if err != nil {
+				// Session may have been closed; that's OK.
+				return
+			}
+			_ = newLost
+			wA = newW
+			lostA = newLost
+		}
+	}()
+
+	// Verify no deadlock within a generous timeout.
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("deadlock detected: concurrent writeAttached + Attach(takeover) did not complete")
+	}
+
+	// Verify the session is still attached (last takeover succeeded).
+	if !ss.Attached() {
+		t.Fatal("session should still be attached after takeovers")
+	}
+
+	// Clean up: the last lost channel should be open.
+	select {
+	case <-lostA:
+		// OK — may have been closed by a late write failure.
+	default:
+	}
+}

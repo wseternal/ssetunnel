@@ -317,8 +317,14 @@ func (ss *ShellSession) Attach(w io.Writer, f http.Flusher, takeover bool) (<-ch
 	// rather than stalling the entire replay. The lock is held for the
 	// full replay to preserve the byte-ordering invariant: all buffered
 	// bytes reach the HTTP response before any subsequent consumer byte.
+	//
+	// On mid-replay failure (write error, deadline, session close), the
+	// unsent tail is re-written to the ring so it survives for the next
+	// reattach rather than being silently lost.
+	sent := 0
 	for off := 0; off < len(data); off += replayChunkSize {
 		if ss.closed.Load() {
+			ss.ring.Write(data[off:])
 			ss.clearWriterLocked(false)
 			return nil, fmt.Errorf("session closed during replay")
 		}
@@ -329,20 +335,23 @@ func (ss *ShellSession) Attach(w io.Writer, f http.Flusher, takeover bool) (<-ch
 		if rc := ss.rc; rc != nil {
 			if err := deadlineError(rc.SetWriteDeadline(time.Now().Add(sseWriteDeadline))); err != nil {
 				log.Printf("shell: set write deadline during replay failed (session=%s): %v", ss.id, err)
+				ss.ring.Write(data[off:])
 				ss.clearWriterLocked(false)
 				return nil, fmt.Errorf("replay set deadline: %w", err)
 			}
 		}
 		if err := transport.WriteFrame(w, f, data[off:end]); err != nil {
+			ss.ring.Write(data[off:])
 			ss.clearWriterLocked(false)
 			return nil, fmt.Errorf("replay buffer: %w", err)
 		}
+		sent = end
 	}
 
 	lost := make(chan struct{})
 	ss.clientLost = lost
 
-	log.Printf("shell: attached client to session %s (agent=%s, replay=%d bytes)", ss.id, ss.agentID, len(data))
+	log.Printf("shell: attached client to session %s (agent=%s, replay=%d/%d bytes)", ss.id, ss.agentID, sent, len(data))
 
 	return lost, nil
 }
@@ -732,26 +741,44 @@ func (r *ShellSessionRegistry) Range(fn func(*ShellSession) bool) {
 }
 
 // CleanupIdle closes and removes sessions that have been detached longer
-// than the given idle timeout.
+// than the given idle timeout. It snapshots the session list under the
+// registry lock, then inspects state and closes sessions outside it so
+// concurrent Store/Load/Delete are not blocked by per-session lock acquisition.
 func (r *ShellSessionRegistry) CleanupIdle(timeout time.Duration) {
 	now := time.Now()
+
+	// Snapshot all sessions under the lock; inspection happens outside.
+	r.mu.Lock()
+	all := make([]*ShellSession, 0, len(r.sessions))
+	for _, ss := range r.sessions {
+		all = append(all, ss)
+	}
+	r.mu.Unlock()
+
+	var toDelete []string
 	var toClose []*ShellSession
 
-	r.mu.Lock()
-	for id, ss := range r.sessions {
+	for _, ss := range all {
 		dead, attached, lastAct := ss.snapshotState()
 		if dead {
-			log.Printf("shell: reaping dead session %s (agent=%s)", id, ss.agentID)
-			delete(r.sessions, id)
+			log.Printf("shell: reaping dead session %s (agent=%s)", ss.id, ss.agentID)
+			toDelete = append(toDelete, ss.id)
 			continue
 		}
 		if !attached && now.Sub(lastAct) > timeout {
 			log.Printf("shell: cleaning up idle session %s (agent=%s, user=%d, idle=%v)", ss.id, ss.agentID, ss.userID, now.Sub(lastAct))
+			toDelete = append(toDelete, ss.id)
 			toClose = append(toClose, ss)
-			delete(r.sessions, id)
 		}
 	}
-	r.mu.Unlock()
+
+	if len(toDelete) > 0 {
+		r.mu.Lock()
+		for _, id := range toDelete {
+			delete(r.sessions, id)
+		}
+		r.mu.Unlock()
+	}
 
 	for _, ss := range toClose {
 		ss.Close()

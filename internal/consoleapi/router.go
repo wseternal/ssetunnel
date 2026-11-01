@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"regexp"
 	"sort"
 	"strconv"
 	"sync"
@@ -726,6 +727,12 @@ func (a *API) handleAgentLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Redact sensitive patterns (bearer tokens, API keys) from log lines
+	// before returning them to the client.
+	for i, line := range logLines {
+		logLines[i] = redactSensitive(line)
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]interface{}{
 		"agent_id": agentID,
@@ -1294,4 +1301,18 @@ func (a *API) handleMetricsDecisions(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(decisions)
+}
+
+// sensitivePatterns matches common secret formats that may appear in log output.
+// Defense-in-depth: the current codebase does not log token values, but this
+// guards against future changes that accidentally include them.
+var sensitivePatterns = regexp.MustCompile(
+	`(?i)` +
+		`Bearer\s+[A-Za-z0-9\-._~+/]+=*|` +
+		`(?:token|api[_-]?key|secret|password)\s*[=:]\s*\S+`,
+)
+
+// redactSensitive replaces known secret patterns in a log line with [REDACTED].
+func redactSensitive(line string) string {
+	return sensitivePatterns.ReplaceAllString(line, "[REDACTED]")
 }

@@ -693,6 +693,12 @@ func (h *Handler) handleConnectResize(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// Non-shell connect sessions have no resize channel; reject the request
+	// explicitly rather than silently dropping the resize and returning 200.
+	if cs.resize == nil {
+		http.Error(w, "resize not supported for this session", http.StatusBadRequest)
+		return
+	}
 	// Drain any stale resize before sending the latest dimensions, so the
 	// newest resize always wins (channel buffer is 1).
 	select {
