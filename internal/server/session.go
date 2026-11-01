@@ -1,6 +1,8 @@
 package server
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -320,7 +322,10 @@ func (s *Session) handleControlMessage(msg *mux.ControlMessage) {
 // channel and waits for the response. Returns the agent's recent log
 // lines or an error on timeout / control stream unavailability.
 func (s *Session) SendLogRequest(lines int) ([]string, error) {
-	requestID := fmt.Sprintf("%d-%d", time.Now().UnixNano(), lines)
+	// Use a random request ID to prevent prediction by a compromised agent.
+	var randBytes [8]byte
+	_, _ = rand.Read(randBytes[:])
+	requestID := fmt.Sprintf("%s-%d", hex.EncodeToString(randBytes[:]), lines)
 
 	// Register the response channel before sending the request.
 	respCh := make(chan []string, 1)
@@ -346,13 +351,15 @@ func (s *Session) SendLogRequest(lines int) ([]string, error) {
 	}
 
 	// Wait for the response with a timeout.
+	timer := time.NewTimer(10 * time.Second)
+	defer timer.Stop()
 	select {
 	case resp, ok := <-respCh:
 		if !ok {
 			return nil, fmt.Errorf("response channel closed")
 		}
 		return resp, nil
-	case <-time.After(10 * time.Second):
+	case <-timer.C:
 		s.pendingLogsMu.Lock()
 		delete(s.pendingLogs, requestID)
 		s.pendingLogsMu.Unlock()

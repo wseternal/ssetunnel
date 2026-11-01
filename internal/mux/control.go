@@ -90,7 +90,7 @@ type TraceEvent struct {
 // LogRequestPayload is the JSON payload for MsgLogRequest messages.
 // stream_id is 0 (agent-level); request_id correlates the response.
 type LogRequestPayload struct {
-	RequestID string `json:"request_id"` // UUID for response correlation
+	RequestID string `json:"request_id"` // opaque correlation key for response correlation
 	Lines     int    `json:"lines"`      // number of recent log lines to return
 }
 

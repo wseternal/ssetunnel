@@ -721,7 +721,8 @@ func (a *API) handleAgentLogs(w http.ResponseWriter, r *http.Request) {
 	// Send the log request via the control channel and wait for the response.
 	logLines, err := target.SendLogRequest(lines)
 	if err != nil {
-		http.Error(w, "failed to retrieve agent logs: "+err.Error(), http.StatusGatewayTimeout)
+		log.Printf("consoleapi: agent logs retrieval failed (agent=%s): %v", agentID, err)
+		http.Error(w, "failed to retrieve agent logs", http.StatusGatewayTimeout)
 		return
 	}
 

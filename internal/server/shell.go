@@ -186,6 +186,9 @@ func (h *Handler) serveShellSSE(w http.ResponseWriter, r *http.Request, f http.F
 	lost, err := ss.Attach(w, f, takeover)
 	if err != nil {
 		log.Printf("shell: attach failed after headers sent (session=%s): %v", ss.ID(), err)
+		// Write an error event so the client knows why the stream is empty
+		// rather than receiving a bare 200 with zero frames.
+		_ = transport.WriteEventFrame(w, f, "error", []byte(err.Error()))
 		return false
 	}
 
@@ -196,7 +199,7 @@ func (h *Handler) serveShellSSE(w http.ResponseWriter, r *http.Request, f http.F
 			log.Printf("shell: detached session %s (agent=%s)", ss.ID(), ss.AgentID())
 		}
 	case <-lost:
-		log.Printf("shell: client attachment ended (writer failure or takeover), ending SSE response (session=%s, agent=%s)", ss.ID(), ss.AgentID())
+		log.Printf("shell: client attachment ended (client lost signal received), ending SSE response (session=%s, agent=%s)", ss.ID(), ss.AgentID())
 	case <-ss.Done():
 		// Backing session died while attached. Wait for the consumer
 		// to finish writing the terminal closed frame — it is the sole

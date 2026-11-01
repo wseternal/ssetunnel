@@ -107,3 +107,12 @@ func (rb *RingBuffer) Len() int {
 func (rb *RingBuffer) Cap() int {
 	return len(rb.buf)
 }
+
+// Evicted reports whether any data has been overwritten since the last
+// Drained call. Unlike Drained, it does not reset the flag — callers
+// use it to log the first overflow without draining the buffer.
+func (rb *RingBuffer) Evicted() bool {
+	rb.mu.Lock()
+	defer rb.mu.Unlock()
+	return rb.evicted
+}

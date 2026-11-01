@@ -600,14 +600,17 @@ func (h *Handler) handleConnectUp(w http.ResponseWriter, r *http.Request) {
 	cs := v.(*connectSession)
 
 	// Verify session ownership: non-admin users can only write to their own sessions.
+	// Fail closed: when cs.userID is 0 (unowned/legacy), only admins may write.
 	sessInfo := UserSessionFromContext(r)
 	if sessInfo == nil && cs.userID != 0 {
 		http.Error(w, "Unauthorized: user session required", http.StatusUnauthorized)
 		return
 	}
-	if sessInfo != nil && !isAdmin(sessInfo) && cs.userID != 0 && sessInfo.UserID != cs.userID {
-		http.Error(w, "access denied", http.StatusForbidden)
-		return
+	if sessInfo != nil && !isAdmin(sessInfo) {
+		if cs.userID == 0 || sessInfo.UserID != cs.userID {
+			http.Error(w, "access denied", http.StatusForbidden)
+			return
+		}
 	}
 
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxUpBody))
@@ -678,14 +681,17 @@ func (h *Handler) handleConnectResize(w http.ResponseWriter, r *http.Request) {
 	}
 	cs := v.(*connectSession)
 	// Verify session ownership: non-admin users can only resize their own sessions.
+	// Fail closed: when cs.userID is 0 (unowned/legacy), only admins may resize.
 	sessInfo := UserSessionFromContext(r)
 	if sessInfo == nil && cs.userID != 0 {
 		http.Error(w, "Unauthorized: user session required", http.StatusUnauthorized)
 		return
 	}
-	if sessInfo != nil && !isAdmin(sessInfo) && cs.userID != 0 && sessInfo.UserID != cs.userID {
-		http.Error(w, "access denied", http.StatusForbidden)
-		return
+	if sessInfo != nil && !isAdmin(sessInfo) {
+		if cs.userID == 0 || sessInfo.UserID != cs.userID {
+			http.Error(w, "access denied", http.StatusForbidden)
+			return
+		}
 	}
 	// Drain any stale resize before sending the latest dimensions, so the
 	// newest resize always wins (channel buffer is 1).

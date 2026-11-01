@@ -53,7 +53,7 @@ type ShellSession struct {
 
 	// mu protects sseWriter, flusher, and rc. The consumer goroutine
 	// acquires this lock after each stream read to check whether a client
-	// is attached and to write SSE frames. The Attach/Detach/Close methods
+	// is attached and to write SSE frames. The Attach/detachWriter/Close methods
 	// hold this lock while swapping the writer. The closed flag is an
 	// atomic.Bool so IsDead() can be read lock-free (avoids nested lock
 	// acquisition in FindByUserAgent and CleanupIdle).
@@ -286,7 +286,7 @@ func (ss *ShellSession) Attach(w io.Writer, f http.Flusher, takeover bool) (<-ch
 		// consumer releases frameMu before it next acquires ss.mu.
 		ss.drainFrameWrite()
 		ss.clearWriterLocked(true)
-		log.Printf("shell: client takeover for session %s (agent=%s)", ss.id, ss.agentID)
+		log.Printf("shell: client takeover for session %s (agent=%s, user=%d)", ss.id, ss.agentID, ss.userID)
 	}
 
 	// Install the writer first, then drain the ring under the same lock.
@@ -308,7 +308,7 @@ func (ss *ShellSession) Attach(w io.Writer, f http.Flusher, takeover bool) (<-ch
 	// untouched, so genuine output is never trimmed.
 	if evicted {
 		if start := safeReplayStart(data); start > 0 {
-			log.Printf("shell: dropped %d truncated bytes from replay (session=%s, agent=%s)", start, ss.id, ss.agentID)
+			log.Printf("shell: dropped %d truncated bytes from replay (session=%s, agent=%s, ring_cap=%d)", start, ss.id, ss.agentID, ss.ring.Cap())
 			data = data[start:]
 		}
 	}
@@ -446,6 +446,17 @@ func (ss *ShellSession) writeAttached(w io.Writer, deadlineErr error, touchActiv
 		return
 	}
 	ss.frameMu.Lock()
+	// Re-check writer identity: a concurrent takeover may have replaced
+	// the writer between the consumer's snapshot (under ss.mu) and this
+	// point. Writing to a finalized ResponseWriter is undefined behaviour,
+	// so skip the write if the writer was replaced.
+	ss.mu.Lock()
+	stale := ss.sseWriter != w
+	ss.mu.Unlock()
+	if stale {
+		ss.frameMu.Unlock()
+		return
+	}
 	err := write()
 	ss.frameMu.Unlock()
 	if err != nil {
@@ -472,6 +483,10 @@ func (ss *ShellSession) outputConsumer(heartbeat time.Duration) {
 	buf := bufferPool.Get().(*[]byte)
 	defer bufferPool.Put(buf)
 
+	// Track whether we've already logged a ring-overflow warning so we
+	// log exactly once per overflow cycle (Drained resets the flag on reattach).
+	prevEvicted := false
+
 	for {
 		// Read from yamux stream with heartbeat deadline.
 		ss.stream.SetReadDeadline(time.Now().Add(heartbeat))
@@ -485,6 +500,11 @@ func (ss *ShellSession) outputConsumer(heartbeat time.Duration) {
 			// would write the same bytes again via WriteFrame (C1 fix).
 			ss.mu.Lock()
 			ss.ring.Write((*buf)[:n])
+			evicted := ss.ring.Evicted()
+			if evicted && !prevEvicted {
+				log.Printf("shell: ring buffer overflowed (session=%s, agent=%s), oldest output evicted", ss.id, ss.agentID)
+			}
+			prevEvicted = evicted
 			ss.lastActivity = time.Now()
 			closed := ss.closed.Load()
 			w := ss.sseWriter
@@ -581,6 +601,8 @@ func (ss *ShellSession) outputConsumer(heartbeat time.Duration) {
 // to the data stream — resize commands go through the control stream.
 func (ss *ShellSession) inputForwarder() {
 	defer ss.Close()
+	log.Printf("shell: input forwarder started (session=%s, agent=%s)", ss.id, ss.agentID)
+	defer log.Printf("shell: input forwarder exited (session=%s, agent=%s)", ss.id, ss.agentID)
 
 	buf := bufferPool.Get().(*[]byte)
 	defer bufferPool.Put(buf)
@@ -596,6 +618,7 @@ func (ss *ShellSession) inputForwarder() {
 		if n > 0 {
 			_, werr := ss.stream.Write((*buf)[:n])
 			if werr != nil {
+				log.Printf("shell: input forward failed (session=%s, agent=%s): %v", ss.id, ss.agentID, werr)
 				return // stream broken
 			}
 		}
@@ -620,6 +643,7 @@ func (ss *ShellSession) inputForwarder() {
 // idempotent and the next event will retry.
 func (ss *ShellSession) resizeForwarder() {
 	defer ss.Close()
+	defer log.Printf("shell: resize forwarder exited (session=%s, agent=%s)", ss.id, ss.agentID)
 	for {
 		select {
 		case ws := <-ss.resizeCh:

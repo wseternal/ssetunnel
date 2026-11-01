@@ -353,3 +353,40 @@ func TestShellSessionListHandler_SortedByAgentID(t *testing.T) {
 		}
 	}
 }
+
+func TestSafeReplayStart(t *testing.T) {
+	tests := []struct {
+		name string
+		data []byte
+		want int
+	}{
+		{"empty", nil, 0},
+		{"clean boundary", []byte("hello"), 0},
+		{"plain text", []byte("ls -la\n"), 0},
+		// BEL characters are consumed as leading noise.
+		{"bel prefix", []byte{0x07, 0x07, 'A'}, 2},
+		{"all bels", []byte{0x07, 0x07, 0x07}, 3},
+		// CSI parameter bytes (0x30-0x3F) followed by a final byte (0x40-0x7E)
+		// indicate a truncated escape sequence.
+		{"csi with final", []byte("1;2;3m"), 6},
+		{"csi sgr", []byte("38;2;255;0;0m"), 13},
+		{"single param + final", []byte("0m"), 2},
+		// Parameter bytes without a final byte: pass through.
+		{"params no final", []byte("123"), 0},
+		// BEL then CSI: BEL consumed, CSI skipped.
+		{"bel then csi", []byte{0x07, '1', 'm'}, 3},
+		// Non-parameter byte at start: clean boundary.
+		{"space start", []byte("  indented"), 0},
+		{"tab start", []byte("\tindented"), 0},
+		// High bytes (UTF-8 continuation): passed through.
+		{"utf8 start", []byte{0xC3, 0xA9}, 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := safeReplayStart(tt.data)
+			if got != tt.want {
+				t.Errorf("safeReplayStart(%q) = %d, want %d", tt.data, got, tt.want)
+			}
+		})
+	}
+}

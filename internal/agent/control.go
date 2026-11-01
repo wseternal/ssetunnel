@@ -212,6 +212,8 @@ func (a *Agent) handleLogRequest(msg *mux.ControlMessage) {
 	a.controlMu.RUnlock()
 	if send != nil {
 		send(respMsg)
+	} else {
+		log.Printf("agent: log response dropped (control stream unavailable): request_id=%s", payload.RequestID)
 	}
 }
 
