@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.13.1](https://github.com/wseternal/ssetunnel/compare/v1.13.0...v1.13.1) (2026-11-01)
+
+
+### Bug Fixes
+
+* **agent:** make getStreamID and verboseTrace available on Windows ([b3751fb](https://github.com/wseternal/ssetunnel/commit/b3751fb58d945272308c21eecffaf839792545a8))
+
 ## [1.13.0](https://github.com/wseternal/ssetunnel/compare/v1.12.0...v1.13.0) (2026-11-01)
 
 
