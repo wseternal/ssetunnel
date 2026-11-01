@@ -222,6 +222,71 @@ const SHELL_THEMES: Record<string, ShellTheme> = {
 };
 const SHELL_THEME_KEYS = Object.keys(SHELL_THEMES);
 
+// ShellDbg is a tiny diagnostic surface for the cloud-shell byte pipeline.
+// Read it from the browser console as `window.__shellDbg` while a freeze is
+// happening. It separates the three failure zones that look identical from
+// the outside: bytes not arriving (frames/dataBytes flat while reads grow on
+// heartbeats), bytes arriving but not rendering (dataBytes grows, writes
+// lag), and input not leaving (keyPosts flat).
+type ShellDbg = {
+  connectedAt: number;
+  reads: number;
+  frames: number;
+  dataBytes: number;
+  writes: number;
+  keyPosts: number;
+  keyBytes: number;
+  lastFrameAt: number;
+  lastWriteAt: number;
+  lastPostAt: number;
+  // recent: last few term.write payloads, only recorded while
+  // window.__shellDbgVerbose === true (plaintext terminal output).
+  recent: string[];
+};
+
+// Shared decoder for the gated recent[] capture. Whole-buffer (non-stream)
+// decodes are independent per call, so one instance avoids per-frame alloc.
+const SHELL_DBG_DECODER = new TextDecoder();
+
+function newShellDbg(): ShellDbg {
+  return {
+    connectedAt: 0, reads: 0, frames: 0, dataBytes: 0, writes: 0,
+    keyPosts: 0, keyBytes: 0, lastFrameAt: 0, lastWriteAt: 0, lastPostAt: 0,
+    recent: [],
+  };
+}
+
+// Lazy accessor: keeps the current counters until a connect resets them.
+function getShellDbg(): ShellDbg {
+  const w = window as unknown as { __shellDbg?: ShellDbg };
+  return (w.__shellDbg ??= newShellDbg());
+}
+
+// Called once per connection so counters describe a single stream rather
+// than everything accumulated since page load.
+function resetShellDbg(): ShellDbg {
+  const dbg = newShellDbg();
+  (window as unknown as { __shellDbg?: ShellDbg }).__shellDbg = dbg;
+  return dbg;
+}
+
+// Opt-in verbose capture. Decoded output is plaintext and may hold secrets,
+// so recent[] is recorded only when a developer sets
+// window.__shellDbgVerbose = true during live triage. Off by default: no
+// per-frame decode/stringify cost and no output retained on the global.
+function shellDbgVerbose(): boolean {
+  return (window as unknown as { __shellDbgVerbose?: boolean }).__shellDbgVerbose === true;
+}
+
+// A 409 usually means the attachment is OUR OWN previous connection, not a
+// second tab: a page refresh or tab close does not cancel the old HTTP/1
+// request, so the server keeps its writer until the next heartbeat write fails
+// (default heartbeat 15 s + 30 s write deadline). Retry a few times spaced past
+// that reap window to recover the refresh, then stop — a genuinely occupied
+// session must not be polled forever.
+const BUSY_RETRY_LIMIT = 3;
+const BUSY_RETRY_DELAY_MS = 20_000;
+
 export default function App() {
   const theme = useTheme();
   const [isLoggedIn, setIsLoggedIn] = useState(false);
@@ -306,6 +371,11 @@ export default function App() {
   const shellAbortRef = useRef<AbortController | null>(null);
   const shellReconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const shellReconnectCountRef = useRef<number>(0);
+  // Counts retries against a session the server reports as busy (409).
+  const shellBusyRetryRef = useRef<number>(0);
+  // Set by the watchdog when the stream went silent; the next connect
+  // asks the server to evict the stale attachment (half-open SSE).
+  const shellTakeoverRef = useRef<boolean>(false);
   const inputDisposableRef = useRef<IDisposable | null>(null);
   const resizeDisposableRef = useRef<IDisposable | null>(null);
   // Stable ref to the latest connectShell callback. Used by the
@@ -365,6 +435,11 @@ export default function App() {
   // Text editor state (Send Text command palette action)
   const [textEditorOpen, setTextEditorOpen] = useState(false);
   const [textEditorContent, setTextEditorContent] = useState('');
+
+  // Agent logs dialog state (Show Agent Logs command palette action)
+  const [agentLogsOpen, setAgentLogsOpen] = useState(false);
+  const [agentLogsLines, setAgentLogsLines] = useState<string[]>([]);
+  const [agentLogsLoading, setAgentLogsLoading] = useState(false);
 
   // Magnifier lens state
   const [magnifierOn, setMagnifierOn] = useState(false);
@@ -536,6 +611,7 @@ export default function App() {
       shellReconnectTimerRef.current = null;
     }
     shellReconnectCountRef.current = 0;
+    shellBusyRetryRef.current = 0;
     // Now terminate the persistent shell session on the server.
     // Await to prevent race where a fast reconnect creates a new session
     // that the still-in-flight DELETE would then kill.
@@ -568,6 +644,7 @@ export default function App() {
     setShellSessionId('');
     setShellPersistentId('');
     setShellReattached(false);
+    shellTakeoverRef.current = false;
     fetchShellSessions();
   }, [fetchShellSessions]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -586,6 +663,7 @@ export default function App() {
       xtermRef.current.dispose();
       xtermRef.current = null;
       fitAddonRef.current = null;
+      delete (window as unknown as { __shellTerm?: Terminal }).__shellTerm;
     }
 
     // Initialize xterm if not already.
@@ -604,6 +682,9 @@ export default function App() {
       fitAddon.fit();
       xtermRef.current = term;
       fitAddonRef.current = fitAddon;
+      // Debug handle: lets the console compare xterm's parsed buffer against
+      // the painted screen during a freeze (see window.__shellDbg).
+      (window as unknown as { __shellTerm?: Terminal }).__shellTerm = term;
     }
 
     const term = xtermRef.current!;
@@ -642,6 +723,10 @@ export default function App() {
     // ends unexpectedly. Consulted in the finally block to decide
     // between auto-reconnect and full cleanup.
     let shouldAutoReconnect = false;
+    // SSE liveness watchdog: detects half-open connections where the
+    // server can no longer deliver data or an error (laptop sleep,
+    // NAT/proxy state drop). Cleared first in the finally block.
+    let stallWatchdog: ReturnType<typeof setInterval> | null = null;
 
     // Generate a random connect session ID.
     const sid = Array.from(crypto.getRandomValues(new Uint8Array(16)))
@@ -650,6 +735,12 @@ export default function App() {
 
     // Build SSE URL — auth via Authorization header (not query param).
     let sseURL = `/console/api/v1/shell/connect?id=${encodeURIComponent(sid)}&agent=${encodeURIComponent(agentID)}`;
+    if (shellTakeoverRef.current) {
+      // The previous stream went silent; evict its stale server-side
+      // attachment (a half-open SSE may never deliver a FIN/RST).
+      sseURL += '&takeover=1';
+      shellTakeoverRef.current = false;
+    }
     if (effectiveReattachId) {
       sseURL += `&reattach=${encodeURIComponent(effectiveReattachId)}`;
     }
@@ -674,15 +765,14 @@ export default function App() {
     // so each reconnect gets a fresh sender with no stale queue.
     let pending = '';
     let inFlight = false;
-    let needsFlush = false;
     // Per-POST timeout: if the upload hangs (half-open TCP, server
     // gone silent), fail fast and auto-reconnect instead of leaving
     // inFlight=true forever and silently dropping subsequent keystrokes.
     const INPUT_POST_TIMEOUT = 10_000;
     const flush = async () => {
       if (inFlight) {
-        // A POST is already running; coalesce into the next flush.
-        needsFlush = true;
+        // A POST is already running; its `while (pending)` loop will pick
+        // up whatever this call just appended. Single-flight invariant.
         return;
       }
       // Drain whatever has accumulated, looping to pick up anything that
@@ -691,7 +781,6 @@ export default function App() {
       while (pending) {
         const data = pending;
         pending = '';
-        needsFlush = false;
         inFlight = true;
         let sendFailed = false;
         // Arm a hard timeout that aborts the entire connection on POST
@@ -738,11 +827,15 @@ export default function App() {
         // stream death). Continuing would re-enqueue into `pending`
         // that nobody will flush.
         if (abort.signal.aborted) return;
-        // If nothing was coalesced during the POST, `pending` is empty and
-        // `needsFlush` is false — the loop exits naturally.
+        // If more input landed during the POST, `pending` is non-empty and
+        // the loop sends it next; otherwise it drains and exits.
       }
     };
     const sendInput = (data: string) => {
+      const d = getShellDbg();
+      d.keyPosts++;
+      d.keyBytes += data.length;
+      d.lastPostAt = Date.now();
       pending += data;
       void flush();
     };
@@ -753,6 +846,25 @@ export default function App() {
     }
     const inputDisposable = term.onData(sendInput);
     inputDisposableRef.current = inputDisposable;
+
+    // Schedule one reconnect attempt. The agent ID is read inside the callback
+    // (N3): if disconnectShell cleared it since scheduling, bail out instead of
+    // reconnecting a shell the user explicitly disconnected. Shared by the
+    // backoff path and the busy-session retry.
+    const scheduleReconnect = (delay: number) => {
+      shellReconnectTimerRef.current = setTimeout(() => {
+        shellReconnectTimerRef.current = null;
+        const agent = shellAgentIDRef.current;
+        if (!agent) return;
+        connectShellRef.current(agent).catch(() => {
+          if (xtermRef.current) {
+            xtermRef.current.writeln('\x1b[31m[Reconnect failed]\x1b[0m');
+          }
+          setShellConnected(false);
+          shellAgentIDRef.current = '';
+        });
+      }, delay);
+    };
 
     // Start SSE stream using fetch (ReadableStream) for full header control.
     try {
@@ -774,6 +886,22 @@ export default function App() {
         });
       }
 
+      // The server refuses a session that already has a writer, before starting
+      // the stream, so this is an explicit "busy" rather than the empty 200 the
+      // browser used to read as a dropped connection.
+      if (resp.status === 409) {
+        const tries = ++shellBusyRetryRef.current;
+        inputDisposable.dispose();
+        if (tries > BUSY_RETRY_LIMIT) {
+          term.writeln('\x1b[33m[This session is open in another tab — close it there first]\x1b[0m');
+          setShellConnected(false);
+          return;
+        }
+        term.writeln(`\x1b[33m[Session busy, retrying ${tries}/${BUSY_RETRY_LIMIT}...]\x1b[0m`);
+        scheduleReconnect(BUSY_RETRY_DELAY_MS);
+        return;
+      }
+
       if (!resp.ok) {
         const errText = await resp.text();
         term.writeln(`\x1b[31m[Error: ${resp.status} ${errText}]\x1b[0m`);
@@ -781,6 +909,7 @@ export default function App() {
         inputDisposable.dispose();
         return;
       }
+      shellBusyRetryRef.current = 0;
 
       // Read the persistent session ID from the response header.
       const persistentId = resp.headers.get('X-SSET-Shell-Session') || '';
@@ -815,12 +944,44 @@ export default function App() {
       const decoder = new TextDecoder();
       let buffer = '';
 
+      // Heartbeats arrive every X-SSET-Heartbeat-Ms (15 s default); every
+      // successful read counts as liveness. After four missed heartbeats
+      // (or 60 s minimum), abort into the normal reconnect + ring-replay
+      // path instead of waiting forever on a silent stream.
+      const heartbeatMs = Number(resp.headers.get('X-SSET-Heartbeat-Ms')) || 15_000;
+      const stallMs = Math.max(60_000, heartbeatMs * 4);
+      // A connection that has been continuously up for one heartbeat interval
+      // is working; only then is it safe to forget past reconnect failures.
+      const stableAfterMs = Math.max(15_000, heartbeatMs);
+      let lastByteAt = Date.now();
+      // Anchored at stream start, NOT at the last byte: heartbeats alone must
+      // not be able to satisfy the stability window.
+      const streamStartedAt = lastByteAt;
+
+      const dbg = resetShellDbg();
+      dbg.connectedAt = Date.now();
+      stallWatchdog = setInterval(() => {
+        if (abort.signal.aborted) return;
+        if (Date.now() - lastByteAt < stallMs) return;
+        shouldAutoReconnect = true;
+        shellTakeoverRef.current = true;
+        term.writeln('\r\n\x1b[33m[Output stalled — reconnecting...]\x1b[0m');
+        abort.abort();
+      }, 10_000);
+
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-        // Reset reconnect backoff counter on successful data receipt
-        // (W3: a healthy connection forgets past reconnect failures).
-        shellReconnectCountRef.current = 0;
+        dbg.reads++;
+        lastByteAt = Date.now();
+        // Forget past reconnect failures only once THIS connection has stayed
+        // up for a full stability window. The old rule reset the counter on
+        // every read — heartbeats included — so a flapping session that died
+        // after receiving a single byte reset backoff each cycle and never
+        // climbed past its first ~1 s delay.
+        if (shellReconnectCountRef.current > 0 && Date.now() - streamStartedAt >= stableAfterMs) {
+          shellReconnectCountRef.current = 0;
+        }
         buffer += decoder.decode(value, { stream: true });
 
         // Process complete SSE events.
@@ -849,7 +1010,16 @@ export default function App() {
             for (let i = 0; i < binary.length; i++) {
               bytes[i] = binary.charCodeAt(i);
             }
+            dbg.frames++;
+            dbg.dataBytes += bytes.length;
+            dbg.lastFrameAt = Date.now();
             term.write(bytes);
+            dbg.writes++;
+            dbg.lastWriteAt = Date.now();
+            if (shellDbgVerbose()) {
+              dbg.recent.push(`${bytes.length}b ${JSON.stringify(SHELL_DBG_DECODER.decode(bytes)).slice(0, 80)}`);
+              if (dbg.recent.length > 12) dbg.recent.shift();
+            }
           } catch {
             // If not valid base64, write as plain text (fallback).
             term.write(evt.data);
@@ -873,6 +1043,10 @@ export default function App() {
         term.writeln(`\r\n\x1b[31m[Connection error: ${e} — reconnecting...]\x1b[0m`);
       }
     } finally {
+      if (stallWatchdog !== null) {
+        clearInterval(stallWatchdog);
+        stallWatchdog = null;
+      }
       if (inputDisposableRef.current) {
         inputDisposableRef.current.dispose();
         inputDisposableRef.current = null;
@@ -903,25 +1077,12 @@ export default function App() {
           shellReconnectCountRef.current = 0;
           fetchShellSessions();
         } else {
-          const delay = Math.min(1000 * Math.pow(2, attempt), 30000) + Math.random() * 500;
-          shellReconnectTimerRef.current = setTimeout(() => {
-            shellReconnectTimerRef.current = null;
-            // Read agent ID inside callback (N3): if disconnectShell
-            // cleared it since scheduling, bail out instead of
-            // reconnecting a shell the user explicitly disconnected.
-            const agent = shellAgentIDRef.current;
-            if (!agent) return;
-            connectShellRef.current(agent).catch(() => {
-              if (xtermRef.current) {
-                xtermRef.current.writeln('\x1b[31m[Reconnect failed]\x1b[0m');
-              }
-              setShellConnected(false);
-              shellAgentIDRef.current = '';
-            });
-          }, delay);
+          scheduleReconnect(Math.min(1000 * Math.pow(2, attempt), 30000) + Math.random() * 500);
         }
       } else {
-        // Explicit disconnect (user action or disconnectShell call).
+        // No retry: either the user disconnected (disconnectShell clears these
+        // refs) or the request failed with a status the client deliberately does
+        // not retry, such as a server error above.
         setShellPaletteOpen(false);
         setShellConnected(false);
         setShellSessionId('');
@@ -1420,6 +1581,30 @@ export default function App() {
     });
   }, []);
 
+  // Fetch agent logs from the control channel via the API.
+  const fetchAgentLogs = useCallback(async () => {
+    if (!shellAgent) return;
+    setAgentLogsLoading(true);
+    setAgentLogsLines([]);
+    setAgentLogsOpen(true);
+    try {
+      const res = await fetch(
+        `/console/api/v1/agent-logs?agent_id=${encodeURIComponent(shellAgent)}&lines=100`,
+        { headers: authHeaders() },
+      );
+      if (res.ok) {
+        const data = await res.json();
+        setAgentLogsLines(data.lines || []);
+      } else {
+        setAgentLogsLines([`Error: ${res.status} ${res.statusText}`]);
+      }
+    } catch (e) {
+      setAgentLogsLines([`Fetch failed: ${e}`]);
+    } finally {
+      setAgentLogsLoading(false);
+    }
+  }, [shellAgent, authHeaders]);
+
   // Shell command palette action handler
   const handleShellPaletteAction = useCallback((actionId: string) => {
     if (!shellConnected) return; // guard against double-disconnect
@@ -1428,9 +1613,10 @@ export default function App() {
     switch (actionId) {
       case 'toggle-theme': cycleShellTheme(); break;
       case 'toggle-fullscreen': toggleShellFullscreen(); break;
+      case 'agent-logs': fetchAgentLogs(); break;
       case 'disconnect': disconnectShell(); break;
     }
-  }, [cycleShellTheme, toggleShellFullscreen, disconnectShell, shellConnected]);
+  }, [cycleShellTheme, toggleShellFullscreen, fetchAgentLogs, disconnectShell, shellConnected]);
 
   // Shell command palette keyboard handler.
   // Registered in capture phase on window so it fires BEFORE xterm.js's
@@ -1473,6 +1659,7 @@ export default function App() {
         switch (e.key.toLowerCase()) {
           case 't': handleShellPaletteAction('toggle-theme'); return;
           case 'f': handleShellPaletteAction('toggle-fullscreen'); return;
+          case 'l': handleShellPaletteAction('agent-logs'); return;
           case 'q': handleShellPaletteAction('disconnect'); return;
         }
         return;
@@ -1624,6 +1811,7 @@ export default function App() {
             {[
               { id: 'toggle-theme', label: 'Toggle Theme', shortcut: 'T' },
               { id: 'toggle-fullscreen', label: 'Toggle Fullscreen', shortcut: 'F' },
+              { id: 'agent-logs', label: 'Show Agent Logs', shortcut: 'L' },
               { id: 'disconnect', label: 'Disconnect', shortcut: 'Q' },
             ].map((item) => (
               <Box
@@ -1658,6 +1846,87 @@ export default function App() {
               <Typography variant="caption" color="text.secondary">
                 Press <strong>Esc</strong> to close • <strong>{navigator.platform.includes('Mac') ? '⌘' : 'Ctrl'}</strong> to toggle
               </Typography>
+            </Box>
+          </Paper>
+        </Box>
+      )}
+
+      {/* Agent logs dialog overlay */}
+      {agentLogsOpen && (
+        <Box
+          sx={{
+            position: 'fixed',
+            inset: 0,
+            zIndex: 1300,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            bgcolor: 'rgba(0, 0, 0, 0.5)',
+          }}
+          onClick={() => setAgentLogsOpen(false)}
+        >
+          <Paper
+            elevation={12}
+            sx={{
+              width: '80%',
+              maxWidth: 900,
+              maxHeight: '80vh',
+              display: 'flex',
+              flexDirection: 'column',
+              borderRadius: 2,
+              overflow: 'hidden',
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <Box sx={{ px: 2.5, py: 1.5, borderBottom: 1, borderColor: 'divider', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+              <Box>
+                <Typography variant="subtitle2">Agent Logs</Typography>
+                <Typography variant="caption" color="text.secondary">
+                  {shellAgent} — {agentLogsLines.length} lines
+                </Typography>
+              </Box>
+              <Box sx={{ display: 'flex', gap: 1 }}>
+                <IconButton
+                  size="small"
+                  onClick={fetchAgentLogs}
+                  disabled={agentLogsLoading}
+                  title="Refresh"
+                >
+                  <span style={{ fontSize: 18 }}>↻</span>
+                </IconButton>
+                <IconButton size="small" onClick={() => setAgentLogsOpen(false)} title="Close">
+                  <span style={{ fontSize: 18 }}>×</span>
+                </IconButton>
+              </Box>
+            </Box>
+            <Box
+              sx={{
+                flex: 1,
+                overflow: 'auto',
+                bgcolor: 'grey.900',
+                px: 2,
+                py: 1.5,
+                fontFamily: 'monospace',
+                fontSize: '0.75rem',
+                lineHeight: 1.6,
+                color: 'grey.100',
+                whiteSpace: 'pre-wrap',
+                wordBreak: 'break-all',
+              }}
+            >
+              {agentLogsLoading ? (
+                <Typography variant="body2" color="grey.400" sx={{ fontFamily: 'monospace' }}>
+                  Loading...
+                </Typography>
+              ) : agentLogsLines.length === 0 ? (
+                <Typography variant="body2" color="grey.400" sx={{ fontFamily: 'monospace' }}>
+                  No log lines available.
+                </Typography>
+              ) : (
+                agentLogsLines.map((line, i) => (
+                  <Box key={i} component="div">{line}</Box>
+                ))
+              )}
             </Box>
           </Paper>
         </Box>
@@ -1796,7 +2065,11 @@ export default function App() {
     return () => {
       if (shellAbortRef.current) shellAbortRef.current.abort();
       if (shellReconnectTimerRef.current) clearTimeout(shellReconnectTimerRef.current);
-      if (xtermRef.current) { xtermRef.current.dispose(); xtermRef.current = null; }
+      if (xtermRef.current) {
+        xtermRef.current.dispose();
+        xtermRef.current = null;
+        delete (window as unknown as { __shellTerm?: Terminal }).__shellTerm;
+      }
     };
   }, []);
 

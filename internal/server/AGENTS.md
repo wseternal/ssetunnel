@@ -31,7 +31,7 @@ Top-level server. Owns the `Registry`, `Handler`, and optional `auth.Store` and 
 HTTP handler serving tunnel endpoints:
 - **`/events?id=<sessionID>`**: Opens an SSE stream for the agent. Creates a `Session`, registers it, attaches yamux, and streams downstream bytes as base64-encoded SSE frames with heartbeat keepalives. Polls for `event: tune` frames between reads (capped at 1 s interval) and injects them as JSON control frames. Records session start/end metrics.
 - **`/up`**: Accepts upstream POST batches with `X-SSET-Session` and `X-SSET-Seq` headers. Validates session, negotiates gzip, pushes to session's reorder window or serial pipe. Records POST metrics (size, RTT) on success, error metrics on rejection.
-- **`/connect?id=<sessionID>&agent=<agentID>&target=<target>`**: Opens an SSE stream for connect clients. Short-polls for agent availability (3 s timeout, 25 ms poll). Finds the target agent's yamux session, opens a stream, bridges bidirectionally. Upstream goroutine multiplexes POST data and PTY resize events (length-prefixed JSON: `0x00 | uint16be(len) | JSON`) into the yamux stream. Agent session death is detected promptly via `sess.Done()` monitor goroutine.
+- **`/connect?id=<sessionID>&agent=<agentID>&target=<target>`**: Opens an SSE stream for connect clients. Short-polls for agent availability (3 s timeout, 25 ms poll). Finds the target agent's yamux session, opens a stream, bridges bidirectionally. The upstream goroutine is a plain byte pipe from POST data into the yamux stream (no resize multiplexing; PTY resize is shell-only and travels the control stream). Agent session death is detected promptly via `sess.Done()` monitor goroutine.
 - **`/connect-up`**: Accepts upstream POST batches from connect clients, writes to the connect session's up pipe. Rejects `X-SSET-Flags` (no reorder window on connect path). Records connect upstream metrics.
 - **`handleConnectResize`** (not registered in handler mux): Accepts PTY resize POST requests (`{id, cols, rows}`), sends to the connect session's resize channel. Mounted externally by `consoleserver` at `/console/api/v1/shell/resize`.
 - **`/probe`**: Diagnostic endpoint — reads and discards body, returns 200.
@@ -51,9 +51,11 @@ One tunnel session: a `net.Conn` whose `Read` yields upstream POST bytes and `Wr
 Thread-safe `map[string]*Session`. `Replace` closes stale sessions on reconnect. `Range` iterates under a copy. `CloseAll` tears down all sessions on shutdown.
 
 ### Cloud Shell Handlers
-- **`ShellConnectHandler()`**: Wraps `handleConnect` with forced `target=__shell__` via context key. User-scoped: non-admin users can only shell into their own agents.
+- **`ShellConnectHandler()`**: Serves the cloud shell SSE downstream with its own persistent-session flow (`shellCreate` opens a yamux stream and spawns a `ShellSession`; `shellReattach` re-attaches to a live one). It never routes through `handleConnect`, and `__shell__` is forced by `shellCreate` writing the target header itself. User-scoped: non-admin users can only shell into their own agents.
 - **`ShellConnectUpHandler()`**: Delegates to `handleConnectUp`.
 - **`ShellConnectResizeHandler()`**: Delegates to `handleConnectResize`.
+- Shell SSE responses carry `X-SSET-Heartbeat-Ms` so the frontend can size its inactivity watchdog from the configured `--heartbeat`.
+- **Client-writer failure**: `ShellSession.Attach` returns a per-attach `clientLost` channel. `outputConsumer` closes it (via `detachWriter`, writer-identity guarded) on any SSE write error/deadline; `shellCreate`/`shellReattach` return on it, ending the SSE response so the browser reconnects and replays the ring buffer. The session, yamux stream, and input path stay alive — a failed SSE writer must never leave the handler parked on an open response. A reattach with `takeover=1` (sent by the frontend after its watchdog fires) evicts a stale attachment whose half-open SSE will never deliver a FIN; without the flag `serveShellSSE` answers **409 Conflict before flushing any SSE header**, so a second live client is told it is busy instead of receiving a 200 with an empty body (which the browser read as a dropped stream and retried). A `SetWriteDeadline` failure with `http.ErrNotSupported` means the writer cannot express deadlines, not that the client died, and must not detach it.
 
 ### Remote Desktop Handlers
 - **`RemoteAppConnectHandler()`**: Wraps `handleRemoteApp` with forced empty target. User-scoped: non-admin users can only access their own agents. Requires `agent` query parameter.
@@ -74,9 +76,9 @@ Thread-safe `map[string]*Session`. `Replace` closes stale sessions on reconnect.
 1. Parse `id`, `agent`, `target` from query params
 2. Short-poll for agent yamux session (3 s timeout)
 3. Validate target against agent config's `allowed_targets` (if auth enabled, skipped for `__shell__`)
-4. Open yamux stream, write target header if dynamic target mode (or forced via context)
-5. Create `connectSession` with up pipe + resize channel, store in `connectSessions` map
-6. Bridge bidirectionally: pipe+resize→stream (goroutine), stream→SSE (main loop)
+4. Open yamux stream, write target header if dynamic target mode
+5. Create `connectSession` with up pipe (resize nil), store in `connectSessions` map
+6. Bridge bidirectionally: pipe→stream (goroutine, plain byte pipe), stream→SSE (main loop)
 7. Monitor agent session death via `sess.Done()` goroutine
 
 All validation happens **before** opening the stream, so errors are reported as HTTP errors.
@@ -95,4 +97,4 @@ All validation happens **before** opening the stream, so errors are reported as 
 * **Validation before stream**: All auth/session/target checks must complete before opening the yamux stream.
 * **Agent routing**: When `agent_id` is provided, use `findYamuxByAgentID` for exact match; otherwise first-match via `findYamux`.
 * **Connect path has no reorder window**: Concurrent POSTs are not supported on `/connect-up`; `X-SSET-Flags` are rejected.
-* **Resize multiplexing**: The upstream goroutine alternates between reading from the up pipe (with 100 ms deadline) and checking the resize channel, ensuring resize events are delivered promptly even during idle periods.
+* **Shell resize over the control stream**: PTY resize for cloud-shell sessions is sent to the agent over the dedicated control stream (`resizeForwarder` → `SendControl`), never interleaved on the data stream. The ephemeral connect path carries no resize (its `connectSession.resize` is nil).

@@ -170,7 +170,15 @@ Connect clients pass `agent` and `target` as HTTP query parameters on `GET /conn
 Sessions that survived past the 10 s health threshold reset the backoff to 0 — a drop after long uptime is a network event, not a flapping server, so retry immediately.
 
 ### Cloud Shell (`__shell__` Target)
-The console frontend can open a browser-based shell. The server's `ShellConnectHandler` forces `target=__shell__` via a context key (bypassing agent config validation). The agent detects `__shell__` and spawns a local shell with PTY instead of dialing TCP. Resize events are sent as length-prefixed JSON (`0x00 | uint16be(len) | JSON`) on the yamux stream.
+The console frontend can open a browser-based shell. The server's `ShellConnectHandler` forces `target=__shell__` via a context key (bypassing agent config validation). The agent detects `__shell__` and spawns a local shell with PTY instead of dialing TCP. Resize commands travel on the agent's control stream (see ADR-001), not the data stream.
+
+### Cloud Shell Output Freeze (vim)
+Two independent causes lived under one symptom (vim opens, renders once, then the screen freezes while keys still reach vim):
+
+1. **Confirmed cause of the vim freeze — a frontend build bug.** esbuild's default build target miscompiled a function-local TypeScript enum inside xterm.js's `requestMode`, dropping its variable declaration. The first DECRQM (`ESC [ ? … $ p`) that vim sends threw `ReferenceError: r is not defined` inside xterm's async write loop, wedging the write buffer forever. Fix: `build.target: 'es2022'` in `frontend/console/vite.config.ts`. **Do not lower `build.target` without re-checking the built bundle for `void 0||(<name>={})` enum sites.**
+2. **Separate permanence bug (hardened).** The shell's output (SSE) and input (POST) use independent connections. A dead output writer used to be detached silently while the handler kept the response open. `Attach` now returns a per-attach `clientLost` channel; handlers select on it and return, ending the response so the browser reconnects and replays the ring buffer. The frontend watchdog aborts after `max(60 s, 4 × X-SSET-Heartbeat-Ms)` of silence and reattaches with `takeover=1`. Never clear an SSE writer without terminating its response. The shell keeps a single writer per session: a second client that does not ask for a takeover is answered **409 Conflict before any SSE header is flushed** — a 200 with an empty body is indistinguishable from a dropped stream and made clients retry. A writer that cannot express `SetWriteDeadline` (`http.ErrNotSupported`) is not a dead client and must not be detached.
+
+Diagnosis instruments: `window.__shellDbg` (byte-pipeline counters) and `window.__shellTerm` (xterm handle) separate delivery, render-loop, and input stalls. See `docs/rca/001-cloud-shell-output-freeze.md` and `docs/guide/001-frozen-streaming-ui-playbook.md`.
 
 ### Auto-Tuning
 The `AutoTuner` evaluates agents every 30 s: throughput saturation adjusts batch size (4 KiB–1 MiB), p95 latency adjusts concurrency (1–4), and bandwidth level toggles gzip. Decisions are pushed via SSE `event: tune` control frames. Agents apply batch-size and compress changes live; concurrency changes are deferred to next reconnect. The tuner enforces a 2-minute cooldown between decisions per agent.

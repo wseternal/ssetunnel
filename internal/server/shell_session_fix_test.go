@@ -16,7 +16,7 @@ import (
 func TestShellSession_DoneClosedAfterClose(t *testing.T) {
 	ss := &ShellSession{
 		id: "done-1", agentID: "a", userID: 1,
-		ring: NewRingBuffer(64), wakeup: make(chan struct{}, 1), done: make(chan struct{}),
+		ring: NewRingBuffer(64), done: make(chan struct{}),
 		createdAt: time.Now(), lastActivity: time.Now(),
 	}
 	// Pre-condition: Done is open.
@@ -48,14 +48,14 @@ func TestShellSession_DoneClosedAfterClose(t *testing.T) {
 func TestShellSession_AttachNoByteSkip(t *testing.T) {
 	ss := &ShellSession{
 		id: "atomic-1", agentID: "a", userID: 1,
-		ring: NewRingBuffer(256), wakeup: make(chan struct{}, 1), done: make(chan struct{}),
+		ring: NewRingBuffer(256), done: make(chan struct{}),
 		createdAt: time.Now(), lastActivity: time.Now(),
 	}
 	// Pre-populate the ring with known bytes.
 	ss.ring.Write([]byte("PRE-ATTACH"))
 
 	var buf bytes.Buffer
-	if err := ss.Attach(&buf, &nopFlusher{}); err != nil {
+	if _, err := ss.Attach(&buf, &nopFlusher{}, false); err != nil {
 		t.Fatalf("Attach: %v", err)
 	}
 
@@ -88,10 +88,9 @@ func TestShellSession_AttachNoByteSkip(t *testing.T) {
 func TestShellSession_ResizeForwarderSurvivesTransientError(t *testing.T) {
 	ss := &ShellSession{
 		id: "resize-survive-1", agentID: "a", userID: 1,
-		ring:     NewRingBuffer(64),
-		wakeup:   make(chan struct{}, 1),
-		done:     make(chan struct{}),
-		resizeCh: make(chan windowSize, 2),
+		ring:      NewRingBuffer(64),
+		done:      make(chan struct{}),
+		resizeCh:  make(chan windowSize, 2),
 		createdAt: time.Now(), lastActivity: time.Now(),
 		// agentSess is nil — simulates control stream not yet ready.
 	}

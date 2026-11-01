@@ -655,6 +655,50 @@ func TestConnGzipWire(t *testing.T) {
 	}
 }
 
+// TestConnApplyTuneGzipOnSerialIsIgnored: a server auto-tune that enables
+// compression must not make a serial (non-windowed) session send the gzip
+// flag. The server rejects gzip on a non-windowed session with 400, which
+// fails the conn fast; the agent's ApplyTune is the enforcement point that
+// knows the negotiated concurrency, so it must clamp compress to off there.
+func TestConnApplyTuneGzipOnSerialIsIgnored(t *testing.T) {
+	t.Parallel()
+	srv, reg := setup(t, time.Hour)
+	rt := &recordingRT{}
+	c := dialCfg(t, srv, transport.Config{
+		SessionID:    "tune-serial",
+		Client:       &http.Client{Transport: rt},
+		MaxBatchSize: 64 << 10,
+		Concurrency:  1, // serial: no reorder window, gzip not allowed on the wire
+	})
+	defer c.Close()
+	sess := waitSession(t, reg, "tune-serial")
+
+	// The tuner pushes compress=true to this already-connected serial agent.
+	c.ApplyTune(0, true)
+
+	payload := bytes.Repeat([]byte("compress me please. "), 3400)[:64<<10]
+	if _, err := c.Write(payload); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	got := make([]byte, len(payload))
+	sess.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if _, err := io.ReadFull(sess, got); err != nil {
+		t.Fatalf("ReadFull: %v (session likely died on a gzip-flagged POST)", err)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Fatal("server-side bytes differ from payload")
+	}
+	posts := rt.snapshot()
+	if len(posts) == 0 {
+		t.Fatal("no POST recorded")
+	}
+	for _, p := range posts {
+		if p.flags != "" {
+			t.Fatalf("serial session sent flag %q after ApplyTune(compress=true); want none", p.flags)
+		}
+	}
+}
+
 // TestConnCloseHungPOSTConcurrent: cancel-first Close must not hang even
 // with all 4 workers parked in unanswered POSTs (plan decision 9).
 func TestConnCloseHungPOSTConcurrent(t *testing.T) {

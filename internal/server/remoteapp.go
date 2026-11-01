@@ -2,7 +2,6 @@ package server
 
 import (
 	"bytes"
-	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -49,13 +48,7 @@ func (h *Handler) RemoteAppConnectHandler() http.Handler {
 			}
 		}
 
-		// Force target to __remote_app__ via context key.
-		q := r.URL.Query()
-		q.Set("target", "")
-		r.URL.RawQuery = q.Encode()
-
-		ctx := context.WithValue(r.Context(), forcedTargetKey, TargetRemoteApp)
-		h.handleRemoteApp(w, r.WithContext(ctx))
+		h.handleRemoteApp(w, r)
 	})
 }
 
@@ -145,12 +138,10 @@ func (h *Handler) handleRemoteApp(w http.ResponseWriter, r *http.Request) {
 		ownerID = sessInfo.UserID
 	}
 	cs := &connectSession{
-		id:      id,
 		agentID: agentID,
 		userID:  ownerID,
 		up:      transport.NewPipe(connectUpPipeCap),
 		resize:  nil, // remote app does not use PTY resize; nil-channel is safe in select
-		cancel:  func() {},
 	}
 	bridgeDone := make(chan struct{})
 	h.connectSessions.Store(id, cs)
@@ -388,6 +379,7 @@ func (h *Handler) handleRemoteAppUp(w http.ResponseWriter, r *http.Request) {
 	cs := v.(*connectSession)
 
 	// Verify session ownership: non-admin users can only write to their own sessions.
+	// Fail closed: when cs.userID is 0 (unowned/legacy), only admins may write.
 	// When auth is disabled, UserSessionMiddleware injects a synthetic admin with
 	// UserID=0, so sessInfo is never nil here.
 	sessInfo := UserSessionFromContext(r)
@@ -396,9 +388,11 @@ func (h *Handler) handleRemoteAppUp(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Unauthorized: user session required", http.StatusUnauthorized)
 		return
 	}
-	if sessInfo != nil && !isAdmin(sessInfo) && cs.userID != 0 && sessInfo.UserID != cs.userID {
-		http.Error(w, "access denied", http.StatusForbidden)
-		return
+	if sessInfo != nil && !isAdmin(sessInfo) {
+		if cs.userID == 0 || sessInfo.UserID != cs.userID {
+			http.Error(w, "access denied", http.StatusForbidden)
+			return
+		}
 	}
 
 	// Reject X-SSET-Flags (no reorder window on remoteapp connect-up).

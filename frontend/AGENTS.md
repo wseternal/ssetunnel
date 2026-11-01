@@ -74,10 +74,13 @@ Output goes to `frontend/console/dist/`, which is embedded by `frontend.go`.
 
 #### Failure Handling
 - Server emits `event: closed` on backing-session death (agent disconnect, stream error, explicit kill); the frontend auto-reconnects with exponential backoff (1 s → 30 s cap, max 10 attempts) instead of freezing
+- **SSE inactivity watchdog**: every successful stream read (including heartbeat comments) refreshes a last-byte timestamp; after `max(60 s, 4 × X-SSET-Heartbeat-Ms)` of silence the connection is aborted into the normal reconnect + ring-replay path and the next connect sends `takeover=1` so the server evicts the stale half-open attachment. This catches laptop-sleep / NAT-proxy state drops where neither data nor an error is ever delivered
+- Server also ends the SSE response when its writer fails, so clients that can see the close reconnect immediately instead of waiting for the watchdog
 - Input POSTs have a 10 s hard timeout (`AbortController`) that aborts the connection on hang and triggers auto-reconnect
 - Resize POST failures are logged via `console.warn` for diagnostics
 - Ctrl-D / `exit` / `logout` interception removed — raw PTY bytes belong to the remote shell (Ctrl-D is vim's half-page-down; `exit` typed inside psql or nested SSH is legitimate input)
-- Reconnect backoff counter resets on successful data receipt; explicit user disconnect clears the pending reconnect timer and agent ref before abort so the scheduled callback bails out
+- Reconnect backoff counter resets only after a stream has been continuously up for one heartbeat interval (`stableAfterMs`, measured from stream start) — resetting on every received chunk, heartbeats included, pinned backoff at its first ~1 s delay so a flapping session never backed off. Explicit user disconnect clears the pending reconnect timer and agent ref before abort so the scheduled callback bails out
+- A 409 on connect means the session already has a writer. The client retries a bounded number of times (3 × 20 s) because that writer is usually its own previous connection after a page refresh, which the server only reaps when the next heartbeat write fails; it then stops with an "open in another tab" message rather than polling forever
 
 ### Metrics Visualization
 - Overview cards: active agents, upload/download throughput, error rate
