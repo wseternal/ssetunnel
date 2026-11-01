@@ -15,6 +15,14 @@ export default defineConfig({
   plugins: [react(), viteSingleFile()],
   build: {
     cssCodeSplit: false,
+    // esbuild's default build target lowers TypeScript enums inside methods
+    // to an IIFE and, together with minify's dead-code pass, drops the enum
+    // variable declaration — emitting `void 0||(r={})` with no `var r`. In the
+    // strict-mode bundle the first DECRQM (`ESC [ ? … $ p`) from vim then
+    // throws `ReferenceError: r is not defined` inside xterm's async write
+    // loop, permanently wedging the terminal (frozen screen, live input).
+    // es2022 keeps the declaration (`let r;`) and still minifies.
+    target: 'es2022',
   },
   server: {
     port: 3000,
