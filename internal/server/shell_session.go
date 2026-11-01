@@ -445,18 +445,17 @@ func (ss *ShellSession) writeAttached(w io.Writer, deadlineErr error, touchActiv
 		ss.detachWriter(w, touchActivity)
 		return
 	}
-	ss.frameMu.Lock()
-	// Re-check writer identity: a concurrent takeover may have replaced
-	// the writer between the consumer's snapshot (under ss.mu) and this
-	// point. Writing to a finalized ResponseWriter is undefined behaviour,
-	// so skip the write if the writer was replaced.
+	// Snapshot writer identity under ss.mu before acquiring frameMu.
+	// We cannot hold ss.mu while acquiring frameMu: Attach() holds ss.mu
+	// and calls drainFrameWrite() which acquires frameMu, so acquiring
+	// both locks here in reversed order would deadlock.
 	ss.mu.Lock()
 	stale := ss.sseWriter != w
 	ss.mu.Unlock()
 	if stale {
-		ss.frameMu.Unlock()
 		return
 	}
+	ss.frameMu.Lock()
 	err := write()
 	ss.frameMu.Unlock()
 	if err != nil {
@@ -643,6 +642,7 @@ func (ss *ShellSession) inputForwarder() {
 // idempotent and the next event will retry.
 func (ss *ShellSession) resizeForwarder() {
 	defer ss.Close()
+	log.Printf("shell: resize forwarder started (session=%s, agent=%s)", ss.id, ss.agentID)
 	defer log.Printf("shell: resize forwarder exited (session=%s, agent=%s)", ss.id, ss.agentID)
 	for {
 		select {
