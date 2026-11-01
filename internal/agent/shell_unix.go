@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"github.com/creack/pty"
-	"github.com/hashicorp/yamux"
 	"github.com/wseternal/ssetunnel/internal/mux"
 )
 
@@ -205,19 +204,4 @@ func (sh *shellHandler) resizeLoop() {
 	if sh.verbose {
 		verboseTrace("resize loop ended: stream=%d (channel closed)", sh.streamID)
 	}
-}
-
-// getStreamID extracts the yamux stream ID from a net.Conn, which may
-// be wrapped in a readerConn. Returns 0 if the underlying type is not
-// a yamux stream.
-func getStreamID(stream net.Conn) uint32 {
-	if rc, ok := stream.(*readerConn); ok {
-		if ys, ok := rc.Conn.(*yamux.Stream); ok {
-			return ys.StreamID()
-		}
-	}
-	if ys, ok := stream.(*yamux.Stream); ok {
-		return ys.StreamID()
-	}
-	return 0
 }
