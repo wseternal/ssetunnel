@@ -2,6 +2,9 @@ package sdk
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -91,14 +94,87 @@ func NewConsumer(serverURL, authToken string, httpClient *http.Client) *Consumer
 // epoch and module revisions in the result must be used for subsequent
 // invocations — stale epochs are rejected with a 409 Conflict.
 func (c *Consumer) Discover(ctx context.Context, agentID string) (*Catalog, error) {
-	// Implementation in Task 13 (consumer SDK).
-	return nil, ErrNotImplemented
+	url := fmt.Sprintf("%s/console/api/v1/modules?agent=%s", c.serverURL, agentID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+	c.setAuth(req)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("discover: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, ParseErrorResponse(resp)
+	}
+
+	var entries []moduleEntryJSON
+	if err := json.NewDecoder(resp.Body).Decode(&entries); err != nil {
+		return nil, fmt.Errorf("decode catalog: %w", err)
+	}
+
+	catalog := &Catalog{
+		AgentID:     agentID,
+		Modules:     make([]ModuleEntry, 0, len(entries)),
+		PublishedAt: time.Now(),
+	}
+	for _, e := range entries {
+		catalog.Modules = append(catalog.Modules, ModuleEntry{
+			ModuleID:       e.ModuleID,
+			ServiceName:    e.ServiceName,
+			ServiceVersion: e.ServiceVersion,
+			Revision:       e.Revision,
+			Health: Health{
+				Status: HealthStatus(e.Health),
+			},
+		})
+	}
+	return catalog, nil
+}
+
+// moduleEntryJSON is the JSON structure returned by the discovery API.
+type moduleEntryJSON struct {
+	ModuleID       string `json:"module_id"`
+	ServiceName    string `json:"service_name"`
+	ServiceVersion string `json:"service_version"`
+	Revision       string `json:"revision"`
+	Health         string `json:"health"`
+	HasUI          bool   `json:"has_ui"`
 }
 
 // Contract fetches the full OpenAPI YAML for the specified module revision.
 func (c *Consumer) Contract(ctx context.Context, ref ModuleRef) (*Contract, error) {
-	// Implementation in Task 13 (consumer SDK).
-	return nil, ErrNotImplemented
+	url := fmt.Sprintf("%s/console/api/v1/modules/openapi/%s/%s",
+		c.serverURL, ref.AgentID, ref.ModuleID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+	c.setAuth(req)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("contract: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, ParseErrorResponse(resp)
+	}
+
+	yaml, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read openapi: %w", err)
+	}
+
+	return &Contract{
+		ModuleRef:   ref,
+		OpenAPIYAML: yaml,
+		RetrievedAt: time.Now(),
+	}, nil
 }
 
 // Invoke sends an HTTP request to the module identified by ref. The
@@ -108,14 +184,84 @@ func (c *Consumer) Contract(ctx context.Context, ref ModuleRef) (*Contract, erro
 //
 // The caller is responsible for closing resp.Body.
 func (c *Consumer) Invoke(ctx context.Context, ref ModuleRef, req *http.Request) (*http.Response, error) {
-	// Implementation in Task 13 (consumer SDK).
-	return nil, ErrNotImplemented
+	// Build the invocation URL.
+	path := req.URL.Path
+	if path == "" {
+		path = "/"
+	}
+	url := fmt.Sprintf("%s/console/api/v1/modules/invoke/%s/%s%s",
+		c.serverURL, ref.AgentID, ref.ModuleID, path)
+	if req.URL.RawQuery != "" {
+		url += "?" + req.URL.RawQuery
+	}
+
+	invReq, err := http.NewRequestWithContext(ctx, req.Method, url, req.Body)
+	if err != nil {
+		return nil, fmt.Errorf("create invocation request: %w", err)
+	}
+
+	// Copy headers.
+	for key, values := range req.Header {
+		for _, v := range values {
+			invReq.Header.Add(key, v)
+		}
+	}
+	c.setAuth(invReq)
+
+	// Add correlation ID if not present.
+	if invReq.Header.Get("X-Correlation-ID") == "" {
+		invReq.Header.Set("X-Correlation-ID", generateClientCorrelationID())
+	}
+
+	resp, err := c.httpClient.Do(invReq)
+	if err != nil {
+		return nil, fmt.Errorf("invoke: %w", err)
+	}
+
+	if resp.StatusCode >= 400 {
+		defer resp.Body.Close()
+		return nil, ParseErrorResponse(resp)
+	}
+
+	return resp, nil
+}
+
+// generateClientCorrelationID creates a client-side correlation ID.
+func generateClientCorrelationID() string {
+	return fmt.Sprintf("sdk-%d", time.Now().UnixNano())
 }
 
 // Cancel cancels an in-flight invocation by its correlation ID. The
 // server closes the stream, and the module's handler receives a context
 // cancellation.
 func (c *Consumer) Cancel(ctx context.Context, correlationID string) error {
-	// Implementation in Task 13 (consumer SDK).
-	return ErrNotImplemented
+	// Cancellation is done by canceling the invocation context.
+	// This method is provided for explicit server-side cancellation
+	// when the client cannot cancel the context directly.
+	url := fmt.Sprintf("%s/console/api/v1/modules/cancel", c.serverURL)
+	body := strings.NewReader(fmt.Sprintf(`{"correlation_id":%q}`, correlationID))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, body)
+	if err != nil {
+		return fmt.Errorf("create cancel request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	c.setAuth(req)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("cancel: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
+		return ParseErrorResponse(resp)
+	}
+	return nil
+}
+
+// setAuth sets the authorization header on a request.
+func (c *Consumer) setAuth(req *http.Request) {
+	if c.authToken != "" {
+		req.Header.Set("Authorization", "Bearer "+c.authToken)
+	}
 }
