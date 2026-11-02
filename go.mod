@@ -16,6 +16,7 @@ require (
 	github.com/sourcegraph/conc v0.3.0
 	github.com/visdomtech/orcacommon v0.3.3
 	golang.org/x/crypto v0.54.0
+	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (
@@ -123,5 +124,4 @@ require (
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260724162435-b2f20204f0df // indirect
 	google.golang.org/grpc v1.82.1 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
-	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
