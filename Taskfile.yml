@@ -42,13 +42,6 @@ tasks:
       - mkdir -p {{.BUILD_DIR}}
       - go build -ldflags "{{.LDFLAGS}}" -o {{.BUILD_DIR}}/{{.BIN}} ./cmd/ssetunnel
 
-  go:install:
-    desc: Build and install binary to ~/bin
-    cmds:
-      - task: go:build
-      - mkdir -p ~/bin
-      - cp -af {{.BUILD_DIR}}/{{.BIN}} ~/bin/
-
   go:test:
     desc: Run Go tests with race detector
     cmds:
@@ -91,6 +84,14 @@ tasks:
     cmds:
       - task: go:release
       - task: sign
+
+  go:release:install:
+    desc: build release binary for current platform, sign it and then install
+    cmds:
+      - task: go:release
+      - task: sign
+      - \rm -fr '/Applications/SSE Tunnel.app'
+      - mv 'dist/SSE Tunnel.app' /Applications/
 
   go:release-linux:
     desc: cross compile for linux amd64 binary with purego
