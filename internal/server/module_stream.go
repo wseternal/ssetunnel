@@ -1,0 +1,252 @@
+package server
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"sync"
+	"time"
+
+	"github.com/hashicorp/yamux"
+	"github.com/wseternal/ssetunnel/internal/moduleproto"
+	"github.com/wseternal/ssetunnel/internal/mux"
+)
+
+// ModuleStreamHandler manages module invocation streams on the server side.
+// It sends module_open requests to agents and correlates their reverse streams
+// with pending HTTP invocations.
+type ModuleStreamHandler struct {
+	mu sync.Mutex
+
+	// Session for this handler.
+	session *Session
+
+	// Pending invocations waiting for agent to open stream.
+	pending map[string]*PendingInvocation
+
+	// Active invocations.
+	active map[string]*ActiveInvocation
+}
+
+// PendingInvocation is an invocation waiting for the agent to open a stream.
+type PendingInvocation struct {
+	ID           string
+	ModuleID     string
+	Revision     string
+	CorrelationID string
+	ResponseCh   chan *yamux.Stream
+	CreatedAt    time.Time
+}
+
+// ActiveInvocation is an invocation with an established stream.
+type ActiveInvocation struct {
+	ID           string
+	ModuleID     string
+	Stream       *yamux.Stream
+	StartedAt    time.Time
+}
+
+// NewModuleStreamHandler creates a handler for the given session.
+func NewModuleStreamHandler(session *Session) *ModuleStreamHandler {
+	return &ModuleStreamHandler{
+		session: session,
+		pending: make(map[string]*PendingInvocation),
+		active:  make(map[string]*ActiveInvocation),
+	}
+}
+
+// RequestInvocation sends a module_open to the agent and waits for the stream.
+func (h *ModuleStreamHandler) RequestInvocation(ctx context.Context, moduleID, revision string, req *http.Request) (*yamux.Stream, error) {
+	// Generate invocation ID.
+	invocationID := generateInvocationID()
+	correlationID := req.Header.Get("X-Correlation-ID")
+
+	// Create pending invocation.
+	pending := &PendingInvocation{
+		ID:            invocationID,
+		ModuleID:      moduleID,
+		Revision:      revision,
+		CorrelationID: correlationID,
+		ResponseCh:    make(chan *yamux.Stream, 1),
+		CreatedAt:     time.Now(),
+	}
+
+	h.mu.Lock()
+	if len(h.pending) >= moduleproto.MaxPendingOpens {
+		h.mu.Unlock()
+		return nil, fmt.Errorf("too many pending invocations")
+	}
+	h.pending[invocationID] = pending
+	h.mu.Unlock()
+
+	// Send module_open to agent.
+	payload, _ := json.Marshal(moduleproto.ModuleOpenPayload{
+		InvocationID:  invocationID,
+		ModuleID:      moduleID,
+		Revision:      revision,
+		Method:        req.Method,
+		Path:          req.URL.Path,
+		CorrelationID: correlationID,
+	})
+
+	if err := h.session.SendControl(&mux.ControlMessage{
+		Type:    moduleproto.MsgModuleOpen,
+		Payload: payload,
+	}); err != nil {
+		h.mu.Lock()
+		delete(h.pending, invocationID)
+		h.mu.Unlock()
+		return nil, fmt.Errorf("send module_open: %w", err)
+	}
+
+	// Wait for agent to open stream (with deadline).
+	deadline := time.After(time.Duration(moduleproto.EstablishmentDeadline) * time.Second)
+	select {
+	case stream := <-pending.ResponseCh:
+		// Move to active.
+		h.mu.Lock()
+		delete(h.pending, invocationID)
+		h.active[invocationID] = &ActiveInvocation{
+			ID:        invocationID,
+			ModuleID:  moduleID,
+			Stream:    stream,
+			StartedAt: time.Now(),
+		}
+		h.mu.Unlock()
+		return stream, nil
+
+	case <-deadline:
+		h.mu.Lock()
+		delete(h.pending, invocationID)
+		h.mu.Unlock()
+		return nil, fmt.Errorf("establishment timeout")
+
+	case <-ctx.Done():
+		h.mu.Lock()
+		delete(h.pending, invocationID)
+		h.mu.Unlock()
+		return nil, ctx.Err()
+	}
+}
+
+// AcceptStream is called when the agent opens a module stream.
+// It correlates the stream with a pending invocation.
+func (h *ModuleStreamHandler) AcceptStream(stream *yamux.Stream) error {
+	// Read module marker with invocation ID.
+	marker := make([]byte, len(moduleproto.ModuleStreamMarker)+64) // generous buffer
+	n, err := stream.Read(marker)
+	if err != nil {
+		return fmt.Errorf("read marker: %w", err)
+	}
+	markerStr := string(marker[:n])
+
+	// Parse invocation ID from marker.
+	// Format: __module__\n<invocation_id>\n
+	if len(markerStr) < len(moduleproto.ModuleStreamMarker) {
+		return fmt.Errorf("marker too short")
+	}
+
+	// Extract invocation ID (after marker, before final newline).
+	invocationID := markerStr[len(moduleproto.ModuleStreamMarker):]
+	if len(invocationID) > 0 && invocationID[len(invocationID)-1] == '\n' {
+		invocationID = invocationID[:len(invocationID)-1]
+	}
+
+	h.mu.Lock()
+	pending, ok := h.pending[invocationID]
+	if !ok {
+		h.mu.Unlock()
+		return fmt.Errorf("unknown invocation ID: %s", invocationID)
+	}
+	h.mu.Unlock()
+
+	// Signal the waiting RequestInvocation.
+	select {
+	case pending.ResponseCh <- stream:
+		return nil
+	default:
+		return fmt.Errorf("invocation already satisfied or cancelled")
+	}
+}
+
+// CompleteInvocation marks an invocation as complete and cleans up.
+func (h *ModuleStreamHandler) CompleteInvocation(invocationID string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	if inv, ok := h.active[invocationID]; ok {
+		inv.Stream.Close()
+		delete(h.active, invocationID)
+	}
+}
+
+// CancelInvocation cancels a pending or active invocation.
+func (h *ModuleStreamHandler) CancelInvocation(invocationID string, reason string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	// Check pending.
+	if pending, ok := h.pending[invocationID]; ok {
+		close(pending.ResponseCh) // Signal cancellation.
+		delete(h.pending, invocationID)
+	}
+
+	// Check active.
+	if inv, ok := h.active[invocationID]; ok {
+		inv.Stream.Close()
+		delete(h.active, invocationID)
+	}
+
+	// Send module_close to agent.
+	payload, _ := json.Marshal(moduleproto.ModuleClosePayload{
+		InvocationID: invocationID,
+		Reason:       reason,
+	})
+	h.session.SendControl(&mux.ControlMessage{
+		Type:    moduleproto.MsgModuleClose,
+		Payload: payload,
+	})
+}
+
+// Close cancels all pending and active invocations.
+func (h *ModuleStreamHandler) Close() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	for id, pending := range h.pending {
+		close(pending.ResponseCh)
+		delete(h.pending, id)
+	}
+
+	for id, inv := range h.active {
+		inv.Stream.Close()
+		delete(h.active, id)
+	}
+}
+
+// ActiveCount returns the number of active invocations.
+func (h *ModuleStreamHandler) ActiveCount() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return len(h.active)
+}
+
+// PendingCount returns the number of pending invocations.
+func (h *ModuleStreamHandler) PendingCount() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return len(h.pending)
+}
+
+// generateInvocationID creates a unique invocation ID.
+func generateInvocationID() string {
+	var randBytes [16]byte
+	if _, err := rand.Read(randBytes[:]); err != nil {
+		// Fallback to timestamp-based ID on crypto failure.
+		return fmt.Sprintf("inv-%d", time.Now().UnixNano())
+	}
+	return hex.EncodeToString(randBytes[:])
+}
