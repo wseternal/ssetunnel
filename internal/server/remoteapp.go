@@ -378,21 +378,8 @@ func (h *Handler) handleRemoteAppUp(w http.ResponseWriter, r *http.Request) {
 	}
 	cs := v.(*connectSession)
 
-	// Verify session ownership: non-admin users can only write to their own sessions.
-	// Fail closed: when cs.userID is 0 (unowned/legacy), only admins may write.
-	// When auth is disabled, UserSessionMiddleware injects a synthetic admin with
-	// UserID=0, so sessInfo is never nil here.
-	sessInfo := UserSessionFromContext(r)
-	if sessInfo == nil && cs.userID != 0 {
-		// Auth is enabled but session info missing — reject.
-		http.Error(w, "Unauthorized: user session required", http.StatusUnauthorized)
+	if !requireSessionAccess(w, r, cs.userID) {
 		return
-	}
-	if sessInfo != nil && !isAdmin(sessInfo) {
-		if cs.userID == 0 || sessInfo.UserID != cs.userID {
-			http.Error(w, "access denied", http.StatusForbidden)
-			return
-		}
 	}
 
 	// Reject X-SSET-Flags (no reorder window on remoteapp connect-up).

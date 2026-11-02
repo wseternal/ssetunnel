@@ -250,14 +250,15 @@ func (s *Server) TunnelHandler() *Handler { return s.handler }
 
 // FindSessionByAgent finds the session for a specific agent ID that is
 // accessible to the given user. Returns nil if not found or not accessible.
+// When auth is disabled, both userID and sess.UserID() are 0 (synthetic
+// admin / unowned session), so the check passes. No legacy fallback exists.
 func (s *Server) FindSessionByAgent(agentID string, userID int64) *Session {
 	_, sess := s.handler.findYamuxByAgentID(agentID)
 	if sess == nil {
 		return nil
 	}
-	// Verify user access.
-	if sess.UserID() != 0 && sess.UserID() != userID {
-		return nil // Session belongs to a different user.
+	if sess.UserID() != userID {
+		return nil
 	}
 	return sess
 }

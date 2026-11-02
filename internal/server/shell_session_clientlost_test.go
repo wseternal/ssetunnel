@@ -787,7 +787,6 @@ func TestHandleConnectResize_NilChannel_Returns400(t *testing.T) {
 	h := &Handler{}
 
 	// Store a connect session with nil resize channel (non-shell).
-	// userID=0 skips the user-session-required check.
 	h.connectSessions.Store("test-conn", &connectSession{
 		agentID: "agent-1",
 		userID:  0,
@@ -797,6 +796,11 @@ func TestHandleConnectResize_NilChannel_Returns400(t *testing.T) {
 	body := `{"id":"test-conn","cols":80,"rows":24}`
 	req := httptest.NewRequest(http.MethodPost, "/shell/resize", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+	// Inject synthetic admin session (auth-disabled mode).
+	req = req.WithContext(context.WithValue(req.Context(), userSessionKey, &auth.UserSessionInfo{
+		UserID: 0,
+		Role:   "admin",
+	}))
 	rec := httptest.NewRecorder()
 
 	h.handleConnectResize(rec, req)
