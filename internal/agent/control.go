@@ -81,14 +81,9 @@ func (a *Agent) openControlStream(sess *yamux.Session) {
 		sess.Close()
 		return
 	}
-	go a.handleControlStream(cs)
-}
 
-// handleControlStream reads control messages from the server and dispatches
-// them to the appropriate data stream handler via the stream registry.
-// It runs until the stream closes or an error occurs.
-func (a *Agent) handleControlStream(stream net.Conn) {
-	// Install the control sender so data streams can push trace events.
+	// Install the control sender synchronously so callers (e.g., module
+	// manager OnConnect) can use it immediately after this function returns.
 	// A dedicated writeMu serializes concurrent writes (SendTrace) to
 	// the control stream, since WriteControlMessage is NOT atomic.
 	var writeMu sync.Mutex
@@ -98,12 +93,21 @@ func (a *Agent) handleControlStream(stream net.Conn) {
 	a.sendControl = func(msg *mux.ControlMessage) {
 		writeMu.Lock()
 		defer writeMu.Unlock()
-		if err := mux.WriteControlMessage(stream, msg); err != nil {
+		if err := mux.WriteControlMessage(cs, msg); err != nil {
 			log.Printf("agent: control send failed: %v", err)
 		}
 	}
-	a.traceDropLogged.Store(false) // reset drop log for new control stream
+	a.traceDropLogged.Store(false)
 	a.controlMu.Unlock()
+
+	go a.handleControlStream(cs, gen)
+}
+
+// handleControlStream reads control messages from the server and dispatches
+// them to the appropriate data stream handler via the stream registry.
+// It runs until the stream closes or an error occurs.
+// The gen parameter identifies this control stream generation for cleanup.
+func (a *Agent) handleControlStream(stream net.Conn, gen int) {
 	defer func() {
 		a.controlMu.Lock()
 		if a.controlGen == gen {
