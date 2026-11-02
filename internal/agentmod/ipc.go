@@ -57,6 +57,35 @@ func (s *IPCServer) Credential() string {
 	return s.credential
 }
 
+// SetListener attaches a listener to the IPC server for accepting
+// incoming module connections. Starts an accept loop in the background.
+func (s *IPCServer) SetListener(ln net.Listener) {
+	s.mu.Lock()
+	s.listener = ln
+	s.mu.Unlock()
+	go s.acceptLoop(ln)
+}
+
+// acceptLoop accepts incoming connections on the listener.
+func (s *IPCServer) acceptLoop(ln net.Listener) {
+	for {
+		conn, err := ln.Accept()
+		if err != nil {
+			s.mu.Lock()
+			closed := s.closed
+			s.mu.Unlock()
+			if closed {
+				return
+			}
+			// Transient error; continue.
+			continue
+		}
+		// For now, just keep the connection open.
+		// Real auth/registration happens via the IPC protocol.
+		_ = conn
+	}
+}
+
 // generateCredential creates a 32-byte random hex token.
 func generateCredential() (string, error) {
 	var buf [32]byte

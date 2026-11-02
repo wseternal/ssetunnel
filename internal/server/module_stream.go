@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"sync"
 	"time"
@@ -33,20 +34,20 @@ type ModuleStreamHandler struct {
 
 // PendingInvocation is an invocation waiting for the agent to open a stream.
 type PendingInvocation struct {
-	ID           string
-	ModuleID     string
-	Revision     string
+	ID            string
+	ModuleID      string
+	Revision      string
 	CorrelationID string
-	ResponseCh   chan *yamux.Stream
-	CreatedAt    time.Time
+	ResponseCh    chan net.Conn
+	CreatedAt     time.Time
 }
 
 // ActiveInvocation is an invocation with an established stream.
 type ActiveInvocation struct {
-	ID           string
-	ModuleID     string
-	Stream       *yamux.Stream
-	StartedAt    time.Time
+	ID        string
+	ModuleID  string
+	Stream    net.Conn
+	StartedAt time.Time
 }
 
 // NewModuleStreamHandler creates a handler for the given session.
@@ -59,7 +60,8 @@ func NewModuleStreamHandler(session *Session) *ModuleStreamHandler {
 }
 
 // RequestInvocation sends a module_open to the agent and waits for the stream.
-func (h *ModuleStreamHandler) RequestInvocation(ctx context.Context, moduleID, revision string, req *http.Request) (*yamux.Stream, error) {
+// Returns the stream and the invocation ID for later cleanup.
+func (h *ModuleStreamHandler) RequestInvocation(ctx context.Context, moduleID, revision string, req *http.Request) (net.Conn, string, error) {
 	// Generate invocation ID.
 	invocationID := generateInvocationID()
 	correlationID := req.Header.Get("X-Correlation-ID")
@@ -70,14 +72,14 @@ func (h *ModuleStreamHandler) RequestInvocation(ctx context.Context, moduleID, r
 		ModuleID:      moduleID,
 		Revision:      revision,
 		CorrelationID: correlationID,
-		ResponseCh:    make(chan *yamux.Stream, 1),
+		ResponseCh:    make(chan net.Conn, 1),
 		CreatedAt:     time.Now(),
 	}
 
 	h.mu.Lock()
 	if len(h.pending) >= moduleproto.MaxPendingOpens {
 		h.mu.Unlock()
-		return nil, fmt.Errorf("too many pending invocations")
+		return nil, "", fmt.Errorf("too many pending invocations")
 	}
 	h.pending[invocationID] = pending
 	h.mu.Unlock()
@@ -99,7 +101,7 @@ func (h *ModuleStreamHandler) RequestInvocation(ctx context.Context, moduleID, r
 		h.mu.Lock()
 		delete(h.pending, invocationID)
 		h.mu.Unlock()
-		return nil, fmt.Errorf("send module_open: %w", err)
+		return nil, "", fmt.Errorf("send module_open: %w", err)
 	}
 
 	// Wait for agent to open stream (with deadline).
@@ -116,24 +118,25 @@ func (h *ModuleStreamHandler) RequestInvocation(ctx context.Context, moduleID, r
 			StartedAt: time.Now(),
 		}
 		h.mu.Unlock()
-		return stream, nil
+		return stream, invocationID, nil
 
 	case <-deadline:
 		h.mu.Lock()
 		delete(h.pending, invocationID)
 		h.mu.Unlock()
-		return nil, fmt.Errorf("establishment timeout")
+		return nil, "", fmt.Errorf("establishment timeout")
 
 	case <-ctx.Done():
 		h.mu.Lock()
 		delete(h.pending, invocationID)
 		h.mu.Unlock()
-		return nil, ctx.Err()
+		return nil, "", ctx.Err()
 	}
 }
 
 // AcceptStream is called when the agent opens a module stream.
 // It correlates the stream with a pending invocation.
+// Deprecated: Use DeliverStream instead (marker is read by acceptModuleStreams).
 func (h *ModuleStreamHandler) AcceptStream(stream *yamux.Stream) error {
 	// Read module marker with invocation ID.
 	marker := make([]byte, len(moduleproto.ModuleStreamMarker)+64) // generous buffer
@@ -155,6 +158,12 @@ func (h *ModuleStreamHandler) AcceptStream(stream *yamux.Stream) error {
 		invocationID = invocationID[:len(invocationID)-1]
 	}
 
+	return h.DeliverStream(stream, invocationID)
+}
+
+// DeliverStream delivers an already-parsed module stream to a pending invocation.
+// The invocation ID was extracted from the marker by acceptModuleStreams.
+func (h *ModuleStreamHandler) DeliverStream(stream net.Conn, invocationID string) error {
 	h.mu.Lock()
 	pending, ok := h.pending[invocationID]
 	if !ok {

@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"encoding/json"
 	"log"
 	"net"
@@ -8,6 +9,7 @@ import (
 	"time"
 
 	"github.com/hashicorp/yamux"
+	"github.com/wseternal/ssetunnel/internal/moduleproto"
 	"github.com/wseternal/ssetunnel/internal/mux"
 )
 
@@ -135,6 +137,24 @@ func (a *Agent) dispatchControlMessage(msg *mux.ControlMessage) {
 	switch msg.Type {
 	case mux.MsgLogRequest:
 		a.handleLogRequest(msg)
+		return
+	case moduleproto.MsgModuleOpen:
+		if a.moduleInvoker != nil {
+			// The module invoker needs the yamux session to open reverse streams.
+			// We access it via the agent's yamux session stored during runOnce.
+			if err := a.moduleInvoker.HandleModuleOpen(context.Background(), msg, a.currentYamuxSession()); err != nil {
+				log.Printf("agent: module_open failed: %v", err)
+			}
+		} else {
+			log.Printf("agent: module_open received but modules not configured")
+		}
+		return
+	case moduleproto.MsgModuleClose:
+		if a.moduleInvoker != nil {
+			if err := a.moduleInvoker.HandleModuleClose(msg); err != nil {
+				log.Printf("agent: module_close failed: %v", err)
+			}
+		}
 		return
 	}
 

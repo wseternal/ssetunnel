@@ -45,6 +45,14 @@ func NewConsoleHandler(ctx context.Context, pool *pgxpool.Pool, store *auth.Stor
 		// /connect-up endpoints with forced target=__remote_app__.
 		r.Handle("/console/api/v1/remoteapp/connect", userAuth(th.RemoteAppConnectHandler())).Methods("GET")
 		r.Handle("/console/api/v1/remoteapp/connect-up", userAuth(th.RemoteAppConnectUpHandler())).Methods("POST")
+
+		// Module routes: discovery and invocation APIs.
+		modRoutes := newModuleRoutes(srv)
+		r.Handle("/console/api/v1/modules", userAuth(http.HandlerFunc(modRoutes.handleListModules))).Methods("GET")
+		r.Handle("/console/api/v1/modules/openapi/{agent-id}/{module-id}", userAuth(http.HandlerFunc(modRoutes.handleGetOpenAPI))).Methods("GET")
+		r.Handle("/console/api/v1/modules/invoke/{agent-id}/{module-id}/{path:.*}", userAuth(http.HandlerFunc(modRoutes.handleInvoke)))
+		r.Handle("/console/api/v1/modules/invoke/{agent-id}/{module-id}", userAuth(http.HandlerFunc(modRoutes.handleInvoke)))
+		r.Handle("/console/api/v1/modules/{agent-id}/{module-id}", userAuth(http.HandlerFunc(modRoutes.handleGetModule))).Methods("GET")
 	}
 
 	// API routes — strip /console so the inner router sees /api/v1/...

@@ -18,6 +18,7 @@ import (
 
 	"github.com/cenkalti/backoff/v4"
 	"github.com/hashicorp/yamux"
+	"github.com/wseternal/ssetunnel/internal/agentmod"
 	"github.com/wseternal/ssetunnel/internal/metrics"
 	"github.com/wseternal/ssetunnel/internal/mux"
 	"github.com/wseternal/ssetunnel/internal/remoteapp"
@@ -84,6 +85,58 @@ type Agent struct {
 	// via the control channel (MsgLogRequest). Installed as a tee
 	// target in Run().
 	logBuf *logBuffer
+
+	// Module infrastructure (nil when modules are not configured).
+	moduleManager *ModuleManager
+	moduleInvoker *ModuleInvoker
+	modRegistry   *agentmod.Registry
+	modIPC        *agentmod.IPCServer
+
+	// Current yamux session (set in runOnce, cleared on disconnect).
+	// Used by the module invoker to open reverse streams.
+	currentSess atomic.Pointer[yamux.Session]
+}
+
+// InitModules initializes the module subsystem for this agent. It creates
+// the registry, IPC server, supervisor, module manager, and invoker.
+// Must be called before Run if module support is desired.
+func (a *Agent) InitModules(ctx context.Context, dataDir string) error {
+	registry, err := agentmod.NewRegistry(dataDir)
+	if err != nil {
+		return fmt.Errorf("create registry: %w", err)
+	}
+
+	ipc, err := agentmod.NewIPCServer()
+	if err != nil {
+		return fmt.Errorf("create ipc server: %w", err)
+	}
+
+	endpoint := agentmod.IPCEndpoint(dataDir)
+	listener, err := agentmod.ListenIPC(ctx, endpoint)
+	if err != nil {
+		return fmt.Errorf("listen ipc: %w", err)
+	}
+
+	// Attach listener to IPC server for accept loop.
+	ipc.SetListener(listener)
+
+	supervisor := agentmod.NewSupervisor(ctx, registry, ipc)
+	a.modRegistry = registry
+	a.modIPC = ipc
+	a.moduleManager = NewModuleManager(registry, ipc, supervisor)
+	a.moduleInvoker = NewModuleInvoker(a, ipc, registry)
+
+	// Reconcile desired state: start enabled modules.
+	if err := supervisor.Reconcile(); err != nil {
+		log.Printf("agent: module reconcile: %v", err)
+	}
+
+	return nil
+}
+
+// currentYamuxSession returns the current yamux session, or nil.
+func (a *Agent) currentYamuxSession() *yamux.Session {
+	return a.currentSess.Load()
 }
 
 // Run connects and reconnects until ctx is canceled. Reconnect uses
@@ -222,6 +275,8 @@ func (a *Agent) runOnce(ctx context.Context) error {
 		return fmt.Errorf("mux client: %w", err)
 	}
 	defer sess.Close()
+	a.currentSess.Store(sess)
+	defer a.currentSess.Store(nil)
 	a.registry = newStreamRegistry()
 
 	// Open the control stream: agent → server. The server's accept
@@ -229,6 +284,29 @@ func (a *Agent) runOnce(ctx context.Context) error {
 	// before the data stream accept loop so the control channel is
 	// ready before any data streams arrive.
 	a.openControlStream(sess)
+
+	// Wire module control sender if modules are configured.
+	if a.moduleManager != nil {
+		a.controlMu.RLock()
+		sender := a.sendControl
+		a.controlMu.RUnlock()
+		if sender != nil {
+			a.moduleManager.SetControlSender(func(msg *mux.ControlMessage) error {
+				a.controlMu.RLock()
+				s := a.sendControl
+				a.controlMu.RUnlock()
+				if s == nil {
+					return fmt.Errorf("control stream not available")
+				}
+				s(msg)
+				return nil
+			})
+			// Publish catalog snapshot on connect.
+			if err := a.moduleManager.OnConnect(ctx, conn.SessionID()); err != nil {
+				log.Printf("agent: publish catalog on connect: %v", err)
+			}
+		}
+	}
 
 	done := make(chan struct{})
 	defer close(done)
