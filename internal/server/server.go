@@ -245,6 +245,12 @@ func (c *bufioReadConn) Read(b []byte) (int, error) {
 	return c.reader.Read(b)
 }
 
+// BufioReader returns the underlying buffered reader, allowing callers
+// to avoid double-wrapping with bufio.NewReader.
+func (c *bufioReadConn) BufioReader() *bufio.Reader {
+	return c.reader
+}
+
 // HTTPHandler returns the tunnel endpoint handler (/events, /up).
 func (s *Server) HTTPHandler() http.Handler { return s.handler }
 

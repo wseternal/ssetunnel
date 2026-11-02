@@ -118,6 +118,7 @@ func (c *Consumer) Discover(ctx context.Context, agentID string) (*Catalog, erro
 
 	catalog := &Catalog{
 		AgentID:     agentID,
+		Epoch:       resp.Header.Get("X-Catalog-Epoch"),
 		Modules:     make([]ModuleEntry, 0, len(entries)),
 		PublishedAt: time.Now(),
 	}

@@ -213,7 +213,7 @@ type IPCClient struct {
 // DialIPCProvider connects to the agent's IPC endpoint and authenticates.
 func DialIPCProvider(ctx context.Context, endpoint, credential string) (*IPCClient, error) {
 	var d net.Dialer
-	conn, err := d.DialContext(ctx, "unix", endpoint)
+	conn, err := d.DialContext(ctx, ipcNetwork, endpoint)
 	if err != nil {
 		return nil, fmt.Errorf("dial: %w", err)
 	}

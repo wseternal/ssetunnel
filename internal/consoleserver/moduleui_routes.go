@@ -178,9 +178,14 @@ func (m *moduleUIRoutes) handleGetProviderAsset(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	// Read response (use a simple approach since we expect small assets).
-	// For large assets, we'd stream, but UI assets are bounded to 8 MiB.
-	resp, err := http.ReadResponse(bufio.NewReader(stream), invReq)
+	// Read response (use the existing buffered reader if available; N2 fix).
+	var reader *bufio.Reader
+	if br, ok := stream.(interface{ BufioReader() *bufio.Reader }); ok {
+		reader = br.BufioReader()
+	} else {
+		reader = bufio.NewReader(stream)
+	}
+	resp, err := http.ReadResponse(reader, invReq)
 	if err != nil {
 		http.Error(w, "failed to read response", http.StatusBadGateway)
 		return

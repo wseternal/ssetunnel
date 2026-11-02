@@ -73,6 +73,10 @@ func (m *moduleRoutes) handleListModules(w http.ResponseWriter, r *http.Request)
 		})
 	}
 
+	// Include catalog epoch in response header so consumers can detect stale epochs.
+	if epoch := catalog.Epoch(); epoch != "" {
+		w.Header().Set("X-Catalog-Epoch", epoch)
+	}
 	writeJSON(w, http.StatusOK, result)
 }
 
@@ -266,8 +270,14 @@ func (m *moduleRoutes) handleInvoke(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Read the response from the stream.
-	// Use a custom reader that doesn't buffer the entire body.
-	resp, err := http.ReadResponse(bufio.NewReader(stream), invReq)
+	// Use the existing buffered reader if available (N2 fix: avoid double buffering).
+	var reader *bufio.Reader
+	if br, ok := stream.(interface{ BufioReader() *bufio.Reader }); ok {
+		reader = br.BufioReader()
+	} else {
+		reader = bufio.NewReader(stream)
+	}
+	resp, err := http.ReadResponse(reader, invReq)
 	if err != nil {
 		http.Error(w, "failed to read response", http.StatusBadGateway)
 		return

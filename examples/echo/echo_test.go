@@ -2,6 +2,8 @@ package main
 
 import (
 	"bufio"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -239,9 +241,8 @@ func TestEchoModule_FullPath(t *testing.T) {
 
 func randomHex(n int) string {
 	b := make([]byte, n)
-	for i := range b {
-		b[i] = "0123456789abcdef"[time.Now().UnixNano()%16]
-		time.Sleep(time.Nanosecond)
+	if _, err := rand.Read(b); err != nil {
+		panic(fmt.Sprintf("crypto/rand failed: %v", err))
 	}
-	return string(b)
+	return hex.EncodeToString(b)
 }
