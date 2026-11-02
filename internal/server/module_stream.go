@@ -176,12 +176,21 @@ func (h *ModuleStreamHandler) DeliverStream(stream net.Conn, invocationID string
 	delete(h.pending, invocationID)
 	h.mu.Unlock()
 
-	// Signal the waiting RequestInvocation (C8 fix: use non-blocking send).
+	// Signal the waiting RequestInvocation.
+	// Check Done first (non-blocking) to avoid a select race when both
+	// ResponseCh (buffered) and Done are ready simultaneously.
+	select {
+	case <-pending.Done:
+		stream.Close()
+		return fmt.Errorf("invocation cancelled before delivery")
+	default:
+	}
+
 	select {
 	case pending.ResponseCh <- stream:
 		return nil
 	case <-pending.Done:
-		// Invocation was cancelled.
+		// Cancelled between the check above and this send.
 		stream.Close()
 		return fmt.Errorf("invocation cancelled before delivery")
 	default:
