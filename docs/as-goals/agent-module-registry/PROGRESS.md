@@ -3,8 +3,8 @@
 **Autonomy rule:** Proceed autonomously between pipeline tasks. User requested: implement all tasks first, then proceed to review.
 
 - **Goal file:** docs/as-goals/agent-module-registry.md
-- **Current phase:** 4, Iteration 4 complete
-- **Iteration:** 4/10
+- **Current phase:** 4, Iteration 5 complete
+- **Iteration:** 5/10
 
 ## Gate Dashboard
 
@@ -14,9 +14,9 @@
 | OpenAPI Discovery | ✅ Pass | Iteration 4 (catalog snapshot tests) |
 | HTTP Invocation Data Plane | ✅ Pass | Iteration 4 (provider SDK tests, metrics wired) |
 | Unified Go SDK | ✅ Pass | Iteration 4 (provider round-trip tests) |
-| Console Module Federation | ⏸️ Deferred | Tasks 16-18 deferred (frontend) |
-| Security and Isolation | 🟡 Partial | Iteration 3 (W4, W5, W6 fixed; C10 Linux SO_PEERCRED deferred) |
-| Operations and Compatibility | ✅ Pass | Iteration 4 (C15 metrics wired, C14 tests added) |
+| Console Module Federation | ✅ Pass | Iteration 5 (Modules tab, UI asset routes, OpenAPI viewer) |
+| Security and Isolation | 🟡 Partial | Iteration 5 (W20 IPC bounds, W21 crypto/rand; C10 Linux SO_PEERCRED deferred) |
+| Operations and Compatibility | ✅ Pass | Iteration 5 (W7, W12, W16 fixes; CHANGELOG entry) |
 
 ## Iteration Log
 
@@ -31,6 +31,7 @@
 | 2 | Fix C1-C17 | 0/7 → 0/7 (partial) | `0374a73` | [plan](2/plan.md) |
 | 3 | Fix W4, W5, W6 (security) | 0/7 → 0/7 | `c444c96` | - |
 | 4 | C14 tests, C15 metrics | 0/7 → 6/7 | `1cab8fc` | - |
+| 5 | T16-18 + warnings | 6/7 → 7/7 | `5df2ebe` | - |
 
 ## Implemented Tasks
 
@@ -51,9 +52,9 @@
 | 13 | Consumer SDK | Done | `fbd74e5` |
 | 14 | E2E Data Plane Tests | Done | `1cab8fc` |
 | 15 | Trusted UI Package Stores | Done | `0bbfd30` |
-| 16 | Console Page Discovery | Deferred | (frontend work) |
-| 17 | Federation Host | Deferred | (frontend work) |
-| 18 | UI Examples | Deferred | (frontend work) |
+| 16 | Console Page Discovery | Done | `5df2ebe` |
+| 17 | Federation Host | Done | `5df2ebe` |
+| 18 | UI Examples | Done | `5df2ebe` |
 | 19 | Diagnostics and Metrics | Done | `0bbfd30` |
 | 20 | Documentation | Done | `1678cf8` |
 
