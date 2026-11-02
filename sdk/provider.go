@@ -8,12 +8,14 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"sync"
 	"time"
 )
 
 // Provider serves a module through the agent's IPC endpoint. The provider
 // supplies a manifest and an HTTP handler; the SDK handles IPC registration,
-// health reporting, and request routing.
+// health reporting, and request routing. Automatic reconnection with
+// exponential backoff (500ms → 30s) survives agent restarts.
 //
 // Architecture:
 //   - Control connection: connects to agent for AUTH, REG, HEALTH
@@ -22,8 +24,9 @@ import (
 type Provider struct {
 	manifest Manifest
 	handler  http.Handler
-	client   *IPCClient
 	healthCh chan Health
+	client   *IPCClient // current IPC client (nil when disconnected)
+	clientMu sync.Mutex
 }
 
 // Serve registers the module with the agent and serves HTTP requests
@@ -56,9 +59,9 @@ func Serve(ctx context.Context, m Manifest, handler http.Handler) error {
 	return p.serve(ctx, endpoint, credential)
 }
 
-// serve connects to the IPC endpoint and serves requests.
+// serve connects to the IPC endpoint and serves requests with automatic
+// reconnection on IPC failures (e.g., agent restart).
 func (p *Provider) serve(ctx context.Context, endpoint, credential string) error {
-	// Create invocation listener — a separate socket for HTTP invocations.
 	invEndpoint := endpoint + "-inv"
 
 	// Remove stale socket.
@@ -70,24 +73,73 @@ func (p *Provider) serve(ctx context.Context, endpoint, credential string) error
 	}
 	defer os.Remove(invEndpoint)
 	defer invListener.Close()
-
-	// Set permissions to owner-only.
 	os.Chmod(invEndpoint, 0o600)
 
-	// Connect to agent for control (AUTH, REG, HEALTH).
+	// Serve HTTP requests independently of IPC lifecycle.
+	// The agent opens a fresh connection per invocation.
+	server := &http.Server{
+		Handler:     p.handler,
+		BaseContext: func(net.Listener) context.Context { return ctx },
+	}
+	go func() {
+		<-ctx.Done()
+		server.Close()
+	}()
+	go func() {
+		if err := server.Serve(invListener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Printf("provider: http serve: %v", err)
+		}
+	}()
+
+	// IPC reconnect loop with exponential backoff (500ms → 30s).
+	backoff := 500 * time.Millisecond
+	for {
+		if ctx.Err() != nil {
+			return nil
+		}
+		err := p.connectAndServe(ctx, endpoint, credential)
+		if ctx.Err() != nil {
+			return nil
+		}
+		if err != nil {
+			log.Printf("provider: connection lost, reconnecting in %v...", backoff)
+			select {
+			case <-time.After(backoff):
+			case <-ctx.Done():
+				return nil
+			}
+			backoff *= 2
+			if backoff > 30*time.Second {
+				backoff = 30 * time.Second
+			}
+		}
+	}
+}
+
+// connectAndServe performs one IPC session: dial, register, health loop.
+// Returns a non-nil error when the IPC connection is lost (caller reconnects).
+func (p *Provider) connectAndServe(ctx context.Context, endpoint, credential string) error {
 	client, err := DialIPCProvider(ctx, endpoint, credential)
 	if err != nil {
 		return fmt.Errorf("dial IPC: %w", err)
 	}
-	p.client = client
-	defer client.Close()
 
-	// Register with the agent, passing the invocation endpoint.
-	if err := client.RegisterWithEndpoint(p.manifest.ModuleID, p.manifest.ServiceName, p.manifest.ServiceVersion, p.manifest.Revision, invEndpoint); err != nil {
+	p.clientMu.Lock()
+	p.client = client
+	p.clientMu.Unlock()
+	defer func() {
+		client.Close()
+		p.clientMu.Lock()
+		p.client = nil
+		p.clientMu.Unlock()
+	}()
+
+	invEndpoint := endpoint + "-inv"
+	if err := client.RegisterWithEndpoint(p.manifest.ModuleID, p.manifest.ServiceName,
+		p.manifest.ServiceVersion, p.manifest.Revision, invEndpoint); err != nil {
 		return fmt.Errorf("register: %w", err)
 	}
 
-	// Send OpenAPI YAML so the agent can publish it in the catalog snapshot.
 	if len(p.manifest.OpenAPIYAML) > 0 {
 		if err := client.SendOpenAPI(p.manifest.OpenAPIYAML); err != nil {
 			return fmt.Errorf("send openapi: %w", err)
@@ -96,32 +148,17 @@ func (p *Provider) serve(ctx context.Context, endpoint, credential string) error
 
 	log.Printf("provider: registered module %s (invocation endpoint: %s)", p.manifest.ModuleID, invEndpoint)
 
-	// Report initial health.
 	if err := client.ReportHealth("healthy", "module started"); err != nil {
 		log.Printf("provider: failed to report health: %v", err)
 	}
 
-	// Start health reporting goroutine.
-	go p.healthLoop(ctx)
-
-	// Serve HTTP requests on the invocation listener.
-	// The agent opens a fresh connection for each invocation.
-	server := &http.Server{
-		Handler:     p.handler,
-		BaseContext: func(net.Listener) context.Context { return ctx },
-	}
-
-	// Graceful shutdown on context cancellation.
-	go func() {
-		<-ctx.Done()
-		server.Close()
-	}()
-
-	return server.Serve(invListener)
+	// Health loop exits on IPC error (signals caller to reconnect).
+	return p.healthLoop(ctx, client)
 }
 
-// healthLoop periodically reports health to the agent.
-func (p *Provider) healthLoop(ctx context.Context) {
+// healthLoop reports health to the agent until the connection fails or
+// the context is canceled. Returns nil on clean shutdown, non-nil on IPC error.
+func (p *Provider) healthLoop(ctx context.Context, client *IPCClient) error {
 	interval := p.manifest.HealthInterval
 	if interval == 0 {
 		interval = 30 * time.Second
@@ -133,15 +170,14 @@ func (p *Provider) healthLoop(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			return
+			return nil
 		case h := <-p.healthCh:
-			if err := p.client.ReportHealth(string(h.Status), h.Message); err != nil {
-				log.Printf("provider: failed to report health: %v", err)
+			if err := client.ReportHealth(string(h.Status), h.Message); err != nil {
+				return fmt.Errorf("report health: %w", err)
 			}
 		case <-ticker.C:
-			// Periodic health ping (healthy by default).
-			if err := p.client.ReportHealth("healthy", ""); err != nil {
-				log.Printf("provider: failed to report health: %v", err)
+			if err := client.ReportHealth("healthy", ""); err != nil {
+				return fmt.Errorf("report health: %w", err)
 			}
 		}
 	}
