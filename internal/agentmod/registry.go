@@ -160,6 +160,33 @@ func (r *Registry) AllModules() []string {
 	return result
 }
 
+// InstallFromIPC auto-installs or updates a module package from a live IPC
+// registration. This is used when a module process connects directly to the
+// agent (without going through the package installation flow). The module is
+// automatically enabled so it appears in catalog snapshots.
+func (r *Registry) InstallFromIPC(moduleID, serviceName, version, revision string, openAPIYAML []byte, executable string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	pkg := &Package{
+		ModuleID:       moduleID,
+		ServiceName:    serviceName,
+		ServiceVersion: version,
+		Revision:       revision,
+		Executable:     executable,
+		OpenAPIYAML:    openAPIYAML,
+		PackageDir:     r.dataDir,
+	}
+
+	// Replace or install the package.
+	r.packages[moduleID] = pkg
+
+	// Auto-enable: the module process is already running.
+	r.desired[moduleID] = DesiredState{Enabled: true, UpdatedAt: time.Now()}
+
+	return r.saveDesiredState()
+}
+
 // desiredStatePath returns the path to the desired state file.
 func (r *Registry) desiredStatePath() string {
 	return filepath.Join(r.dataDir, "desired_state.json")

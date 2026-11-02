@@ -87,6 +87,13 @@ func (p *Provider) serve(ctx context.Context, endpoint, credential string) error
 		return fmt.Errorf("register: %w", err)
 	}
 
+	// Send OpenAPI YAML so the agent can publish it in the catalog snapshot.
+	if len(p.manifest.OpenAPIYAML) > 0 {
+		if err := client.SendOpenAPI(p.manifest.OpenAPIYAML); err != nil {
+			return fmt.Errorf("send openapi: %w", err)
+		}
+	}
+
 	log.Printf("provider: registered module %s (invocation endpoint: %s)", p.manifest.ModuleID, invEndpoint)
 
 	// Report initial health.
@@ -202,6 +209,19 @@ func (c *IPCClient) RegisterWithEndpoint(moduleID, serviceName, version, revisio
 	msg := fmt.Sprintf("REG %s %s %s %s %s\n", moduleID, serviceName, version, revision, invEndpoint)
 	if _, err := c.conn.Write([]byte(msg)); err != nil {
 		return fmt.Errorf("write register: %w", err)
+	}
+	return nil
+}
+
+// SendOpenAPI sends the OpenAPI YAML to the agent after registration.
+// Uses length-prefixed binary format (same as AUTH): "OPENAPI <len>\n<bytes>".
+func (c *IPCClient) SendOpenAPI(yaml []byte) error {
+	header := fmt.Sprintf("OPENAPI %d\n", len(yaml))
+	if _, err := c.conn.Write([]byte(header)); err != nil {
+		return fmt.Errorf("write openapi header: %w", err)
+	}
+	if _, err := c.conn.Write(yaml); err != nil {
+		return fmt.Errorf("write openapi yaml: %w", err)
 	}
 	return nil
 }

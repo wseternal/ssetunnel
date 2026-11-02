@@ -129,6 +129,22 @@ func (a *Agent) InitModules(ctx context.Context, dataDir string) error {
 	a.moduleManager = NewModuleManager(registry, ipc, supervisor)
 	a.moduleInvoker = NewModuleInvoker(a, ipc, registry)
 
+	// Wire IPC registration → auto-install into registry → snapshot publish.
+	// This allows manually started modules to appear in the console.
+	ipc.SetOnRegister(func(reg *agentmod.Registration) {
+		// Use IPC endpoint as executable placeholder — the supervisor will
+		// log a start failure, but the module is already running manually.
+		if err := registry.InstallFromIPC(
+			reg.ModuleID, reg.ServiceName, reg.Version, reg.Revision,
+			reg.OpenAPIYAML, ipc.Endpoint(),
+		); err != nil {
+			log.Printf("agent: auto-install module %s: %v", reg.ModuleID, err)
+			return
+		}
+		log.Printf("agent: auto-installed module %s into registry", reg.ModuleID)
+		a.moduleManager.OnRegistryChange()
+	})
+
 	// Reconcile desired state: start enabled modules.
 	if err := supervisor.Reconcile(); err != nil {
 		log.Printf("agent: module reconcile: %v", err)

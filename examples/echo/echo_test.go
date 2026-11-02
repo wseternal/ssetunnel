@@ -4,11 +4,13 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -117,6 +119,27 @@ func TestEchoModule_FullPath(t *testing.T) {
 		}
 		// parts[0]=moduleID parts[1]=svcName parts[2]=ver parts[3]=rev parts[4]=invEndpoint
 		regCh <- moduleReg{moduleID: parts[0], invEndpoint: parts[4]}
+
+		// Read optional OPENAPI message (length-prefixed YAML).
+		conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		openapiLine, err := reader.ReadString('\n')
+		if err != nil {
+			t.Logf("read openapi: %v", err)
+			return
+		}
+		openapiLine = strings.TrimSuffix(openapiLine, "\n")
+		if strings.HasPrefix(openapiLine, "OPENAPI ") {
+			yamlLen, _ := strconv.Atoi(strings.TrimPrefix(openapiLine, "OPENAPI "))
+			if yamlLen > 0 {
+				yamlBuf := make([]byte, yamlLen)
+				if _, err := io.ReadFull(reader, yamlBuf); err != nil {
+					t.Logf("read openapi yaml: %v", err)
+					return
+				}
+				t.Logf("received %d bytes of OpenAPI YAML", yamlLen)
+			}
+		}
+		// else: old client, skip
 
 		// Read HEALTH messages (keep connection alive).
 		conn.SetReadDeadline(time.Now().Add(60 * time.Second))
