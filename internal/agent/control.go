@@ -1,7 +1,6 @@
 package agent
 
 import (
-	"context"
 	"encoding/json"
 	"log"
 	"net"
@@ -144,9 +143,9 @@ func (a *Agent) dispatchControlMessage(msg *mux.ControlMessage) {
 		return
 	case moduleproto.MsgModuleOpen:
 		if a.moduleInvoker != nil {
-			// W18: TODO: use agent's run context instead of Background().
-			// The control handler doesn't currently carry a context.
-			if err := a.moduleInvoker.HandleModuleOpen(context.Background(), msg, a.currentYamuxSession()); err != nil {
+			// W7 fix: Use agent's run context for cancellation propagation.
+			ctx := a.runContext()
+			if err := a.moduleInvoker.HandleModuleOpen(ctx, msg, a.currentYamuxSession()); err != nil {
 				log.Printf("agent: module_open failed: %v", err)
 			}
 		} else {

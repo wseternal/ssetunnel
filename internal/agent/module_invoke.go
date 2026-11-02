@@ -5,9 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -185,17 +187,24 @@ func (mi *ModuleInvoker) proxyInvocation(ctx context.Context, inv *Invocation, r
 	invConn, err := mi.dialModule(ctx, reg)
 	if err != nil {
 		log.Printf("invocation %s: dial module: %v", inv.ID, err)
+		// Send HTTP 503 to client before closing the stream.
+		resp := &http.Response{
+			StatusCode: http.StatusServiceUnavailable,
+			ProtoMajor: 1, ProtoMinor: 1,
+			Body: io.NopCloser(strings.NewReader("module unavailable: " + err.Error())),
+		}
+		resp.Write(inv.Stream)
 		return
 	}
 	defer invConn.Close()
 
-	// Set deadlines from context (C13 fix).
-	if deadline, ok := ctx.Deadline(); ok {
-		invConn.SetDeadline(deadline)
-	} else {
-		// Default 30s timeout.
-		invConn.SetDeadline(time.Now().Add(30 * time.Second))
+	// Set deadlines on both connections.
+	deadline := time.Now().Add(30 * time.Second)
+	if d, ok := ctx.Deadline(); ok {
+		deadline = d
 	}
+	invConn.SetDeadline(deadline)
+	inv.Stream.SetDeadline(deadline)
 
 	// Read HTTP request from tunnel stream.
 	req, err := http.ReadRequest(bufio.NewReader(inv.Stream))

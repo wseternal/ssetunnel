@@ -11,7 +11,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/hashicorp/yamux"
 	"github.com/wseternal/ssetunnel/internal/metrics"
 	"github.com/wseternal/ssetunnel/internal/moduleproto"
 	"github.com/wseternal/ssetunnel/internal/mux"
@@ -163,33 +162,6 @@ func (h *ModuleStreamHandler) RequestInvocation(ctx context.Context, moduleID, r
 		h.metrics.RecordInvocationComplete(true, false)
 		return nil, "", ctx.Err()
 	}
-}
-
-// AcceptStream is called when the agent opens a module stream.
-// It correlates the stream with a pending invocation.
-// Deprecated: Use DeliverStream instead (marker is read by acceptModuleStreams).
-func (h *ModuleStreamHandler) AcceptStream(stream *yamux.Stream) error {
-	// Read module marker with invocation ID.
-	marker := make([]byte, len(moduleproto.ModuleStreamMarker)+64) // generous buffer
-	n, err := stream.Read(marker)
-	if err != nil {
-		return fmt.Errorf("read marker: %w", err)
-	}
-	markerStr := string(marker[:n])
-
-	// Parse invocation ID from marker.
-	// Format: __module__\n<invocation_id>\n
-	if len(markerStr) < len(moduleproto.ModuleStreamMarker) {
-		return fmt.Errorf("marker too short")
-	}
-
-	// Extract invocation ID (after marker, before final newline).
-	invocationID := markerStr[len(moduleproto.ModuleStreamMarker):]
-	if len(invocationID) > 0 && invocationID[len(invocationID)-1] == '\n' {
-		invocationID = invocationID[:len(invocationID)-1]
-	}
-
-	return h.DeliverStream(stream, invocationID)
 }
 
 // DeliverStream delivers an already-parsed module stream to a pending invocation.

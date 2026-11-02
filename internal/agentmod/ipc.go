@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -114,6 +115,17 @@ func (s *IPCServer) SetListener(ln net.Listener, endpoint string) {
 	go s.acceptLoop(ln)
 }
 
+// ListenerAddr returns the IPC listener address for passing to module processes.
+// Returns an error if the listener is not configured.
+func (s *IPCServer) ListenerAddr() (string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.listener == nil {
+		return "", fmt.Errorf("ipc: listener not configured")
+	}
+	return s.listener.Addr().String(), nil
+}
+
 // Endpoint returns the IPC endpoint path for dialing new connections.
 func (s *IPCServer) Endpoint() string {
 	s.mu.RLock()
@@ -190,13 +202,13 @@ func (s *IPCServer) handleConnection(conn net.Conn) {
 
 	// Read credential bytes.
 	credBuf := make([]byte, credLen)
-	if _, err := reader.Read(credBuf); err != nil {
+	if _, err := io.ReadFull(reader, credBuf); err != nil {
 		log.Printf("ipc: credential read error: %v", err)
 		return
 	}
 
-	// Verify credential.
-	if string(credBuf) != s.credential {
+	// Verify credential (constant-time comparison to prevent timing attacks).
+	if subtle.ConstantTimeCompare(credBuf, []byte(s.credential)) != 1 {
 		conn.Write([]byte("ERR\n"))
 		log.Printf("ipc: invalid credential")
 		return

@@ -47,7 +47,7 @@ func (m *moduleRoutes) handleListModules(w http.ResponseWriter, r *http.Request)
 	}
 
 	// Find the agent session for this user.
-	session := m.server.FindSessionByAgent(agentID, sessInfo.UserID)
+	session := m.server.FindSessionByAgent(agentID, sessInfo)
 	if session == nil {
 		http.Error(w, "agent not found or not accessible", http.StatusNotFound)
 		return
@@ -94,7 +94,7 @@ func (m *moduleRoutes) handleGetModule(w http.ResponseWriter, r *http.Request) {
 	agentID := vars["agent-id"]
 	moduleID := vars["module-id"]
 
-	session := m.server.FindSessionByAgent(agentID, sessInfo.UserID)
+	session := m.server.FindSessionByAgent(agentID, sessInfo)
 	if session == nil {
 		http.Error(w, "agent not found", http.StatusNotFound)
 		return
@@ -145,7 +145,7 @@ func (m *moduleRoutes) handleGetOpenAPI(w http.ResponseWriter, r *http.Request) 
 	agentID := vars["agent-id"]
 	moduleID := vars["module-id"]
 
-	session := m.server.FindSessionByAgent(agentID, sessInfo.UserID)
+	session := m.server.FindSessionByAgent(agentID, sessInfo)
 	if session == nil {
 		http.Error(w, "agent not found", http.StatusNotFound)
 		return
@@ -172,11 +172,8 @@ func (m *moduleRoutes) handleGetOpenAPI(w http.ResponseWriter, r *http.Request) 
 // POST /console/api/v1/modules/invoke/<agent-id>/<module-id>/<operation-path...>
 func (m *moduleRoutes) handleInvoke(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodOptions {
-		// W4 fix: No CORS wildcard on invoke endpoint (requires explicit origin).
-		origin := r.Header.Get("Origin")
-		if origin != "" {
-			w.Header().Set("Access-Control-Allow-Origin", origin)
-		}
+		// W4 fix: Do not reflect arbitrary Origin as Access-Control-Allow-Origin.
+		// Only allow same-origin requests (no CORS headers needed for same-origin).
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, PATCH, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Correlation-ID")
 		w.WriteHeader(http.StatusNoContent)
@@ -197,7 +194,7 @@ func (m *moduleRoutes) handleInvoke(w http.ResponseWriter, r *http.Request) {
 		operationPath = "/"
 	}
 
-	session := m.server.FindSessionByAgent(agentID, sessInfo.UserID)
+	session := m.server.FindSessionByAgent(agentID, sessInfo)
 	if session == nil {
 		http.Error(w, "agent not found", http.StatusNotFound)
 		return
@@ -277,11 +274,18 @@ func (m *moduleRoutes) handleInvoke(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 
-	// Copy response headers (W6 fix: filter sensitive headers).
+	// W5 fix: Copy response headers using an allowlist (not blocklist).
+	allowedResponseHeaders := map[string]bool{
+		"content-type":        true,
+		"content-length":      true,
+		"content-disposition": true,
+		"cache-control":       true,
+		"etag":                true,
+		"last-modified":       true,
+		"x-request-id":        true,
+	}
 	for key, values := range resp.Header {
-		// Skip hop-by-hop and sensitive headers.
-		lowerKey := strings.ToLower(key)
-		if lowerKey == "set-cookie" || lowerKey == "connection" || lowerKey == "transfer-encoding" {
+		if !allowedResponseHeaders[strings.ToLower(key)] {
 			continue
 		}
 		for _, v := range values {

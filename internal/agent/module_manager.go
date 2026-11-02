@@ -102,6 +102,7 @@ func (m *ModuleManager) publishCoalescedUpdate() {
 		return
 	}
 	m.pendingUpdate = false
+	m.updateTimer = nil // Reset timer so next change can schedule a new one.
 
 	// Rebuild snapshot with current epoch.
 	epoch := ""
@@ -149,8 +150,14 @@ func (m *ModuleManager) buildSnapshotLocked(epoch string) *CatalogSnapshot {
 			ServiceVersion: pkg.ServiceVersion,
 			Revision:       pkg.Revision,
 			OpenAPIYAML:    pkg.OpenAPIYAML,
-			Health:         moduleproto.NewHealthEntry("healthy", "", time.Now()),
 		}
+
+		// Use live IPC health if available.
+		healthStatus := "healthy"
+		if ipcReg := m.ipc.Lookup(moduleID); ipcReg != nil {
+			healthStatus = ipcReg.Health
+		}
+		entry.Health = moduleproto.NewHealthEntry(healthStatus, "", time.Now())
 
 		// Add UI descriptors if present.
 		for _, desc := range pkg.UIDescriptors {

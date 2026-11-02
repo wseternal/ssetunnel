@@ -130,6 +130,11 @@ func moduleInstall(args []string) error {
 		return fmt.Errorf("install: %w", err)
 	}
 
+	// W8 fix: Validate executable path (symlink rejection check).
+	if err := pkg.ValidateExecutable(); err != nil {
+		return fmt.Errorf("validate executable: %w", err)
+	}
+
 	fmt.Printf("Installed module %s v%s\n", moduleID, version)
 	fmt.Println("Note: Use 'ssetunnel module start' to enable the module.")
 	return nil

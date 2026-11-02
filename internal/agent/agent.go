@@ -95,6 +95,10 @@ type Agent struct {
 	// Current yamux session (set in runOnce, cleared on disconnect).
 	// Used by the module invoker to open reverse streams.
 	currentSess atomic.Pointer[yamux.Session]
+
+	// runCtx stores the Run context for use by control message handlers
+	// (e.g., module_open needs a cancellable context).
+	runCtx atomic.Pointer[context.Context]
 }
 
 // InitModules initializes the module subsystem for this agent. It creates
@@ -121,7 +125,12 @@ func (a *Agent) InitModules(ctx context.Context, dataDir string) error {
 	ipc.SetListener(listener, endpoint)
 
 	log.Printf("agent: module IPC listening on %s", endpoint)
-	log.Printf("agent: module IPC credential: %s", ipc.Credential())
+	// S5 fix: Log only first 8 chars of credential to avoid plaintext leak.
+	cred := ipc.Credential()
+	if len(cred) > 8 {
+		cred = cred[:8] + "..."
+	}
+	log.Printf("agent: module IPC credential: %s", cred)
 
 	supervisor := agentmod.NewSupervisor(ctx, registry, ipc)
 	a.modRegistry = registry
@@ -166,12 +175,24 @@ func (a *Agent) currentYamuxSession() *yamux.Session {
 	return a.currentSess.Load()
 }
 
+// runContext returns the agent's run context, or context.Background()
+// if Run has not been called yet.
+func (a *Agent) runContext() context.Context {
+	if p := a.runCtx.Load(); p != nil {
+		return *p
+	}
+	return context.Background()
+}
+
 // Run connects and reconnects until ctx is canceled. Reconnect uses
 // exponential backoff (500 ms → 30 s cap with jitter) via cenkalti/backoff.
 // A session that survived past the health threshold resets the backoff:
 // a drop after long uptime was a network event, not a flapping server,
 // so reconnect immediately.
 func (a *Agent) Run(ctx context.Context) error {
+	// Store run context for control message handlers (W7 fix).
+	a.runCtx.Store(&ctx)
+
 	// Install log capture: all log.Printf output goes to both stderr
 	// and the ring buffer. The server can request recent lines via
 	// the control channel (MsgLogRequest).

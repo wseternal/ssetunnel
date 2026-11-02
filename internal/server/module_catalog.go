@@ -30,10 +30,6 @@ type ModuleCatalog struct {
 	// In-progress snapshot reassembly.
 	reassembly *SnapshotReassembly
 
-	// OpenAPI validation queue.
-	validationQueue chan *ValidationRequest
-	validationWg    sync.WaitGroup
-
 	// Metrics collector (C15 fix: wired).
 	metrics *metrics.ModuleMetrics
 
@@ -71,49 +67,17 @@ type SnapshotReassembly struct {
 	StartedAt   time.Time
 }
 
-// ValidationRequest is a request to validate an OpenAPI document.
-type ValidationRequest struct {
-	Entry   moduleproto.SnapshotModuleEntry
-	Result  chan *ValidationResult
-}
-
-// ValidationResult is the result of OpenAPI validation.
-type ValidationResult struct {
-	ModuleID string
-	Valid    bool
-	Error    error
-	Doc      *agentmod.ValidatedOpenAPI
-}
-
 // NewModuleCatalog creates a new catalog for the given session.
 func NewModuleCatalog(epoch string) *ModuleCatalog {
 	mc := &ModuleCatalog{
-		epoch:           epoch,
-		validationQueue: make(chan *ValidationRequest, moduleproto.OpenAPIValidationQueue),
-		metrics:         metrics.NewModuleMetrics(100),
+		epoch:   epoch,
+		metrics: metrics.NewModuleMetrics(100),
 	}
 
-	// Start validation workers.
-	for i := 0; i < moduleproto.OpenAPIValidationWorkers; i++ {
-		mc.validationWg.Add(1)
-		go mc.validationWorker()
-	}
+	// Note: Async OpenAPI validation via worker pool deferred to future PR.
+	// handleSnapshotCommit currently validates synchronously.
 
 	return mc
-}
-
-// validationWorker processes OpenAPI validation requests.
-func (mc *ModuleCatalog) validationWorker() {
-	defer mc.validationWg.Done()
-	for req := range mc.validationQueue {
-		doc, err := agentmod.ValidateOpenAPI(req.Entry.OpenAPIYAML)
-		req.Result <- &ValidationResult{
-			ModuleID: req.Entry.ModuleID,
-			Valid:    err == nil,
-			Error:    err,
-			Doc:      doc,
-		}
-	}
 }
 
 // HandleControlMessage processes a module-related control message.
@@ -143,6 +107,12 @@ func (mc *ModuleCatalog) handleSnapshotStart(payload json.RawMessage) error {
 
 	mc.mu.Lock()
 	defer mc.mu.Unlock()
+
+	// Clean up stale reassembly if timed out.
+	if mc.reassembly != nil && time.Since(mc.reassembly.StartedAt) > reassemblyTimeout {
+		log.Printf("catalog: cleaning up stale reassembly (epoch=%s)", mc.reassembly.Epoch)
+		mc.reassembly = nil
+	}
 
 	// Reject if epoch doesn't match (stale snapshot from old connection).
 	if p.Epoch != mc.epoch {
@@ -392,10 +362,9 @@ func (mc *ModuleCatalog) Revision() int {
 	return mc.committed.Revision
 }
 
-// Close shuts down the catalog and its validation workers (W7 fix: safe for double-close).
+// Close shuts down the catalog.
 func (mc *ModuleCatalog) Close() {
 	mc.closeOnce.Do(func() {
-		close(mc.validationQueue)
-		mc.validationWg.Wait()
+		// No-op: validation workers removed (sync validation).
 	})
 }

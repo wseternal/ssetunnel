@@ -165,6 +165,13 @@ func (r *Registry) AllModules() []string {
 // agent (without going through the package installation flow). The module is
 // automatically enabled so it appears in catalog snapshots.
 func (r *Registry) InstallFromIPC(moduleID, serviceName, version, revision string, openAPIYAML []byte, executable string) error {
+	// Validate OpenAPI before installing (same as Install flow).
+	if len(openAPIYAML) > 0 {
+		if _, err := ValidateOpenAPI(openAPIYAML); err != nil {
+			return fmt.Errorf("validate openapi: %w", err)
+		}
+	}
+
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -321,7 +328,12 @@ func (s *Supervisor) startProcess(pkg *Package) error {
 	}
 
 	// Launch the process with the IPC credential.
-	cmd := startModuleProcess(ctx, pkg.Executable, s.ipc.Credential(), s.ipc.listener.Addr().String())
+	listenerAddr, err := s.ipc.ListenerAddr()
+	if err != nil {
+		cancel()
+		return fmt.Errorf("get listener addr: %w", err)
+	}
+	cmd := startModuleProcess(ctx, pkg.Executable, s.ipc.Credential(), listenerAddr)
 	if err := cmd.Start(); err != nil {
 		cancel()
 		return fmt.Errorf("start process: %w", err)

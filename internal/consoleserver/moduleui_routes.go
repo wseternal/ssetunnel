@@ -112,7 +112,7 @@ func (m *moduleUIRoutes) handleGetProviderAsset(w http.ResponseWriter, r *http.R
 		assetPath = "/"
 	}
 
-	session := m.server.FindSessionByAgent(agentID, sessInfo.UserID)
+	session := m.server.FindSessionByAgent(agentID, sessInfo)
 	if session == nil {
 		http.Error(w, "agent not found", http.StatusNotFound)
 		return
@@ -218,6 +218,10 @@ func (m *moduleUIRoutes) handleGetProviderAsset(w http.ResponseWriter, r *http.R
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(data)))
 	w.Header().Set("X-Module-Revision", mod.Revision)
 	w.Header().Set("Cache-Control", "public, max-age=3600") // 1 hour for provider assets
+	// W9 fix: Add restrictive CSP for SVG assets to prevent XSS.
+	if strings.HasSuffix(assetPath, ".svg") {
+		w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'")
+	}
 	w.Write(data)
 }
 
@@ -239,7 +243,7 @@ func (m *moduleUIRoutes) handleListModuleUI(w http.ResponseWriter, r *http.Reque
 	agentID := vars["agent-id"]
 	moduleID := vars["module-id"]
 
-	session := m.server.FindSessionByAgent(agentID, sessInfo.UserID)
+	session := m.server.FindSessionByAgent(agentID, sessInfo)
 	if session == nil {
 		http.Error(w, "agent not found", http.StatusNotFound)
 		return
