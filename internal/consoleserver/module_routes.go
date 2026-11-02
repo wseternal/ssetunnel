@@ -172,7 +172,11 @@ func (m *moduleRoutes) handleGetOpenAPI(w http.ResponseWriter, r *http.Request) 
 // POST /console/api/v1/modules/invoke/<agent-id>/<module-id>/<operation-path...>
 func (m *moduleRoutes) handleInvoke(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodOptions {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
+		// W4 fix: No CORS wildcard on invoke endpoint (requires explicit origin).
+		origin := r.Header.Get("Origin")
+		if origin != "" {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+		}
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, PATCH, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Correlation-ID")
 		w.WriteHeader(http.StatusNoContent)
@@ -273,8 +277,13 @@ func (m *moduleRoutes) handleInvoke(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 
-	// Copy response headers.
+	// Copy response headers (W6 fix: filter sensitive headers).
 	for key, values := range resp.Header {
+		// Skip hop-by-hop and sensitive headers.
+		lowerKey := strings.ToLower(key)
+		if lowerKey == "set-cookie" || lowerKey == "connection" || lowerKey == "transfer-encoding" {
+			continue
+		}
 		for _, v := range values {
 			w.Header().Add(key, v)
 		}
