@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/hashicorp/yamux"
+	"github.com/wseternal/ssetunnel/internal/metrics"
 	"github.com/wseternal/ssetunnel/internal/moduleproto"
 	"github.com/wseternal/ssetunnel/internal/mux"
 )
@@ -24,6 +25,9 @@ type ModuleStreamHandler struct {
 
 	// Session for this handler.
 	session *Session
+
+	// Metrics collector (C15 fix: wired).
+	metrics *metrics.ModuleMetrics
 
 	// Pending invocations waiting for agent to open stream.
 	pending map[string]*PendingInvocation
@@ -55,9 +59,15 @@ type ActiveInvocation struct {
 func NewModuleStreamHandler(session *Session) *ModuleStreamHandler {
 	return &ModuleStreamHandler{
 		session: session,
+		metrics: metrics.NewModuleMetrics(100),
 		pending: make(map[string]*PendingInvocation),
 		active:  make(map[string]*ActiveInvocation),
 	}
+}
+
+// Metrics returns the module metrics collector.
+func (h *ModuleStreamHandler) Metrics() *metrics.ModuleMetrics {
+	return h.metrics
 }
 
 // RequestInvocation sends a module_open to the agent and waits for the stream.
@@ -81,10 +91,12 @@ func (h *ModuleStreamHandler) RequestInvocation(ctx context.Context, moduleID, r
 	h.mu.Lock()
 	if len(h.pending) >= moduleproto.MaxPendingOpens {
 		h.mu.Unlock()
+		h.metrics.RecordError("transport")
 		return nil, "", fmt.Errorf("too many pending invocations")
 	}
 	h.pending[invocationID] = pending
 	h.mu.Unlock()
+	h.metrics.RecordPendingOpen()
 
 	// Send module_open to agent.
 	payload, _ := json.Marshal(moduleproto.ModuleOpenPayload{
@@ -103,8 +115,11 @@ func (h *ModuleStreamHandler) RequestInvocation(ctx context.Context, moduleID, r
 		h.mu.Lock()
 		delete(h.pending, invocationID)
 		h.mu.Unlock()
+		h.metrics.RecordPendingClose()
+		h.metrics.RecordError("transport")
 		return nil, "", fmt.Errorf("send module_open: %w", err)
 	}
+	h.metrics.RecordInvocation()
 
 	// Wait for agent to open stream (with deadline).
 	deadline := time.After(time.Duration(moduleproto.EstablishmentDeadline) * time.Second)
@@ -120,6 +135,7 @@ func (h *ModuleStreamHandler) RequestInvocation(ctx context.Context, moduleID, r
 			StartedAt: time.Now(),
 		}
 		h.mu.Unlock()
+		h.metrics.RecordPendingClose()
 		return stream, invocationID, nil
 
 	case <-pending.Done:
@@ -127,18 +143,24 @@ func (h *ModuleStreamHandler) RequestInvocation(ctx context.Context, moduleID, r
 		h.mu.Lock()
 		delete(h.pending, invocationID)
 		h.mu.Unlock()
+		h.metrics.RecordPendingClose()
+		h.metrics.RecordInvocationComplete(false, true)
 		return nil, "", fmt.Errorf("invocation cancelled")
 
 	case <-deadline:
 		h.mu.Lock()
 		delete(h.pending, invocationID)
 		h.mu.Unlock()
+		h.metrics.RecordPendingClose()
+		h.metrics.RecordInvocationComplete(true, false)
 		return nil, "", fmt.Errorf("establishment timeout")
 
 	case <-ctx.Done():
 		h.mu.Lock()
 		delete(h.pending, invocationID)
 		h.mu.Unlock()
+		h.metrics.RecordPendingClose()
+		h.metrics.RecordInvocationComplete(true, false)
 		return nil, "", ctx.Err()
 	}
 }
@@ -203,6 +225,7 @@ func (h *ModuleStreamHandler) CompleteInvocation(invocationID string) {
 	if inv, ok := h.active[invocationID]; ok {
 		inv.Stream.Close()
 		delete(h.active, invocationID)
+		h.metrics.RecordInvocationComplete(false, false)
 	}
 }
 
@@ -214,12 +237,15 @@ func (h *ModuleStreamHandler) CancelInvocation(invocationID string, reason strin
 	if pending, ok := h.pending[invocationID]; ok {
 		close(pending.Done) // Signal cancellation safely.
 		delete(h.pending, invocationID)
+		h.metrics.RecordPendingClose()
+		h.metrics.RecordInvocationComplete(false, true)
 	}
 
 	// Check active.
 	if inv, ok := h.active[invocationID]; ok {
 		inv.Stream.Close()
 		delete(h.active, invocationID)
+		h.metrics.RecordInvocationComplete(false, true)
 	}
 	h.mu.Unlock()
 

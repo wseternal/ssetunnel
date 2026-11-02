@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/wseternal/ssetunnel/internal/agentmod"
+	"github.com/wseternal/ssetunnel/internal/metrics"
 	"github.com/wseternal/ssetunnel/internal/moduleproto"
 	"github.com/wseternal/ssetunnel/internal/mux"
 )
@@ -32,6 +33,9 @@ type ModuleCatalog struct {
 	// OpenAPI validation queue.
 	validationQueue chan *ValidationRequest
 	validationWg    sync.WaitGroup
+
+	// Metrics collector (C15 fix: wired).
+	metrics *metrics.ModuleMetrics
 }
 
 // CommittedCatalog is a validated catalog ready for discovery and invocation.
@@ -83,6 +87,7 @@ func NewModuleCatalog(epoch string) *ModuleCatalog {
 	mc := &ModuleCatalog{
 		epoch:           epoch,
 		validationQueue: make(chan *ValidationRequest, moduleproto.OpenAPIValidationQueue),
+		metrics:         metrics.NewModuleMetrics(100),
 	}
 
 	// Start validation workers.
@@ -237,6 +242,9 @@ func (mc *ModuleCatalog) handleSnapshotCommit(payload json.RawMessage) error {
 		return fmt.Errorf("unmarshal entries: %w", err)
 	}
 
+	// Capture reassembly start time before clearing.
+	snapshotStartedAt := mc.reassembly.StartedAt
+
 	// Clear reassembly state.
 	mc.reassembly = nil
 
@@ -274,6 +282,7 @@ func (mc *ModuleCatalog) handleSnapshotCommit(payload json.RawMessage) error {
 
 	// Atomically replace the committed catalog.
 	mc.committed = newCatalog
+	mc.metrics.RecordSnapshot(len(newCatalog.Modules), time.Since(snapshotStartedAt), nil)
 
 	log.Printf("catalog: snapshot committed (epoch=%s, revision=%d, modules=%d)",
 		p.Epoch, newCatalog.Revision, len(newCatalog.Modules))

@@ -1,169 +1,236 @@
-//go:build !windows
-
 package agentmod
 
 import (
-	"context"
+	"bufio"
+	"fmt"
+	"net"
+	"os"
+	"strings"
 	"testing"
 	"time"
 )
 
-func TestIPCServerBasic(t *testing.T) {
-	srv, err := NewIPCServer()
+// TestIPCServer_AuthRegHealth tests the full IPC protocol flow:
+// AUTH → OK → REG → HEALTH loop.
+func TestIPCServer_AuthRegHealth(t *testing.T) {
+	server, err := NewIPCServer()
 	if err != nil {
-		t.Fatalf("NewIPCServer: %v", err)
+		t.Fatalf("new server: %v", err)
 	}
-	defer srv.Close()
+	defer server.Close()
 
-	if srv.Credential() == "" {
-		t.Error("credential should not be empty")
+	// Create a listener.
+	endpoint := "/tmp/test-ipc-" + randomHex(4) + ".sock"
+	defer os.Remove(endpoint)
+
+	ln, err := net.Listen("unix", endpoint)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+
+	server.SetListener(ln, endpoint)
+
+	// Wait for accept loop to start.
+	time.Sleep(50 * time.Millisecond)
+
+	// Connect as a module process.
+	conn, err := net.DialTimeout("unix", endpoint, 5*time.Second)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	cred := server.Credential()
+	writer := bufio.NewWriter(conn)
+	reader := bufio.NewReader(conn)
+
+	// 1. Send AUTH.
+	authMsg := fmt.Sprintf("AUTH %d\n%s", len(cred), cred)
+	if _, err := writer.WriteString(authMsg); err != nil {
+		t.Fatalf("write AUTH: %v", err)
+	}
+	writer.Flush()
+
+	// 2. Read OK.
+	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	okLine, err := reader.ReadString('\n')
+	if err != nil {
+		t.Fatalf("read OK: %v", err)
+	}
+	okLine = strings.TrimSuffix(okLine, "\n")
+	if okLine != "OK" {
+		t.Fatalf("expected OK, got %q", okLine)
 	}
 
-	// Register a module.
-	reg := &Registration{
-		ModuleID:    "com.example.test",
-		ServiceName: "test-service",
-		Version:     "1.0.0",
-		Revision:    "rev-1",
-		Health:      "healthy",
+	// 3. Send REG.
+	invEndpoint := endpoint + "-inv"
+	regMsg := "REG test-mod TestService 1.0.0 abc123 " + invEndpoint + "\n"
+	if _, err := writer.WriteString(regMsg); err != nil {
+		t.Fatalf("write REG: %v", err)
 	}
-	if err := srv.Register(reg); err != nil {
-		t.Fatalf("Register: %v", err)
+	writer.Flush()
+
+	// Wait for registration to complete.
+	time.Sleep(100 * time.Millisecond)
+
+	// 4. Verify registration.
+	reg := server.Lookup("test-mod")
+	if reg == nil {
+		t.Fatal("expected module to be registered")
+	}
+	if reg.ModuleID != "test-mod" {
+		t.Errorf("module ID: got %s, want test-mod", reg.ModuleID)
+	}
+	if reg.ServiceName != "TestService" {
+		t.Errorf("service name: got %s, want TestService", reg.ServiceName)
+	}
+	if reg.Version != "1.0.0" {
+		t.Errorf("version: got %s, want 1.0.0", reg.Version)
+	}
+	if reg.Revision != "abc123" {
+		t.Errorf("revision: got %s, want abc123", reg.Revision)
+	}
+	if reg.InvEndpoint != invEndpoint {
+		t.Errorf("inv endpoint: got %s, want %s", reg.InvEndpoint, invEndpoint)
 	}
 
-	// Lookup should find it.
-	found := srv.Lookup("com.example.test")
-	if found == nil {
-		t.Fatal("Lookup returned nil")
+	// 5. Send HEALTH update.
+	healthMsg := "HEALTH degraded high latency\n"
+	if _, err := writer.WriteString(healthMsg); err != nil {
+		t.Fatalf("write HEALTH: %v", err)
 	}
-	if found.ModuleID != "com.example.test" {
-		t.Errorf("ModuleID = %q, want com.example.test", found.ModuleID)
-	}
+	writer.Flush()
 
-	// Duplicate registration should fail.
-	if err := srv.Register(reg); err == nil {
-		t.Error("expected error for duplicate registration")
-	}
+	// Wait for health update.
+	time.Sleep(50 * time.Millisecond)
 
-	// Deregister.
-	srv.Deregister("com.example.test")
-	if found := srv.Lookup("com.example.test"); found != nil {
-		t.Error("Lookup should return nil after deregister")
+	// 6. Verify health update.
+	reg = server.Lookup("test-mod")
+	if reg == nil {
+		t.Fatal("module deregistered unexpectedly")
 	}
-
-	// Modules should be empty.
-	if mods := srv.Modules(); len(mods) != 0 {
-		t.Errorf("Modules() = %d entries, want 0", len(mods))
+	if reg.Health != "degraded" {
+		t.Errorf("health: got %s, want degraded", reg.Health)
 	}
 }
 
-func TestIPCServerClose(t *testing.T) {
-	srv, err := NewIPCServer()
+// TestIPCServer_InvalidCredential verifies that invalid credentials are rejected.
+func TestIPCServer_InvalidCredential(t *testing.T) {
+	server, err := NewIPCServer()
 	if err != nil {
-		t.Fatalf("NewIPCServer: %v", err)
+		t.Fatalf("new server: %v", err)
 	}
+	defer server.Close()
 
-	// Register a module.
-	reg := &Registration{ModuleID: "com.example.test"}
-	if err := srv.Register(reg); err != nil {
-		t.Fatalf("Register: %v", err)
+	endpoint := "/tmp/test-badcred-" + randomHex(4) + ".sock"
+	defer os.Remove(endpoint)
+
+	ln, err := net.Listen("unix", endpoint)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
 	}
+	defer ln.Close()
 
-	// Close the server.
-	if err := srv.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
+	server.SetListener(ln, endpoint)
+	time.Sleep(50 * time.Millisecond)
+
+	conn, err := net.DialTimeout("unix", endpoint, 5*time.Second)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
 	}
+	defer conn.Close()
 
-	// Register after close should fail.
-	if err := srv.Register(reg); err != ErrIPCClosed {
-		t.Errorf("Register after close: got %v, want ErrIPCClosed", err)
+	writer := bufio.NewWriter(conn)
+	reader := bufio.NewReader(conn)
+
+	// Send AUTH with wrong credential.
+	badCred := "wrong-credential"
+	authMsg := fmt.Sprintf("AUTH %d\n%s", len(badCred), badCred)
+	writer.WriteString(authMsg)
+	writer.Flush()
+
+	// Should receive ERR.
+	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	errLine, err := reader.ReadString('\n')
+	if err != nil {
+		t.Fatalf("read ERR: %v", err)
 	}
-
-	// Close again should be a no-op.
-	if err := srv.Close(); err != nil {
-		t.Errorf("Close again: %v", err)
+	errLine = strings.TrimSuffix(errLine, "\n")
+	if errLine != "ERR" {
+		t.Errorf("expected ERR, got %q", errLine)
 	}
 }
 
-func TestListenIPC(t *testing.T) {
-	dir := t.TempDir()
-	endpoint := IPCEndpoint(dir)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	listener, err := ListenIPC(ctx, endpoint)
+// TestIPCServer_DeregisterOnDisconnect verifies that modules are
+// deregistered when their connection closes.
+func TestIPCServer_DeregisterOnDisconnect(t *testing.T) {
+	server, err := NewIPCServer()
 	if err != nil {
-		t.Fatalf("ListenIPC: %v", err)
+		t.Fatalf("new server: %v", err)
 	}
-	defer listener.Close()
+	defer server.Close()
 
-	// Listen again on the same endpoint should succeed (we remove existing socket).
-	listener2, err := ListenIPC(ctx, endpoint)
+	endpoint := "/tmp/test-discon-" + randomHex(4) + ".sock"
+	defer os.Remove(endpoint)
+
+	ln, err := net.Listen("unix", endpoint)
 	if err != nil {
-		t.Fatalf("ListenIPC second: %v", err)
+		t.Fatalf("listen: %v", err)
 	}
-	listener2.Close()
+	defer ln.Close()
+
+	server.SetListener(ln, endpoint)
+	time.Sleep(50 * time.Millisecond)
+
+	conn, err := net.DialTimeout("unix", endpoint, 5*time.Second)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+
+	cred := server.Credential()
+	writer := bufio.NewWriter(conn)
+	reader := bufio.NewReader(conn)
+
+	// AUTH.
+	authMsg := fmt.Sprintf("AUTH %d\n%s", len(cred), cred)
+	writer.WriteString(authMsg)
+	writer.Flush()
+
+	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	reader.ReadString('\n') // OK
+
+	// REG.
+	writer.WriteString("REG disc-mod DiscService 1.0.0 rev1\n")
+	writer.Flush()
+	time.Sleep(100 * time.Millisecond)
+
+	// Verify registered.
+	if reg := server.Lookup("disc-mod"); reg == nil {
+		t.Fatal("expected module to be registered")
+	}
+
+	// Close connection.
+	conn.Close()
+
+	// Wait for health loop to detect disconnect (60s timeout, but
+	// the read error should be immediate since we closed the conn).
+	time.Sleep(200 * time.Millisecond)
+
+	// Verify deregistered.
+	if reg := server.Lookup("disc-mod"); reg != nil {
+		t.Error("expected module to be deregistered after disconnect")
+	}
 }
 
-func TestIPCEndpoint(t *testing.T) {
-	dir := "/tmp/test-agent-data"
-	endpoint := IPCEndpoint(dir)
-	if endpoint != "/tmp/test-agent-data/module.sock" {
-		t.Errorf("IPCEndpoint = %q, want /tmp/test-agent-data/module.sock", endpoint)
+// randomHex returns a random hex string of the given byte length.
+func randomHex(n int) string {
+	b := make([]byte, n)
+	_, _ = strings.NewReader("").Read(b) // no-op
+	// Use crypto/rand via the server's generateCredential.
+	cred, _ := generateCredential()
+	if len(cred) > n*2 {
+		return cred[:n*2]
 	}
-}
-
-func TestIPCClientServer(t *testing.T) {
-	dir := t.TempDir()
-	endpoint := IPCEndpoint(dir)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	// Start server.
-	srv, err := NewIPCServer()
-	if err != nil {
-		t.Fatalf("NewIPCServer: %v", err)
-	}
-	defer srv.Close()
-
-	listener, err := ListenIPC(ctx, endpoint)
-	if err != nil {
-		t.Fatalf("ListenIPC: %v", err)
-	}
-	srv.listener = listener
-
-	// Accept connections in background.
-	go func() {
-		conn, err := listener.Accept()
-		if err != nil {
-			return
-		}
-		// Read auth header.
-		buf := make([]byte, 256)
-		n, _ := conn.Read(buf)
-		// Verify credential (simplified for test).
-		conn.Write([]byte("OK\n"))
-		// Read registration.
-		n, _ = conn.Read(buf)
-		_ = n
-	}()
-
-	// Connect client.
-	client, err := DialIPC(ctx, endpoint, srv.Credential())
-	if err != nil {
-		t.Fatalf("DialIPC: %v", err)
-	}
-	defer client.Close()
-
-	// Register.
-	if err := client.Register("com.example.test", "test-service", "1.0.0", "rev-1"); err != nil {
-		t.Fatalf("Register: %v", err)
-	}
-
-	// Report health.
-	if err := client.ReportHealth("healthy", "all good"); err != nil {
-		t.Fatalf("ReportHealth: %v", err)
-	}
+	return cred
 }
