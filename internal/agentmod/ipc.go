@@ -1,13 +1,18 @@
 package agentmod
 
 import (
+	"bufio"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log"
 	"net"
+	"strconv"
+	"strings"
 	"sync"
+	"time"
 )
 
 // IPC errors.
@@ -22,21 +27,25 @@ var (
 // control. Module processes connect to this server to register their
 // services, report health, and receive commands.
 type IPCServer struct {
-	mu         sync.Mutex
+	mu         sync.RWMutex
 	listener   net.Listener
 	credential string   // random token for authenticating module processes
+	endpoint   string   // IPC endpoint path for dialing new connections
 	modules    map[string]*Registration
 	closed     bool
+	ctx        context.Context
+	cancel     context.CancelFunc
 }
 
 // Registration represents a live module registration from a connected process.
 type Registration struct {
-	ModuleID    string
-	ServiceName string
-	Version     string
-	Revision    string
-	Health      string
-	Conn        net.Conn // the IPC connection to the module process
+	ModuleID        string
+	ServiceName     string
+	Version         string
+	Revision        string
+	Health          string
+	Conn            net.Conn // the control connection to the module process
+	InvEndpoint     string   // invocation socket endpoint for fresh connections per invocation
 }
 
 // NewIPCServer creates a new IPC server with a random launch credential.
@@ -45,9 +54,12 @@ func NewIPCServer() (*IPCServer, error) {
 	if err != nil {
 		return nil, fmt.Errorf("generate credential: %w", err)
 	}
+	ctx, cancel := context.WithCancel(context.Background())
 	return &IPCServer{
 		credential: cred,
 		modules:    make(map[string]*Registration),
+		ctx:        ctx,
+		cancel:     cancel,
 	}, nil
 }
 
@@ -59,11 +71,32 @@ func (s *IPCServer) Credential() string {
 
 // SetListener attaches a listener to the IPC server for accepting
 // incoming module connections. Starts an accept loop in the background.
-func (s *IPCServer) SetListener(ln net.Listener) {
+func (s *IPCServer) SetListener(ln net.Listener, endpoint string) {
 	s.mu.Lock()
 	s.listener = ln
+	s.endpoint = endpoint
 	s.mu.Unlock()
 	go s.acceptLoop(ln)
+}
+
+// Endpoint returns the IPC endpoint path for dialing new connections.
+func (s *IPCServer) Endpoint() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.endpoint
+}
+
+// DialModule opens a fresh IPC connection to a registered module.
+// Used by the invoker to get a dedicated connection per invocation.
+func (s *IPCServer) DialModule(ctx context.Context) (net.Conn, error) {
+	s.mu.RLock()
+	endpoint := s.endpoint
+	s.mu.RUnlock()
+	if endpoint == "" {
+		return nil, fmt.Errorf("ipc: no endpoint configured")
+	}
+	var d net.Dialer
+	return d.DialContext(ctx, ipcNetwork, endpoint)
 }
 
 // acceptLoop accepts incoming connections on the listener.
@@ -71,18 +104,146 @@ func (s *IPCServer) acceptLoop(ln net.Listener) {
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
-			s.mu.Lock()
+			s.mu.RLock()
 			closed := s.closed
-			s.mu.Unlock()
+			s.mu.RUnlock()
 			if closed {
 				return
 			}
 			// Transient error; continue.
 			continue
 		}
-		// For now, just keep the connection open.
-		// Real auth/registration happens via the IPC protocol.
-		_ = conn
+		// Handle each connection in its own goroutine.
+		go s.handleConnection(conn)
+	}
+}
+
+// handleConnection processes a single IPC connection through the full protocol:
+// AUTH → OK → REG → HEALTH loop.
+func (s *IPCServer) handleConnection(conn net.Conn) {
+	defer conn.Close()
+
+	// Set deadline for authentication phase.
+	conn.SetDeadline(time.Now().Add(5 * time.Second))
+
+	reader := bufio.NewReader(conn)
+
+	// 1. Read AUTH frame.
+	authLine, err := reader.ReadString('\n')
+	if err != nil {
+		log.Printf("ipc: auth read error: %v", err)
+		return
+	}
+	authLine = strings.TrimSuffix(authLine, "\n")
+	if !strings.HasPrefix(authLine, "AUTH ") {
+		log.Printf("ipc: expected AUTH, got %q", authLine)
+		return
+	}
+	credLen, err := strconv.Atoi(strings.TrimPrefix(authLine, "AUTH "))
+	if err != nil || credLen < 0 || credLen > 1024 {
+		log.Printf("ipc: invalid credential length: %v", err)
+		return
+	}
+
+	// Read credential bytes.
+	credBuf := make([]byte, credLen)
+	if _, err := reader.Read(credBuf); err != nil {
+		log.Printf("ipc: credential read error: %v", err)
+		return
+	}
+
+	// Verify credential.
+	if string(credBuf) != s.credential {
+		conn.Write([]byte("ERR\n"))
+		log.Printf("ipc: invalid credential")
+		return
+	}
+
+	// Send OK response.
+	if _, err := conn.Write([]byte("OK\n")); err != nil {
+		log.Printf("ipc: failed to send OK: %v", err)
+		return
+	}
+
+	// 2. Read REG message.
+	conn.SetDeadline(time.Now().Add(10 * time.Second))
+	regLine, err := reader.ReadString('\n')
+	if err != nil {
+		log.Printf("ipc: reg read error: %v", err)
+		return
+	}
+	regLine = strings.TrimSuffix(regLine, "\n")
+	if !strings.HasPrefix(regLine, "REG ") {
+		log.Printf("ipc: expected REG, got %q", regLine)
+		return
+	}
+
+	// Parse REG: moduleID serviceName version revision [invEndpoint]
+	parts := strings.SplitN(regLine[4:], " ", 5)
+	if len(parts) < 4 {
+		log.Printf("ipc: invalid REG format: %q", regLine)
+		return
+	}
+	moduleID, serviceName, version, revision := parts[0], parts[1], parts[2], parts[3]
+	invEndpoint := ""
+	if len(parts) >= 5 {
+		invEndpoint = parts[4]
+	}
+
+	// Register the module.
+	reg := &Registration{
+		ModuleID:    moduleID,
+		ServiceName: serviceName,
+		Version:     version,
+		Revision:    revision,
+		Health:      "healthy",
+		Conn:        conn,
+		InvEndpoint: invEndpoint,
+	}
+	if err := s.Register(reg); err != nil {
+		log.Printf("ipc: register failed: %v", err)
+		return
+	}
+
+	log.Printf("ipc: module %s registered (version=%s, revision=%s)", moduleID, version, revision)
+
+	// Clear deadline for health loop.
+	conn.SetDeadline(time.Time{})
+
+	// 3. Health reporting loop.
+	for {
+		// Set read deadline to detect dead connections (60s).
+		conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			// Connection closed or timeout — deregister.
+			s.Deregister(moduleID)
+			log.Printf("ipc: module %s disconnected: %v", moduleID, err)
+			return
+		}
+		line = strings.TrimSuffix(line, "\n")
+
+		if strings.HasPrefix(line, "HEALTH ") {
+			healthParts := strings.SplitN(line[7:], " ", 2)
+			status := healthParts[0]
+			message := ""
+			if len(healthParts) > 1 {
+				message = healthParts[1]
+			}
+
+			s.mu.Lock()
+			if r, ok := s.modules[moduleID]; ok {
+				r.Health = status
+			}
+			s.mu.Unlock()
+
+			if status != "healthy" {
+				log.Printf("ipc: module %s health=%s: %s", moduleID, status, message)
+			}
+		} else {
+			log.Printf("ipc: unexpected message from %s: %q", moduleID, line)
+		}
 	}
 }
 
@@ -124,15 +285,15 @@ func (s *IPCServer) Deregister(moduleID string) {
 
 // Lookup returns the registration for a module, or nil if not found.
 func (s *IPCServer) Lookup(moduleID string) *Registration {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	return s.modules[moduleID]
 }
 
 // Modules returns a snapshot of all current registrations.
 func (s *IPCServer) Modules() map[string]*Registration {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	result := make(map[string]*Registration, len(s.modules))
 	for k, v := range s.modules {
 		result[k] = v
@@ -149,6 +310,7 @@ func (s *IPCServer) Close() error {
 		return nil
 	}
 	s.closed = true
+	s.cancel()
 	for id, reg := range s.modules {
 		if reg.Conn != nil {
 			reg.Conn.Close()

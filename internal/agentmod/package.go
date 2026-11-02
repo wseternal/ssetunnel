@@ -119,9 +119,10 @@ func (p *Package) Validate() error {
 }
 
 // ValidateExecutable checks that the executable exists and is within the
-// package directory.
+// package directory. Rejects symlinks that escape the package (C9 fix).
 func (p *Package) ValidateExecutable() error {
-	info, err := os.Stat(p.Executable)
+	// Use Lstat to detect symlinks.
+	info, err := os.Lstat(p.Executable)
 	if err != nil {
 		return fmt.Errorf("executable not found: %w", err)
 	}
@@ -131,13 +132,30 @@ func (p *Package) ValidateExecutable() error {
 	if info.Mode()&0o111 == 0 {
 		return fmt.Errorf("executable is not executable")
 	}
-	if !isSubPath(p.PackageDir, p.Executable) {
-		return fmt.Errorf("executable is outside package directory")
+
+	// Reject symlinked executables (C9 fix: prevent arbitrary code execution).
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("executable is a symlink (not allowed)")
+	}
+
+	// Resolve symlinks in the path to prevent traversal attacks.
+	resolvedExec, err := filepath.EvalSymlinks(p.Executable)
+	if err != nil {
+		return fmt.Errorf("resolve executable path: %w", err)
+	}
+	resolvedDir, err := filepath.EvalSymlinks(p.PackageDir)
+	if err != nil {
+		return fmt.Errorf("resolve package directory: %w", err)
+	}
+
+	if !isSubPath(resolvedDir, resolvedExec) {
+		return fmt.Errorf("executable is outside package directory (after symlink resolution)")
 	}
 	return nil
 }
 
 // isSubPath checks that child is a sub-path of parent (no symlink traversal).
+// Use with EvalSymlinks-resolved paths for security (C9 fix).
 func isSubPath(parent, child string) bool {
 	rel, err := filepath.Rel(parent, child)
 	if err != nil {

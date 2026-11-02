@@ -219,8 +219,8 @@ func (mc *ModuleCatalog) handleSnapshotCommit(payload json.RawMessage) error {
 		return fmt.Errorf("chunk count mismatch: got %d, want %d", p.ChunkCount, len(mc.reassembly.Chunks))
 	}
 
-	// Concatenate chunks and verify digest.
-	var data []byte
+	// Concatenate chunks and verify digest (C12 fix: pre-allocate to avoid O(n²)).
+	data := make([]byte, 0, mc.reassembly.TotalSize)
 	for _, chunk := range mc.reassembly.Chunks {
 		data = append(data, chunk...)
 	}

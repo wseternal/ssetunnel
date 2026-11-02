@@ -15,18 +15,10 @@ import (
 // supplies a manifest and an HTTP handler; the SDK handles IPC registration,
 // health reporting, and request routing.
 //
-// Example usage:
-//
-//	m := sdk.Manifest{
-//	    ModuleID:       "com.example.mymodule",
-//	    ServiceName:    "my-service",
-//	    ServiceVersion: "1.0.0",
-//	    OpenAPIYAML:    openapiBytes,
-//	}
-//	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-//	    w.Write([]byte("Hello from module!"))
-//	})
-//	err := sdk.Serve(ctx, m, handler)
+// Architecture:
+//   - Control connection: connects to agent for AUTH, REG, HEALTH
+//   - Invocation listener: listens on a separate socket for the agent to dial
+//     per invocation. Each invocation gets a fresh connection.
 type Provider struct {
 	manifest Manifest
 	handler  http.Handler
@@ -66,6 +58,23 @@ func Serve(ctx context.Context, m Manifest, handler http.Handler) error {
 
 // serve connects to the IPC endpoint and serves requests.
 func (p *Provider) serve(ctx context.Context, endpoint, credential string) error {
+	// Create invocation listener — a separate socket for HTTP invocations.
+	invEndpoint := endpoint + "-inv"
+
+	// Remove stale socket.
+	os.Remove(invEndpoint)
+
+	invListener, err := net.Listen("unix", invEndpoint)
+	if err != nil {
+		return fmt.Errorf("listen invocation socket: %w", err)
+	}
+	defer os.Remove(invEndpoint)
+	defer invListener.Close()
+
+	// Set permissions to owner-only.
+	os.Chmod(invEndpoint, 0o600)
+
+	// Connect to agent for control (AUTH, REG, HEALTH).
 	client, err := DialIPCProvider(ctx, endpoint, credential)
 	if err != nil {
 		return fmt.Errorf("dial IPC: %w", err)
@@ -73,12 +82,12 @@ func (p *Provider) serve(ctx context.Context, endpoint, credential string) error
 	p.client = client
 	defer client.Close()
 
-	// Register with the agent.
-	if err := client.Register(p.manifest.ModuleID, p.manifest.ServiceName, p.manifest.ServiceVersion, p.manifest.Revision); err != nil {
+	// Register with the agent, passing the invocation endpoint.
+	if err := client.RegisterWithEndpoint(p.manifest.ModuleID, p.manifest.ServiceName, p.manifest.ServiceVersion, p.manifest.Revision, invEndpoint); err != nil {
 		return fmt.Errorf("register: %w", err)
 	}
 
-	log.Printf("provider: registered module %s", p.manifest.ModuleID)
+	log.Printf("provider: registered module %s (invocation endpoint: %s)", p.manifest.ModuleID, invEndpoint)
 
 	// Report initial health.
 	if err := client.ReportHealth("healthy", "module started"); err != nil {
@@ -88,9 +97,20 @@ func (p *Provider) serve(ctx context.Context, endpoint, credential string) error
 	// Start health reporting goroutine.
 	go p.healthLoop(ctx)
 
-	// Serve HTTP requests from the IPC connection.
-	// The agent forwards invocation requests as HTTP over the IPC socket.
-	return p.serveHTTP(ctx)
+	// Serve HTTP requests on the invocation listener.
+	// The agent opens a fresh connection for each invocation.
+	server := &http.Server{
+		Handler:     p.handler,
+		BaseContext: func(net.Listener) context.Context { return ctx },
+	}
+
+	// Graceful shutdown on context cancellation.
+	go func() {
+		<-ctx.Done()
+		server.Close()
+	}()
+
+	return server.Serve(invListener)
 }
 
 // healthLoop periodically reports health to the agent.
@@ -130,50 +150,11 @@ func (p *Provider) ReportHealth(h Health) {
 	}
 }
 
-// serveHTTP handles HTTP requests from the IPC connection.
-// The agent writes requests as HTTP/1.1 and reads responses.
-func (p *Provider) serveHTTP(ctx context.Context) error {
-	// Create an HTTP server that serves on the IPC connection.
-	// The agent opens a new connection for each invocation.
-	server := &http.Server{
-		Handler:     p.handler,
-		BaseContext: func(net.Listener) context.Context { return ctx },
-	}
-
-	// Create a listener from the IPC connection.
-	// For simplicity, we serve on the existing connection directly.
-	// In a production implementation, this would use a more sophisticated
-	// protocol for multiplexing multiple invocations.
-	lis := &singleConnListener{conn: p.client.conn}
-	return server.Serve(lis)
-}
-
-// singleConnListener is a net.Listener that returns a single connection once.
-type singleConnListener struct {
-	conn net.Conn
-	used bool
-}
-
-func (l *singleConnListener) Accept() (net.Conn, error) {
-	if l.used {
-		return nil, errors.New("listener closed")
-	}
-	l.used = true
-	return l.conn, nil
-}
-
-func (l *singleConnListener) Close() error {
-	return nil
-}
-
-func (l *singleConnListener) Addr() net.Addr {
-	return l.conn.LocalAddr()
-}
-
 // IPCClient is a client for module-to-agent IPC communication.
 type IPCClient struct {
 	conn       net.Conn
 	credential string
+	endpoint   string
 }
 
 // DialIPCProvider connects to the agent's IPC endpoint and authenticates.
@@ -183,7 +164,7 @@ func DialIPCProvider(ctx context.Context, endpoint, credential string) (*IPCClie
 	if err != nil {
 		return nil, fmt.Errorf("dial: %w", err)
 	}
-	client := &IPCClient{conn: conn, credential: credential}
+	client := &IPCClient{conn: conn, credential: credential, endpoint: endpoint}
 	if err := client.authenticate(); err != nil {
 		conn.Close()
 		return nil, err
@@ -213,7 +194,12 @@ func (c *IPCClient) authenticate() error {
 
 // Register sends a module registration to the agent.
 func (c *IPCClient) Register(moduleID, serviceName, version, revision string) error {
-	msg := fmt.Sprintf("REG %s %s %s %s\n", moduleID, serviceName, version, revision)
+	return c.RegisterWithEndpoint(moduleID, serviceName, version, revision, "")
+}
+
+// RegisterWithEndpoint sends a module registration with an invocation endpoint.
+func (c *IPCClient) RegisterWithEndpoint(moduleID, serviceName, version, revision, invEndpoint string) error {
+	msg := fmt.Sprintf("REG %s %s %s %s %s\n", moduleID, serviceName, version, revision, invEndpoint)
 	if _, err := c.conn.Write([]byte(msg)); err != nil {
 		return fmt.Errorf("write register: %w", err)
 	}

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bufio"
 	"io"
 	"log"
 	"net"
@@ -194,12 +195,12 @@ func (s *Server) acceptModuleStreams(ms *yamux.Session, sess *Session, handler *
 			return
 		}
 
-		// Read the module marker with a deadline.
+		// Read the module marker with a deadline using bufio.Reader (C17 fix).
 		const markerReadTimeout = 5 * time.Second
 		stream.SetReadDeadline(time.Now().Add(markerReadTimeout))
 
-		marker := make([]byte, len(moduleproto.ModuleStreamMarker)+128)
-		n, err := stream.Read(marker)
+		reader := bufio.NewReader(stream)
+		markerLine, err := reader.ReadString('\n')
 		if err != nil {
 			log.Printf("server: read module marker: %v", err)
 			stream.Close()
@@ -207,23 +208,36 @@ func (s *Server) acceptModuleStreams(ms *yamux.Session, sess *Session, handler *
 		}
 		stream.SetReadDeadline(time.Time{}) // clear deadline
 
-		markerStr := string(marker[:n])
-		if !strings.HasPrefix(markerStr, moduleproto.ModuleStreamMarker) {
-			log.Printf("server: unexpected stream marker: %q", markerStr)
+		if !strings.HasPrefix(markerLine, moduleproto.ModuleStreamMarker) {
+			log.Printf("server: unexpected stream marker: %q", markerLine)
 			stream.Close()
 			continue
 		}
 
 		// Extract invocation ID from marker.
-		invocationID := strings.TrimPrefix(markerStr, moduleproto.ModuleStreamMarker)
+		invocationID := strings.TrimPrefix(markerLine, moduleproto.ModuleStreamMarker)
 		invocationID = strings.TrimSuffix(invocationID, "\n")
 
+		// Wrap stream with buffered reader to preserve any bytes read beyond the marker (C17 fix).
+		bufferedConn := &bufioReadConn{Conn: stream, reader: reader}
+
 		// Deliver to stream handler.
-		if err := handler.DeliverStream(stream, invocationID); err != nil {
+		if err := handler.DeliverStream(bufferedConn, invocationID); err != nil {
 			log.Printf("server: deliver module stream: %v", err)
 			stream.Close()
 		}
 	}
+}
+
+// bufioReadConn wraps a net.Conn with a buffered reader.
+// Used when bytes are read ahead during marker parsing (C17 fix).
+type bufioReadConn struct {
+	net.Conn
+	reader *bufio.Reader
+}
+
+func (c *bufioReadConn) Read(b []byte) (int, error) {
+	return c.reader.Read(b)
 }
 
 // HTTPHandler returns the tunnel endpoint handler (/events, /up).

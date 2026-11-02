@@ -174,10 +174,13 @@ func (s *Store) CacheAsset(packageDigest, relPath string, data []byte) error {
 		return ErrDigestMismatch
 	}
 
-	// Check cache capacity.
+	// Check cache capacity (C11 fix: guard nil oldAsset).
 	cacheKey := packageDigest + "/" + relPath
-	oldAsset := s.cache[cacheKey]
-	newUsed := s.cacheUsed - oldAsset.Size + int64(len(data))
+	var oldSize int64
+	if oldAsset := s.cache[cacheKey]; oldAsset != nil {
+		oldSize = oldAsset.Size
+	}
+	newUsed := s.cacheUsed - oldSize + int64(len(data))
 	if newUsed > s.maxCacheSize {
 		return ErrCacheFull
 	}

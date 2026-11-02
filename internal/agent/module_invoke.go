@@ -19,7 +19,7 @@ import (
 
 // ModuleInvoker handles incoming module invocation requests from the server.
 // For each invocation, it opens a reverse yamux stream and proxies the HTTP
-// exchange to the module process over local IPC.
+// exchange to the module process over a fresh local IPC connection.
 type ModuleInvoker struct {
 	mu       sync.RWMutex
 	agent    *Agent
@@ -33,6 +33,9 @@ type ModuleInvoker struct {
 	pendingOpens      int
 	activeInvocations int
 	perModuleCounts   map[string]int
+
+	// Reserved slots (to prevent TOCTOU races).
+	reservedSlots map[string]int
 }
 
 // Invocation tracks an active module invocation.
@@ -45,6 +48,7 @@ type Invocation struct {
 	CorrelationID string
 	StartedAt     time.Time
 	Stream        *yamux.Stream
+	cancel        context.CancelFunc
 }
 
 // NewModuleInvoker creates a module invoker for the given agent.
@@ -55,6 +59,7 @@ func NewModuleInvoker(agent *Agent, ipc *agentmod.IPCServer, registry *agentmod.
 		registry:        registry,
 		invocations:     make(map[string]*Invocation),
 		perModuleCounts: make(map[string]int),
+		reservedSlots:   make(map[string]int),
 	}
 }
 
@@ -66,21 +71,23 @@ func (mi *ModuleInvoker) HandleModuleOpen(ctx context.Context, msg *mux.ControlM
 		return fmt.Errorf("unmarshal module_open: %w", err)
 	}
 
-	// Check limits.
+	// Check limits and reserve slots atomically (C7 fix: TOCTOU race).
 	mi.mu.Lock()
 	if mi.pendingOpens >= moduleproto.MaxPendingOpens {
 		mi.mu.Unlock()
 		return fmt.Errorf("too many pending opens: %d", mi.pendingOpens)
 	}
-	if mi.activeInvocations >= moduleproto.MaxActiveInvocations {
+	if mi.activeInvocations+mi.reservedCount() >= moduleproto.MaxActiveInvocations {
 		mi.mu.Unlock()
 		return fmt.Errorf("too many active invocations: %d", mi.activeInvocations)
 	}
-	if mi.perModuleCounts[payload.ModuleID] >= moduleproto.MaxActiveInvocationsPerModule {
+	moduleTotal := mi.perModuleCounts[payload.ModuleID] + mi.reservedSlots[payload.ModuleID]
+	if moduleTotal >= moduleproto.MaxActiveInvocationsPerModule {
 		mi.mu.Unlock()
 		return fmt.Errorf("too many invocations for module %s", payload.ModuleID)
 	}
 	mi.pendingOpens++
+	mi.reservedSlots[payload.ModuleID]++
 	mi.mu.Unlock()
 
 	defer func() {
@@ -92,15 +99,18 @@ func (mi *ModuleInvoker) HandleModuleOpen(ctx context.Context, msg *mux.ControlM
 	// Validate module exists and revision matches.
 	reg := mi.ipc.Lookup(payload.ModuleID)
 	if reg == nil {
+		mi.releaseSlot(payload.ModuleID)
 		return fmt.Errorf("module not found: %s", payload.ModuleID)
 	}
 	if payload.Revision != "" && reg.Revision != payload.Revision {
+		mi.releaseSlot(payload.ModuleID)
 		return fmt.Errorf("revision mismatch: got %s, want %s", reg.Revision, payload.Revision)
 	}
 
 	// Open reverse stream to server.
 	stream, err := session.OpenStream()
 	if err != nil {
+		mi.releaseSlot(payload.ModuleID)
 		return fmt.Errorf("open stream: %w", err)
 	}
 
@@ -108,10 +118,12 @@ func (mi *ModuleInvoker) HandleModuleOpen(ctx context.Context, msg *mux.ControlM
 	marker := fmt.Sprintf("%s%s\n", moduleproto.ModuleStreamMarker, payload.InvocationID)
 	if _, err := stream.Write([]byte(marker)); err != nil {
 		stream.Close()
+		mi.releaseSlot(payload.ModuleID)
 		return fmt.Errorf("write marker: %w", err)
 	}
 
-	// Track invocation.
+	// Track invocation with its own context for cancellation.
+	invCtx, invCancel := context.WithCancel(ctx)
 	inv := &Invocation{
 		ID:            payload.InvocationID,
 		ModuleID:      payload.ModuleID,
@@ -121,23 +133,46 @@ func (mi *ModuleInvoker) HandleModuleOpen(ctx context.Context, msg *mux.ControlM
 		CorrelationID: payload.CorrelationID,
 		StartedAt:     time.Now(),
 		Stream:        stream,
+		cancel:        invCancel,
 	}
 
 	mi.mu.Lock()
 	mi.invocations[payload.InvocationID] = inv
 	mi.activeInvocations++
 	mi.perModuleCounts[payload.ModuleID]++
+	mi.reservedSlots[payload.ModuleID]--
 	mi.mu.Unlock()
 
-	// Proxy HTTP exchange in background.
-	go mi.proxyInvocation(ctx, inv, reg.Conn)
+	// Proxy HTTP exchange in background with a fresh IPC connection (C3 fix).
+	go mi.proxyInvocation(invCtx, inv, reg)
 
 	return nil
 }
 
-// proxyInvocation proxies an HTTP exchange between the tunnel stream and the module's IPC connection.
-func (mi *ModuleInvoker) proxyInvocation(ctx context.Context, inv *Invocation, ipcConn net.Conn) {
+// reservedCount returns the total reserved slots across all modules.
+func (mi *ModuleInvoker) reservedCount() int {
+	total := 0
+	for _, v := range mi.reservedSlots {
+		total += v
+	}
+	return total
+}
+
+// releaseSlot releases a reserved slot for a module.
+func (mi *ModuleInvoker) releaseSlot(moduleID string) {
+	mi.mu.Lock()
+	mi.reservedSlots[moduleID]--
+	if mi.reservedSlots[moduleID] <= 0 {
+		delete(mi.reservedSlots, moduleID)
+	}
+	mi.mu.Unlock()
+}
+
+// proxyInvocation proxies an HTTP exchange between the tunnel stream and the module's
+// invocation endpoint over a fresh IPC connection (C3 fix: no shared connection).
+func (mi *ModuleInvoker) proxyInvocation(ctx context.Context, inv *Invocation, reg *agentmod.Registration) {
 	defer func() {
+		inv.cancel()
 		inv.Stream.Close()
 		mi.mu.Lock()
 		delete(mi.invocations, inv.ID)
@@ -146,7 +181,23 @@ func (mi *ModuleInvoker) proxyInvocation(ctx context.Context, inv *Invocation, i
 		mi.mu.Unlock()
 	}()
 
-	// Read HTTP request from stream.
+	// Open a fresh IPC connection per invocation (C3 fix).
+	invConn, err := mi.dialModule(ctx, reg)
+	if err != nil {
+		log.Printf("invocation %s: dial module: %v", inv.ID, err)
+		return
+	}
+	defer invConn.Close()
+
+	// Set deadlines from context (C13 fix).
+	if deadline, ok := ctx.Deadline(); ok {
+		invConn.SetDeadline(deadline)
+	} else {
+		// Default 30s timeout.
+		invConn.SetDeadline(time.Now().Add(30 * time.Second))
+	}
+
+	// Read HTTP request from tunnel stream.
 	req, err := http.ReadRequest(bufio.NewReader(inv.Stream))
 	if err != nil {
 		log.Printf("invocation %s: read request: %v", inv.ID, err)
@@ -154,28 +205,42 @@ func (mi *ModuleInvoker) proxyInvocation(ctx context.Context, inv *Invocation, i
 	}
 	defer req.Body.Close()
 
-	// Forward to module via IPC connection.
-	// Write the request to the IPC connection.
-	if err := req.Write(ipcConn); err != nil {
+	// Forward to module via fresh IPC connection.
+	if err := req.Write(invConn); err != nil {
 		log.Printf("invocation %s: write to module: %v", inv.ID, err)
 		return
 	}
 
 	// Read response from module.
-	resp, err := http.ReadResponse(bufio.NewReader(ipcConn), req)
+	resp, err := http.ReadResponse(bufio.NewReader(invConn), req)
 	if err != nil {
 		log.Printf("invocation %s: read response: %v", inv.ID, err)
 		return
 	}
 	defer resp.Body.Close()
 
-	// Write response back to stream.
+	// Write response back to tunnel stream.
 	if err := resp.Write(inv.Stream); err != nil {
 		log.Printf("invocation %s: write response: %v", inv.ID, err)
 		return
 	}
 
 	log.Printf("invocation %s: completed (%s %s, status=%d)", inv.ID, inv.Method, inv.Path, resp.StatusCode)
+}
+
+// dialModule opens a fresh IPC connection to the module's invocation endpoint.
+// Falls back to the control connection if no invocation endpoint is available.
+func (mi *ModuleInvoker) dialModule(ctx context.Context, reg *agentmod.Registration) (net.Conn, error) {
+	if reg.InvEndpoint != "" {
+		var d net.Dialer
+		conn, err := d.DialContext(ctx, "unix", reg.InvEndpoint)
+		if err != nil {
+			return nil, fmt.Errorf("dial invocation endpoint %s: %w", reg.InvEndpoint, err)
+		}
+		return conn, nil
+	}
+	// Fallback: use the agent's IPC socket (legacy, single connection).
+	return mi.ipc.DialModule(ctx)
 }
 
 // HandleModuleClose cancels an active invocation.
@@ -185,15 +250,16 @@ func (mi *ModuleInvoker) HandleModuleClose(msg *mux.ControlMessage) error {
 		return fmt.Errorf("unmarshal module_close: %w", err)
 	}
 
-	mi.mu.Lock()
+	mi.mu.RLock()
 	inv, ok := mi.invocations[payload.InvocationID]
-	mi.mu.Unlock()
+	mi.mu.RUnlock()
 
 	if !ok {
 		return nil // Already closed or not found.
 	}
 
 	log.Printf("invocation %s: cancelled (reason=%s)", payload.InvocationID, payload.Reason)
+	inv.cancel()  // Cancel the invocation context.
 	inv.Stream.Close()
 	return nil
 }
@@ -204,9 +270,11 @@ func (mi *ModuleInvoker) Close() {
 	defer mi.mu.Unlock()
 
 	for _, inv := range mi.invocations {
+		inv.cancel()
 		inv.Stream.Close()
 	}
 	mi.invocations = make(map[string]*Invocation)
 	mi.activeInvocations = 0
 	mi.perModuleCounts = make(map[string]int)
+	mi.reservedSlots = make(map[string]int)
 }

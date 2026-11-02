@@ -231,34 +231,6 @@ func generateClientCorrelationID() string {
 	return fmt.Sprintf("sdk-%d", time.Now().UnixNano())
 }
 
-// Cancel cancels an in-flight invocation by its correlation ID. The
-// server closes the stream, and the module's handler receives a context
-// cancellation.
-func (c *Consumer) Cancel(ctx context.Context, correlationID string) error {
-	// Cancellation is done by canceling the invocation context.
-	// This method is provided for explicit server-side cancellation
-	// when the client cannot cancel the context directly.
-	url := fmt.Sprintf("%s/console/api/v1/modules/cancel", c.serverURL)
-	body := strings.NewReader(fmt.Sprintf(`{"correlation_id":%q}`, correlationID))
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, body)
-	if err != nil {
-		return fmt.Errorf("create cancel request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	c.setAuth(req)
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("cancel: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
-		return ParseErrorResponse(resp)
-	}
-	return nil
-}
-
 // setAuth sets the authorization header on a request.
 func (c *Consumer) setAuth(req *http.Request) {
 	if c.authToken != "" {

@@ -118,7 +118,7 @@ func (a *Agent) InitModules(ctx context.Context, dataDir string) error {
 	}
 
 	// Attach listener to IPC server for accept loop.
-	ipc.SetListener(listener)
+	ipc.SetListener(listener, endpoint)
 
 	supervisor := agentmod.NewSupervisor(ctx, registry, ipc)
 	a.modRegistry = registry

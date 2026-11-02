@@ -318,7 +318,6 @@ func (s *Supervisor) monitorProcess(handle *ProcessHandle) {
 
 	// Check if we should restart.
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	// If the handle is still in our map and the module is enabled, restart.
 	if current, ok := s.processes[handle.ModuleID]; ok && current == handle {
@@ -327,19 +326,30 @@ func (s *Supervisor) monitorProcess(handle *ProcessHandle) {
 			backoff := calculateBackoff(handle.RestartCount)
 			log.Printf("supervisor: restarting module %s in %v (attempt %d)", handle.ModuleID, backoff, handle.RestartCount)
 
+			// Release lock before sleeping (C6 fix: prevent deadlock).
+			s.mu.Unlock()
+
 			select {
 			case <-time.After(backoff):
-				delete(s.processes, handle.ModuleID)
-				if err := s.startProcess(handle.Package); err != nil {
-					log.Printf("supervisor: restart failed for module %s: %v", handle.ModuleID, err)
+				// Re-acquire lock and re-validate state.
+				s.mu.Lock()
+				if current, ok := s.processes[handle.ModuleID]; ok && current == handle {
+					delete(s.processes, handle.ModuleID)
+					s.mu.Unlock()
+					if err := s.startProcess(handle.Package); err != nil {
+						log.Printf("supervisor: restart failed for module %s: %v", handle.ModuleID, err)
+					}
+				} else {
+					s.mu.Unlock()
 				}
 			case <-s.ctx.Done():
 				// Supervisor shutting down.
 			}
-		} else {
-			delete(s.processes, handle.ModuleID)
+			return
 		}
+		delete(s.processes, handle.ModuleID)
 	}
+	s.mu.Unlock()
 }
 
 // stopProcess terminates a module process gracefully, then kills it.

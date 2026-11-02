@@ -62,15 +62,19 @@ func (m *ModuleManager) SetControlSender(sender func(msg *mux.ControlMessage) er
 // OnConnect is called when a new tunnel connection is established.
 // It publishes a fresh catalog snapshot to the server.
 func (m *ModuleManager) OnConnect(ctx context.Context, epoch string) error {
+	// Build snapshot under lock.
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	// Build fresh snapshot from current registry state.
 	snapshot := m.buildSnapshotLocked(epoch)
 	m.snapshot = snapshot
+	msgs, err := m.buildPublishMessages(snapshot)
+	m.mu.Unlock()
 
-	// Publish immediately.
-	return m.publishSnapshotLocked(ctx, snapshot)
+	if err != nil {
+		return err
+	}
+
+	// Send outside lock (C4 fix).
+	return m.sendMessages(msgs)
 }
 
 // OnRegistryChange is called when the registry changes (install, remove, enable, disable).
@@ -84,31 +88,41 @@ func (m *ModuleManager) OnRegistryChange(ctx context.Context) {
 	// Coalesce updates: wait 100ms before publishing.
 	if m.updateTimer == nil {
 		m.updateTimer = time.AfterFunc(100*time.Millisecond, func() {
-			m.publishCoalescedUpdate(ctx)
+			m.publishCoalescedUpdate()
 		})
 	}
 }
 
 // publishCoalescedUpdate publishes a snapshot after coalescing multiple changes.
-func (m *ModuleManager) publishCoalescedUpdate(ctx context.Context) {
+func (m *ModuleManager) publishCoalescedUpdate() {
+	// Build snapshot under lock.
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	if !m.pendingUpdate {
+		m.mu.Unlock()
 		return
 	}
 	m.pendingUpdate = false
 
 	// Rebuild snapshot with current epoch.
 	epoch := ""
+	var prevRevision int
 	if m.snapshot != nil {
 		epoch = m.snapshot.Epoch
+		prevRevision = m.snapshot.Revision
 	}
 	snapshot := m.buildSnapshotLocked(epoch)
-	snapshot.Revision = m.snapshot.Revision + 1
+	snapshot.Revision = prevRevision + 1
 	m.snapshot = snapshot
+	msgs, err := m.buildPublishMessages(snapshot)
+	m.mu.Unlock()
 
-	if err := m.publishSnapshotLocked(ctx, snapshot); err != nil {
+	if err != nil {
+		log.Printf("module manager: build messages: %v", err)
+		return
+	}
+
+	// Send outside lock (C4 fix).
+	if err := m.sendMessages(msgs); err != nil {
 		log.Printf("module manager: failed to publish snapshot: %v", err)
 	}
 }
@@ -165,37 +179,37 @@ func (m *ModuleManager) buildSnapshotLocked(epoch string) *CatalogSnapshot {
 	}
 }
 
-// publishSnapshotLocked publishes a catalog snapshot to the server.
-// Caller must hold m.mu.
-func (m *ModuleManager) publishSnapshotLocked(ctx context.Context, snapshot *CatalogSnapshot) error {
+// buildPublishMessages builds the control messages for a snapshot publish.
+// Caller must hold m.mu. Returns messages to send outside the lock (C4 fix).
+func (m *ModuleManager) buildPublishMessages(snapshot *CatalogSnapshot) ([]*mux.ControlMessage, error) {
 	if m.sendControl == nil {
-		return fmt.Errorf("no control sender")
+		return nil, fmt.Errorf("no control sender")
 	}
 
 	// Marshal module entries into chunk data.
 	data, err := moduleproto.MarshalSnapshotEntries(snapshot.Modules)
 	if err != nil {
-		return fmt.Errorf("marshal entries: %w", err)
+		return nil, fmt.Errorf("marshal entries: %w", err)
 	}
 
 	// Calculate digest.
 	digest := sha256.Sum256(data)
 	digestHex := hex.EncodeToString(digest[:])
 
-	// Send start message.
+	var msgs []*mux.ControlMessage
+
+	// Build start message.
 	startPayload, _ := json.Marshal(moduleproto.SnapshotStartPayload{
 		Epoch:       snapshot.Epoch,
 		ModuleCount: len(snapshot.Modules),
 		TotalSize:   int64(len(data)),
 	})
-	if err := m.sendControl(&mux.ControlMessage{
+	msgs = append(msgs, &mux.ControlMessage{
 		Type:    moduleproto.MsgSnapshotStart,
 		Payload: startPayload,
-	}); err != nil {
-		return fmt.Errorf("send start: %w", err)
-	}
+	})
 
-	// Send chunks (32 KiB each).
+	// Build chunk messages (32 KiB each).
 	chunkSize := moduleproto.SnapshotChunkSize
 	seq := 0
 	for i := 0; i < len(data); i += chunkSize {
@@ -207,31 +221,42 @@ func (m *ModuleManager) publishSnapshotLocked(ctx context.Context, snapshot *Cat
 			Seq:  seq,
 			Data: data[i:end],
 		})
-		if err := m.sendControl(&mux.ControlMessage{
+		msgs = append(msgs, &mux.ControlMessage{
 			Type:    moduleproto.MsgSnapshotChunk,
 			Payload: chunkPayload,
-		}); err != nil {
-			return fmt.Errorf("send chunk[%d]: %w", seq, err)
-		}
+		})
 		seq++
 	}
 
-	// Send commit message.
+	// Build commit message.
 	commitPayload, _ := json.Marshal(moduleproto.SnapshotCommitPayload{
 		Epoch:      snapshot.Epoch,
 		ChunkCount: seq,
 		Digest:     digestHex,
 	})
-	if err := m.sendControl(&mux.ControlMessage{
+	msgs = append(msgs, &mux.ControlMessage{
 		Type:    moduleproto.MsgSnapshotCommit,
 		Payload: commitPayload,
-	}); err != nil {
-		return fmt.Errorf("send commit: %w", err)
+	})
+
+	return msgs, nil
+}
+
+// sendMessages sends pre-built control messages outside the lock.
+func (m *ModuleManager) sendMessages(msgs []*mux.ControlMessage) error {
+	m.mu.RLock()
+	sendControl := m.sendControl
+	m.mu.RUnlock()
+
+	if sendControl == nil {
+		return fmt.Errorf("no control sender")
 	}
 
-	log.Printf("module manager: published snapshot (epoch=%s, modules=%d, size=%d)",
-		snapshot.Epoch, len(snapshot.Modules), len(data))
-
+	for _, msg := range msgs {
+		if err := sendControl(msg); err != nil {
+			return fmt.Errorf("send message: %w", err)
+		}
+	}
 	return nil
 }
 

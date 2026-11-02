@@ -39,6 +39,7 @@ type PendingInvocation struct {
 	Revision      string
 	CorrelationID string
 	ResponseCh    chan net.Conn
+	Done          chan struct{} // C8 fix: signal cancellation without closing ResponseCh
 	CreatedAt     time.Time
 }
 
@@ -73,6 +74,7 @@ func (h *ModuleStreamHandler) RequestInvocation(ctx context.Context, moduleID, r
 		Revision:      revision,
 		CorrelationID: correlationID,
 		ResponseCh:    make(chan net.Conn, 1),
+		Done:          make(chan struct{}), // C8 fix
 		CreatedAt:     time.Now(),
 	}
 
@@ -119,6 +121,13 @@ func (h *ModuleStreamHandler) RequestInvocation(ctx context.Context, moduleID, r
 		}
 		h.mu.Unlock()
 		return stream, invocationID, nil
+
+	case <-pending.Done:
+		// C8 fix: cancelled via Done channel (not closed ResponseCh).
+		h.mu.Lock()
+		delete(h.pending, invocationID)
+		h.mu.Unlock()
+		return nil, "", fmt.Errorf("invocation cancelled")
 
 	case <-deadline:
 		h.mu.Lock()
@@ -170,14 +179,19 @@ func (h *ModuleStreamHandler) DeliverStream(stream net.Conn, invocationID string
 		h.mu.Unlock()
 		return fmt.Errorf("unknown invocation ID: %s", invocationID)
 	}
+	delete(h.pending, invocationID)
 	h.mu.Unlock()
 
-	// Signal the waiting RequestInvocation.
+	// Signal the waiting RequestInvocation (C8 fix: use non-blocking send).
 	select {
 	case pending.ResponseCh <- stream:
 		return nil
+	case <-pending.Done:
+		// Invocation was cancelled.
+		stream.Close()
+		return fmt.Errorf("invocation cancelled before delivery")
 	default:
-		return fmt.Errorf("invocation already satisfied or cancelled")
+		return fmt.Errorf("invocation already satisfied")
 	}
 }
 
@@ -195,11 +209,10 @@ func (h *ModuleStreamHandler) CompleteInvocation(invocationID string) {
 // CancelInvocation cancels a pending or active invocation.
 func (h *ModuleStreamHandler) CancelInvocation(invocationID string, reason string) {
 	h.mu.Lock()
-	defer h.mu.Unlock()
 
-	// Check pending.
+	// Check pending (C8 fix: signal Done instead of closing ResponseCh).
 	if pending, ok := h.pending[invocationID]; ok {
-		close(pending.ResponseCh) // Signal cancellation.
+		close(pending.Done) // Signal cancellation safely.
 		delete(h.pending, invocationID)
 	}
 
@@ -208,6 +221,7 @@ func (h *ModuleStreamHandler) CancelInvocation(invocationID string, reason strin
 		inv.Stream.Close()
 		delete(h.active, invocationID)
 	}
+	h.mu.Unlock()
 
 	// Send module_close to agent.
 	payload, _ := json.Marshal(moduleproto.ModuleClosePayload{
@@ -226,7 +240,7 @@ func (h *ModuleStreamHandler) Close() {
 	defer h.mu.Unlock()
 
 	for id, pending := range h.pending {
-		close(pending.ResponseCh)
+		close(pending.Done) // C8 fix: signal Done.
 		delete(h.pending, id)
 	}
 
