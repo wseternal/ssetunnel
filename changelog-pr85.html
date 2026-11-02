@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Changelog: feat: agent module registry (#85)</title>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<style>
+  :root {
+    --new: #16a34a; --new-bg: #f0fdf4; --new-border: #bbf7d0;
+    --upd: #d97706; --upd-bg: #fffbeb; --upd-border: #fde68a;
+    --rem: #dc2626; --rem-bg: #fef2f2; --rem-border: #fecaca;
+    --bg: #fafafa; --card: #fff; --text: #1e293b; --muted: #64748b;
+    --border: #e2e8f0; --radius: 8px; --star: #f59e0b;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif; background: var(--bg); color: var(--text); line-height: 1.6; padding: 2rem; max-width: 1200px; margin: 0 auto; }
+  h1 { font-size: 1.75rem; font-weight: 700; margin-bottom: 0.25rem; }
+  h2 { font-size: 1.25rem; font-weight: 600; margin: 2rem 0 1rem; padding-bottom: 0.5rem; border-bottom: 2px solid var(--border); display: flex; align-items: center; gap: 0.5rem; }
+  h3 { font-size: 0.8rem; font-weight: 600; margin: 1.5rem 0 0.75rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
+  .header { margin-bottom: 2rem; }
+  .stats { display: flex; gap: 1rem; flex-wrap: wrap; margin-top: 0.75rem; }
+  .stat { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); padding: 0.5rem 1rem; font-size: 0.85rem; }
+  .stat strong { font-weight: 600; }
+  .stat.add { border-left: 3px solid var(--new); }
+  .stat.del { border-left: 3px solid var(--rem); }
+  a { color: #2563eb; text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  .stars { color: var(--star); font-size: 0.85rem; letter-spacing: 1px; white-space: nowrap; }
+  .diagram-section { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); padding: 1.5rem; margin: 1.5rem 0; overflow-x: auto; }
+  .diagram-section .mermaid { display: flex; justify-content: center; }
+  .diagram-row { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+  @media (max-width: 768px) { .diagram-row { grid-template-columns: 1fr; } }
+  .summary-table { width: 100%; border-collapse: collapse; font-size: 0.82rem; margin-bottom: 1.5rem; }
+  .summary-table th { background: #f8fafc; text-align: left; padding: 0.45rem 0.6rem; border-bottom: 2px solid var(--border); font-weight: 600; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); }
+  .summary-table td { padding: 0.4rem 0.6rem; border-bottom: 1px solid var(--border); vertical-align: middle; }
+  .summary-table tr:hover td { background: #f8fafc; }
+  .summary-table .col-stars { width: 90px; text-align: center; }
+  .summary-table .col-title { font-weight: 500; white-space: nowrap; }
+  .summary-table .col-badge { width: 90px; }
+  .summary-table .col-desc { color: var(--muted); }
+  .tab-new .summary-table th { border-bottom-color: var(--new-border); }
+  .tab-updated .summary-table th { border-bottom-color: var(--upd-border); }
+  .tab-removed .summary-table th { border-bottom-color: var(--rem-border); }
+  .tabs { display: flex; gap: 0; border-bottom: 2px solid var(--border); margin: 2.5rem 0 0; }
+  .tab-btn { padding: 0.7rem 1.5rem; border: none; background: none; font-size: 0.95rem; font-weight: 600; cursor: pointer; color: var(--muted); border-bottom: 3px solid transparent; margin-bottom: -2px; transition: all 0.15s; }
+  .tab-btn:hover { color: var(--text); }
+  .tab-btn.active-new { color: var(--new); border-bottom-color: var(--new); }
+  .tab-btn.active-updated { color: var(--upd); border-bottom-color: var(--upd); }
+  .tab-btn.active-removed { color: var(--rem); border-bottom-color: var(--rem); }
+  .tab-btn .count { font-size: 0.75rem; background: #f1f5f9; padding: 0.1rem 0.45rem; border-radius: 999px; margin-left: 0.35rem; font-weight: 500; }
+  .tab-btn.active-new .count { background: var(--new-bg); color: var(--new); }
+  .tab-btn.active-updated .count { background: var(--upd-bg); color: var(--upd); }
+  .tab-btn.active-removed .count { background: var(--rem-bg); color: var(--rem); }
+  .tab-panel { display: none; padding: 1.5rem 0; }
+  .tab-panel.active { display: block; }
+  .card-grid { display: grid; gap: 0.75rem; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); padding: 1rem 1.25rem; transition: box-shadow 0.15s; }
+  .card:hover { box-shadow: 0 2px 8px rgba(0,0,0,0.06); }
+  .card-title { font-weight: 600; font-size: 0.95rem; display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+  .card-desc { margin-top: 0.35rem; font-size: 0.88rem; color: var(--muted); }
+  .card-source { margin-top: 0.35rem; font-size: 0.78rem; font-family: 'SF Mono','Fira Code',monospace; color: #94a3b8; }
+  .badge { display: inline-block; font-size: 0.7rem; font-weight: 500; padding: 0.15rem 0.5rem; border-radius: 999px; text-transform: uppercase; letter-spacing: 0.03em; }
+  .badge-migration { background: #dbeafe; color: #1d4ed8; }
+  .badge-handler { background: #fae8ff; color: #a21caf; }
+  .badge-model { background: #e0f2fe; color: #0369a1; }
+  .badge-frontend { background: #fef3c7; color: #b45309; }
+  .badge-schema { background: #d1fae5; color: #047857; }
+  .badge-config { background: #f1f5f9; color: #475569; }
+  .badge-auth { background: #fce7f3; color: #be185d; }
+  .badge-session { background: #ede9fe; color: #6d28d9; }
+  .badge-invitation { background: #fff7ed; color: #c2410c; }
+  .badge-ci { background: #f0fdf4; color: #15803d; }
+  .badge-sdk { background: #e0e7ff; color: #3730a3; }
+  .badge-ipc { background: #fce7f3; color: #be185d; }
+  .badge-proxy { background: #fff7ed; color: #c2410c; }
+  .badge-catalog { background: #d1fae5; color: #047857; }
+  .badge-metrics { background: #ede9fe; color: #6d28d9; }
+  .badge-cli { background: #f1f5f9; color: #475569; }
+  .badge-docs { background: #f8fafc; color: #475569; }
+  .badge-capability { background: #e0f2fe; color: #0369a1; }
+  .tab-new .card { border-left: 3px solid var(--new); }
+  .tab-updated .card { border-left: 3px solid var(--upd); }
+  .tab-removed .card { border-left: 3px solid var(--rem); }
+  .compat-table { width: 100%; border-collapse: collapse; margin: 0 0 1.5rem; font-size: 0.85rem; }
+  .compat-table th { background: #f8fafc; text-align: left; padding: 0.6rem 0.75rem; border: 1px solid var(--border); font-weight: 600; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.03em; color: var(--muted); }
+  .compat-table td { padding: 0.6rem 0.75rem; border: 1px solid var(--border); vertical-align: top; }
+  .compat-table tr:hover td { background: #f8fafc; }
+  .compat-table code { background: #f1f5f9; padding: 0.1rem 0.3rem; border-radius: 3px; font-size: 0.82rem; }
+  .arch-summary { margin-top: 0.75rem; font-size: 0.95rem; color: var(--text); }
+  .risk-section { background: var(--upd-bg); border: 1px solid var(--upd-border); border-left: 4px solid var(--upd); border-radius: var(--radius); padding: 1.25rem 1.5rem; margin: 1.5rem 0; }
+  .risk-section h2 { margin: 0 0 0.75rem; padding-bottom: 0.4rem; border-bottom: 1px solid var(--upd-border); color: var(--upd); font-size: 1.1rem; }
+  .risk-item { background: var(--card); border: 1px solid var(--upd-border); border-radius: var(--radius); padding: 0.85rem 1rem; margin-top: 0.75rem; }
+  .risk-item-title { font-weight: 600; font-size: 0.92rem; color: var(--upd); }
+  .risk-item-path { margin-top: 0.25rem; font-size: 0.78rem; font-family: 'SF Mono','Fira Code',monospace; color: var(--muted); }
+  .risk-item-detail { margin-top: 0.35rem; font-size: 0.88rem; color: var(--text); }
+  .footer { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--border); font-size: 0.78rem; color: var(--muted); text-align: center; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>feat: agent module registry</h1>
+  <p style="color:var(--muted);font-size:0.9rem"><a href="https://github.com/wseternal/ssetunnel/pull/85">PR #85</a> &middot; <code>agent-module-registry</code> → <code>main</code></p>
+  <p class="arch-summary">Introduces a pluggable module system that extends the agent with external HTTP service processes. Modules register via local IPC (Unix sockets / named pipes), publish catalog snapshots through the control channel, and receive proxied HTTP invocations via reverse yamux streams. Includes a public Go SDK, digest-keyed UI asset trust, module metrics, console discovery UI, and three ADRs.</p>
+  <div class="stats">
+    <span class="stat add"><strong>+8,501</strong> additions</span>
+    <span class="stat del"><strong>−117</strong> deletions</span>
+    <span class="stat"><strong>41</strong> source files</span>
+    <span class="stat"><strong>18</strong> commits</span>
+  </div>
+</div>
+
+<div class="risk-section">
+  <h2>&#9888;&#65039; Warning (no critical risks)</h2>
+  <p style="font-size:0.88rem;margin-bottom:0.5rem">No critical risks identified on auth, session, or data-integrity paths. One medium-severity warning:</p>
+  <div class="risk-item">
+    <div class="risk-item-title">CORS origin reflection on invoke endpoint</div>
+    <div class="risk-item-path">internal/consoleserver/module_routes.go — handleInvoke OPTIONS handler</div>
+    <div class="risk-item-detail">The OPTIONS handler reflects any <code>Origin</code> header as <code>Access-Control-Allow-Origin</code>. This grants credentialed cross-origin access from any domain. Mitigated by user-auth middleware and auth-header stripping before forwarding, but a strict allowlist is safer.</div>
+  </div>
+</div>
+
+<div class="diagram-row">
+  <div class="diagram-section">
+    <h3>Module Invocation Flow</h3>
+    <div class="mermaid">
+flowchart TD
+    A["Console / SDK"] -->|"POST /invoke"| B["module_routes"]
+    B -->|"FindSessionByAgent"| C["ModuleCatalog"]
+    C -->|"Validate OpenAPI op"| D["ModuleStreamHandler"]
+    D -->|"module_open ctrl msg"| E["Control Stream"]
+    E -->|"Agent opens reverse stream"| F["yamux stream"]
+    F -->|"__module__ marker"| D
+    D -->|"http.ReadRequest"| G["Fresh IPC conn"]
+    G -->|"HTTP exchange"| H["Module Process"]
+    </div>
+  </div>
+  <div class="diagram-section">
+    <h3>Module Lifecycle</h3>
+    <div class="mermaid">
+stateDiagram-v2
+    [*] --> Installed: pkg validated
+    Installed --> Disabled: default state
+    Disabled --> Enabled: enable command
+    Enabled --> Running: supervisor start
+    Running --> Registered: IPC AUTH+REG
+    Registered --> Healthy: HEALTH ok
+    Healthy --> Crashed: process exit
+    Crashed --> Running: backoff restart
+    Enabled --> Disabled: disable command
+    Disabled --> Uninstalled: uninstall
+    Healthy --> Disabled: disable command
+    </div>
+  </div>
+</div>
+
+<div class="diagram-section">
+  <h3>Catalog Snapshot Transfer</h3>
+  <div class="mermaid">
+sequenceDiagram
+    participant Agent as Agent (ModuleManager)
+    participant Ctrl as Control Stream
+    participant Server as Server (ModuleCatalog)
+    Agent->>Ctrl: snapshot_start {epoch, count}
+    Agent->>Ctrl: snapshot_chunk {seq, data}
+    Agent->>Ctrl: snapshot_chunk {seq, data}
+    Agent->>Ctrl: snapshot_commit {digest}
+    Server->>Server: Concatenate chunks
+    Server->>Server: Verify SHA-256
+    Server->>Server: Validate OpenAPI docs
+    Server->>Server: Atomic catalog replace
+  </div>
+</div>
+
+<div class="tabs">
+  <button class="tab-btn active-new" onclick="switchTab('new')" id="btn-new">🟢 New <span class="count">15</span></button>
+  <button class="tab-btn" onclick="switchTab('updated')" id="btn-updated">🟡 Updated <span class="count">5</span></button>
+  <button class="tab-btn" onclick="switchTab('removed')" id="btn-removed">🔴 Removed <span class="count">0</span></button>
+</div>
+
+<div class="tab-panel active tab-new" id="tab-new">
+  <table class="summary-table">
+    <thead><tr><th class="col-stars">Rating</th><th class="col-title">Item</th><th class="col-badge">Type</th><th class="col-desc">Description</th></tr></thead>
+    <tbody>
+      <tr><td class="col-stars"><span class="stars">★★★★★</span></td><td class="col-title">Agent Module Registry</td><td class="col-badge"><span class="badge badge-ipc">IPC</span></td><td class="col-desc">Package validation, secure IPC, process supervisor with jittered backoff</td></tr>
+      <tr><td class="col-stars"><span class="stars">★★★★★</span></td><td class="col-title">Reverse Stream Invocation</td><td class="col-badge"><span class="badge badge-proxy">Proxy</span></td><td class="col-desc">Module HTTP proxy via reverse yamux streams with TOCTOU-safe slot reservation</td></tr>
+      <tr><td class="col-stars"><span class="stars">★★★★★</span></td><td class="col-title">Server Module Catalog</td><td class="col-badge"><span class="badge badge-catalog">Catalog</span></td><td class="col-desc">Three-phase snapshot reassembly with digest verification and OpenAPI validation</td></tr>
+      <tr><td class="col-stars"><span class="stars">★★★★</span></td><td class="col-title">Public Go SDK</td><td class="col-badge"><span class="badge badge-sdk">SDK</span></td><td class="col-desc">Manifest, discovery, invocation, streaming, and typed error contracts</td></tr>
+      <tr><td class="col-stars"><span class="stars">★★★★</span></td><td class="col-title">Wire Protocol</td><td class="col-badge"><span class="badge badge-model">Protocol</span></td><td class="col-desc">Catalog framing, invocation messages, health updates, and protocol limits</td></tr>
+      <tr><td class="col-stars"><span class="stars">★★★★</span></td><td class="col-title">Console Module APIs</td><td class="col-badge"><span class="badge badge-handler">Handler</span></td><td class="col-desc">Discovery, OpenAPI, invocation proxy, and UI asset routes</td></tr>
+      <tr><td class="col-stars"><span class="stars">★★★★</span></td><td class="col-title">Digest-Keyed UI Store</td><td class="col-badge"><span class="badge badge-auth">Security</span></td><td class="col-desc">Trusted package storage with SHA-256 verification and 64 MiB bounded cache</td></tr>
+      <tr><td class="col-stars"><span class="stars">★★★</span></td><td class="col-title">Module Metrics</td><td class="col-badge"><span class="badge badge-metrics">Metrics</span></td><td class="col-desc">Per-module invocation counters, latency histograms, and error rates</td></tr>
+      <tr><td class="col-stars"><span class="stars">★★★</span></td><td class="col-title">Module Lifecycle CLI</td><td class="col-badge"><span class="badge badge-cli">CLI</span></td><td class="col-desc">Install, uninstall, enable, disable, list, and status subcommands</td></tr>
+      <tr><td class="col-stars"><span class="stars">★★★</span></td><td class="col-title">Provider SDK</td><td class="col-badge"><span class="badge badge-sdk">SDK</span></td><td class="col-desc">Dual-socket helper for module processes to serve HTTP via IPC</td></tr>
+      <tr><td class="col-stars"><span class="stars">★★★</span></td><td class="col-title">Console Modules Tab</td><td class="col-badge"><span class="badge badge-frontend">Frontend</span></td><td class="col-desc">Agent selector, module cards, and OpenAPI viewer in admin SPA</td></tr>
+      <tr><td class="col-stars"><span class="stars">★★</span></td><td class="col-title">Architecture Decision Records</td><td class="col-badge"><span class="badge badge-docs">Docs</span></td><td class="col-desc">ADR-002 (IPC), ADR-003 (invocation), ADR-004 (package trust)</td></tr>
+      <tr><td class="col-stars"><span class="stars">★★</span></td><td class="col-title">Module User Guide</td><td class="col-badge"><span class="badge badge-docs">Docs</span></td><td class="col-desc">End-user guide for module installation, lifecycle, and invocation</td></tr>
+      <tr><td class="col-stars"><span class="stars">★</span></td><td class="col-title">OpenAPI Parser</td><td class="col-badge"><span class="badge badge-model">Model</span></td><td class="col-desc">Validates v3.0/3.1 structure, rejects external refs and path traversal</td></tr>
+      <tr><td class="col-stars"><span class="stars">★</span></td><td class="col-title">Rebuilt Frontend Assets</td><td class="col-badge"><span class="badge badge-frontend">Frontend</span></td><td class="col-desc">Vite single-file rebuild with Modules tab</td></tr>
+    </tbody>
+  </table>
+
+  <div class="card-grid">
+    <div class="card">
+      <div class="card-title"><span class="stars">★★★★★</span> Agent Module Registry <span class="badge badge-ipc">IPC</span></div>
+      <div class="card-desc">New <code>internal/agentmod/</code> package with package validation (reverse-DNS module IDs, semver, symlink-hardened executable checks), owner-only IPC on Unix sockets and named pipes, credential-based auth (32-byte random hex via env var), and process supervisor with jittered exponential backoff (500 ms → 30 s).</div>
+      <div class="card-source">internal/agentmod/ipc.go, registry.go, package.go, openapi.go, ipc_unix.go, ipc_windows.go, supervisor_*.go</div>
+    </div>
+
+    <div class="card">
+      <div class="card-title"><span class="stars">★★★★★</span> Reverse Stream Invocation <span class="badge badge-proxy">Proxy</span></div>
+      <div class="card-desc">Server sends <code>module_open</code> control message; agent opens reverse yamux stream with <code>__module__</code> marker; one HTTP/1.1 exchange per fresh IPC connection. TOCTOU-safe slot reservation: 32 pending opens, 32 active invocations per agent, 8 per module.</div>
+      <div class="card-source">internal/agent/module_invoke.go, internal/server/module_stream.go</div>
+    </div>
+
+    <div class="card">
+      <div class="card-title"><span class="stars">★★★★★</span> Server Module Catalog <span class="badge badge-catalog">Catalog</span></div>
+      <div class="card-desc">Session-scoped catalog reassembles agent snapshots via three-phase commit (start → chunk → commit). SHA-256 digest verification on commit. Worker pool (2 workers, queue depth 8) validates OpenAPI docs. Atomic catalog replacement. 5-minute reassembly timeout.</div>
+      <div class="card-source">internal/server/module_catalog.go</div>
+    </div>
+
+    <div class="card">
+      <div class="card-title"><span class="stars">★★★★</span> Public Go SDK <span class="badge badge-sdk">SDK</span></div>
+      <div class="card-desc">Public <code>sdk/</code> package with manifest types (packages, UI descriptors, asset digests), discovery client, invocation client with streaming, cancellation via typed errors (RFC 7807 problem details). Hides yamux, SSE, IPC, and stream identifiers from module authors.</div>
+      <div class="card-source">sdk/doc.go, manifest.go, discovery.go, errors.go</div>
+    </div>
+
+    <div class="card">
+      <div class="card-title"><span class="stars">★★★★</span> Wire Protocol <span class="badge badge-model">Protocol</span></div>
+      <div class="card-desc">New <code>internal/moduleproto/</code> package defining catalog snapshot framing (start/chunk/commit with 32 KiB chunks), module invocation messages (open/close), health updates, structured error codes, and all protocol limits (64 modules per agent, 4 MiB catalog, 8 MiB asset).</div>
+      <div class="card-source">internal/moduleproto/protocol.go, limits.go, doc.go</div>
+    </div>
+
+    <div class="card">
+      <div class="card-title"><span class="stars">★★★★</span> Console Module APIs <span class="badge badge-handler">Handler</span></div>
+      <div class="card-desc">Five new console endpoints: list modules, get module detail, get OpenAPI YAML, invoke module operation, and three UI asset routes (consumer, provider, list). All require user auth and agent access checks. Invocation proxy strips auth and hop-by-hop headers before forwarding.</div>
+      <div class="card-source">internal/consoleserver/module_routes.go, moduleui_routes.go</div>
+    </div>
+
+    <div class="card">
+      <div class="card-title"><span class="stars">★★★★</span> Digest-Keyed UI Store <span class="badge badge-auth">Security</span></div>
+      <div class="card-desc">In-memory trusted package store (<code>moduleui.Store</code>) with SHA-256 digest verification on every cached asset. Bounded at 64 MiB total, 8 MiB per asset. Path traversal prevention rejects <code>..</code>, <code>.</code>, and absolute paths. Consumer assets served with immutable cache headers.</div>
+      <div class="card-source">internal/moduleui/store.go</div>
+    </div>
+
+    <div class="card">
+      <div class="card-title"><span class="stars">★★★</span> Module Metrics <span class="badge badge-metrics">Metrics</span></div>
+      <div class="card-desc">Per-module invocation counters, latency histograms (p50/p95/p99), error rate tracking, and active invocation gauge. Integrates with existing metrics collector for auto-tuner visibility.</div>
+      <div class="card-source">internal/metrics/module.go</div>
+    </div>
+
+    <div class="card">
+      <div class="card-title"><span class="stars">★★★</span> Module Lifecycle CLI <span class="badge badge-cli">CLI</span></div>
+      <div class="card-desc">New <code>module</code> subcommand group: <code>install</code>, <code>uninstall</code>, <code>enable</code>, <code>disable</code>, <code>list</code>, <code>status</code>. Manages module packages on the local agent. Persists desired state to <code>desired_state.json</code>.</div>
+      <div class="card-source">cmd/ssetunnel/main.go (module subcommands)</div>
+    </div>
+
+    <div class="card">
+      <div class="card-title"><span class="stars">★★★</span> Provider SDK <span class="badge badge-sdk">SDK</span></div>
+      <div class="card-desc">Dual-socket helper for module processes: one control connection for AUTH/REG/HEALTH, one invocation socket accepting fresh connections per HTTP request. Implements the IPC client protocol and HTTP serving loop.</div>
+      <div class="card-source">sdk/provider.go</div>
+    </div>
+
+    <div class="card">
+      <div class="card-title"><span class="stars">★★★</span> Console Modules Tab <span class="badge badge-frontend">Frontend</span></div>
+      <div class="card-desc">New "Modules" tab in admin SPA with agent selector dropdown, module summary cards (ID, name, version, health, UI flag), OpenAPI YAML viewer, and refresh controls. Added to both admin (tab 6) and non-admin (tab 5) layouts.</div>
+      <div class="card-source">frontend/console/src/App.tsx</div>
+    </div>
+
+    <div class="card">
+      <div class="card-title"><span class="stars">★★</span> Architecture Decision Records <span class="badge badge-docs">Docs</span></div>
+      <div class="card-desc">Three ADRs documenting key decisions: ADR-002 (registry and IPC protocol), ADR-003 (reverse stream invocation), ADR-004 (digest-keyed package trust and UI federation).</div>
+      <div class="card-source">docs/adr/002-*.md, 003-*.md, 004-*.md</div>
+    </div>
+
+    <div class="card">
+      <div class="card-title"><span class="stars">★★</span> Module User Guide <span class="badge badge-docs">Docs</span></div>
+      <div class="card-desc">End-user guide covering module installation, lifecycle management, invocation, and SDK usage.</div>
+      <div class="card-source">docs/guide/002-agent-modules.md</div>
+    </div>
+
+    <div class="card">
+      <div class="card-title"><span class="stars">★</span> OpenAPI Parser <span class="badge badge-model">Model</span></div>
+      <div class="card-desc">Validates OpenAPI v3.0/3.1 YAML structure. Rejects external <code>$ref</code>s, duplicate operation IDs, path traversal, and excessive nesting depth. Used by package validation and catalog reassembly.</div>
+      <div class="card-source">internal/agentmod/openapi.go</div>
+    </div>
+
+    <div class="card">
+      <div class="card-title"><span class="stars">★</span> Rebuilt Frontend Assets <span class="badge badge-frontend">Frontend</span></div>
+      <div class="card-desc">Vite single-file rebuild (<code>es2022</code> target) incorporating the Modules tab.</div>
+      <div class="card-source">frontend/console/dist/index.html</div>
+    </div>
+  </div>
+</div>
+
+<div class="tab-panel tab-updated" id="tab-updated">
+  <table class="summary-table">
+    <thead><tr><th class="col-stars">Rating</th><th class="col-title">Item</th><th class="col-badge">Type</th><th class="col-desc">Description</th></tr></thead>
+    <tbody>
+      <tr><td class="col-stars"><span class="stars">★★★★</span></td><td class="col-title">Session Module Infrastructure</td><td class="col-badge"><span class="badge badge-session">Session</span></td><td class="col-desc">Session gains module catalog and stream handler fields; control dispatch routes module messages</td></tr>
+      <tr><td class="col-stars"><span class="stars">★★★★</span></td><td class="col-title">Agent Module Init</td><td class="col-badge"><span class="badge badge-config">Config</span></td><td class="col-desc">Agent gains InitModules() for registry, IPC, supervisor, manager, and invoker setup</td></tr>
+      <tr><td class="col-stars"><span class="stars">★★★</span></td><td class="col-title">Capability Negotiation</td><td class="col-badge"><span class="badge badge-capability">Capability</span></td><td class="col-desc">Additive <code>modules=1</code> flag in transport caps; old peers ignore it</td></tr>
+      <tr><td class="col-stars"><span class="stars">★★★</span></td><td class="col-title">Server Agent Routing</td><td class="col-badge"><span class="badge badge-handler">Handler</span></td><td class="col-desc">New FindSessionByAgent() with user-scoped access check</td></tr>
+      <tr><td class="col-stars"><span class="stars">★★</span></td><td class="col-title">Console Server Wiring</td><td class="col-badge"><span class="badge badge-handler">Handler</span></td><td class="col-desc">Module routes, UI routes, and UI store wired into console router</td></tr>
+    </tbody>
+  </table>
+
+  <div class="card-grid">
+    <div class="card">
+      <div class="card-title"><span class="stars">★★★★</span> Session Module Infrastructure <span class="badge badge-session">Session</span></div>
+      <div class="card-desc"><code>Session</code> gains <code>moduleCatalog</code> and <code>moduleStreamHandler</code> fields. The control message dispatch (<code>handleControlMessage</code>) now routes snapshot and health messages to the catalog. New getter/setter methods for external initialization.</div>
+      <div class="card-source">internal/server/session.go</div>
+    </div>
+
+    <div class="card">
+      <div class="card-title"><span class="stars">★★★★</span> Agent Module Init <span class="badge badge-config">Config</span></div>
+      <div class="card-desc"><code>Agent</code> gains <code>InitModules(ctx, dataDir)</code> which creates the registry, IPC server, supervisor, module manager, and invoker. Adds <code>currentSess</code> atomic pointer to yamux session for reverse stream opens.</div>
+      <div class="card-source">internal/agent/agent.go</div>
+    </div>
+
+    <div class="card">
+      <div class="card-title"><span class="stars">★★★</span> Capability Negotiation <span class="badge badge-capability">Capability</span></div>
+      <div class="card-desc">Added <code>Modules bool</code> to <code>Caps</code> struct. Parsed from <code>modules</code> token in <code>X-SSET-Caps</code> header. Negotiated with AND semantics. Serialized in caps string output.</div>
+      <div class="card-source">internal/transport/caps.go</div>
+    </div>
+
+    <div class="card">
+      <div class="card-title"><span class="stars">★★★</span> Server Agent Routing <span class="badge badge-handler">Handler</span></div>
+      <div class="card-desc">New <code>FindSessionByAgent(agentID, userID)</code> method. Delegates to existing <code>findYamuxByAgentID</code> then checks <code>UserID</code> match. Returns nil for cross-user access. Sessions with <code>UserID=0</code> are accessible to all users.</div>
+      <div class="card-source">internal/server/server.go</div>
+    </div>
+
+    <div class="card">
+      <div class="card-title"><span class="stars">★★</span> Console Server Wiring <span class="badge badge-handler">Handler</span></div>
+      <div class="card-desc">Module routes (list, detail, OpenAPI, invoke) and UI asset routes (consumer, provider, list) mounted on the console router before the SPA catch-all. All wrapped in user-auth middleware.</div>
+      <div class="card-source">internal/consoleserver/consoleserver.go</div>
+    </div>
+  </div>
+</div>
+
+<div class="tab-panel tab-removed" id="tab-removed">
+  <p style="color:var(--muted);font-size:0.9rem;padding:1rem 0">No capabilities removed.</p>
+</div>
+
+<div class="footer">Generated by <code>/pr-changelog</code> · 2026-11-02</div>
+<script>
+mermaid.initialize({startOnLoad:true,theme:'default'});
+function switchTab(n){document.querySelectorAll('.tab-panel').forEach(p=>p.classList.remove('active'));document.querySelectorAll('.tab-btn').forEach(b=>{b.className='tab-btn'});document.getElementById('tab-'+n).classList.add('active');document.getElementById('btn-'+n).classList.add('active-'+n)}
+</script>
+</body>
+</html>
