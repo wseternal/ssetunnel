@@ -10,6 +10,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -55,11 +56,17 @@ type Registration struct {
 	OpenAPIYAML     []byte   // OpenAPI spec sent by the module (may be nil)
 }
 
-// NewIPCServer creates a new IPC server with a random launch credential.
+// NewIPCServer creates a new IPC server. The launch credential is read from
+// the SSETUNNEL_MODULE_IPC_CREDENTIAL environment variable if set (useful for
+// local development); otherwise a random 32-byte hex token is generated.
 func NewIPCServer() (*IPCServer, error) {
-	cred, err := generateCredential()
-	if err != nil {
-		return nil, fmt.Errorf("generate credential: %w", err)
+	cred := os.Getenv("SSETUNNEL_MODULE_IPC_CREDENTIAL")
+	if cred == "" {
+		var err error
+		cred, err = generateCredential()
+		if err != nil {
+			return nil, fmt.Errorf("generate credential: %w", err)
+		}
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	return &IPCServer{
