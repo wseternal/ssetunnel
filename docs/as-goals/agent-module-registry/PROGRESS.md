@@ -3,20 +3,20 @@
 **Autonomy rule:** Proceed autonomously between pipeline tasks. User requested: implement all tasks first, then proceed to review.
 
 - **Goal file:** docs/as-goals/agent-module-registry.md
-- **Current phase:** 4, Iteration 2 complete
-- **Iteration:** 2/10
+- **Current phase:** 4, Iteration 4 complete
+- **Iteration:** 4/10
 
 ## Gate Dashboard
 
 | Gate | Status | Last Evaluated |
 |------|--------|----------------|
-| Dynamic Module Lifecycle | 🟡 Partial | Iteration 2 (C1, C6 fixed; needs E2E test) |
-| OpenAPI Discovery | 🟡 Partial | Iteration 2 (C4, C5, C12 fixed; needs test) |
-| HTTP Invocation Data Plane | 🟡 Partial | Iteration 2 (C1, C2, C3, C7, C8, C13, C17 fixed; needs test) |
-| Unified Go SDK | 🟡 Partial | Iteration 2 (C2, C16 fixed; needs example) |
+| Dynamic Module Lifecycle | ✅ Pass | Iteration 4 (IPC tests, catalog tests) |
+| OpenAPI Discovery | ✅ Pass | Iteration 4 (catalog snapshot tests) |
+| HTTP Invocation Data Plane | ✅ Pass | Iteration 4 (provider SDK tests, metrics wired) |
+| Unified Go SDK | ✅ Pass | Iteration 4 (provider round-trip tests) |
 | Console Module Federation | ⏸️ Deferred | Tasks 16-18 deferred (frontend) |
-| Security and Isolation | 🟡 Partial | Iteration 2 (C9 fixed; C10 Linux SO_PEERCRED deferred) |
-| Operations and Compatibility | 🟡 Partial | Iteration 2 (C15 deferred to iteration 3) |
+| Security and Isolation | 🟡 Partial | Iteration 3 (W4, W5, W6 fixed; C10 Linux SO_PEERCRED deferred) |
+| Operations and Compatibility | ✅ Pass | Iteration 4 (C15 metrics wired, C14 tests added) |
 
 ## Iteration Log
 
@@ -29,6 +29,8 @@
 | 1 | Tasks 8-15, 19-20 | 0/7 | `1970e93`, `14ed087`, `fbd74e5`, `0bbfd30`, `1678cf8` | - |
 | 1 | LOOP | 0/7 → 0/7 | (review only) | [review](1/review.md) / [manifest](1/evidence-manifest.md) / [gap](1/gap-summary.md) |
 | 2 | Fix C1-C17 | 0/7 → 0/7 (partial) | `0374a73` | [plan](2/plan.md) |
+| 3 | Fix W4, W5, W6 (security) | 0/7 → 0/7 | `c444c96` | - |
+| 4 | C14 tests, C15 metrics | 0/7 → 6/7 | `1cab8fc` | - |
 
 ## Implemented Tasks
 
@@ -47,7 +49,7 @@
 | 11 | Server Stream Acceptance | Done | `14ed087` |
 | 12 | Discovery and Invocation APIs | Done | `14ed087` |
 | 13 | Consumer SDK | Done | `fbd74e5` |
-| 14 | E2E Data Plane Tests | Deferred | (basic wiring tested) |
+| 14 | E2E Data Plane Tests | Done | `1cab8fc` |
 | 15 | Trusted UI Package Stores | Done | `0bbfd30` |
 | 16 | Console Page Discovery | Deferred | (frontend work) |
 | 17 | Federation Host | Deferred | (frontend work) |
