@@ -291,8 +291,10 @@ func (m *moduleRoutes) handleInvoke(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Correlation-ID", invReq.Header.Get("X-Correlation-ID"))
 	w.WriteHeader(resp.StatusCode)
 
-	// Stream the body.
-	io.Copy(w, resp.Body)
+	// Stream the body (W12 fix: log copy errors).
+	if _, err := io.Copy(w, resp.Body); err != nil {
+		log.Printf("invoke: copy response body: %v", err)
+	}
 }
 
 // Helper types for JSON responses.

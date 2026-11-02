@@ -99,6 +99,10 @@ func (s *IPCServer) DialModule(ctx context.Context) (net.Conn, error) {
 	return d.DialContext(ctx, ipcNetwork, endpoint)
 }
 
+// maxIPCMessageSize is the maximum allowed IPC message line length (64 KiB).
+// This prevents memory exhaustion from malicious or misbehaving module processes.
+const maxIPCMessageSize = 64 << 10
+
 // acceptLoop accepts incoming connections on the listener.
 func (s *IPCServer) acceptLoop(ln net.Listener) {
 	for {
@@ -126,12 +130,16 @@ func (s *IPCServer) handleConnection(conn net.Conn) {
 	// Set deadline for authentication phase.
 	conn.SetDeadline(time.Now().Add(5 * time.Second))
 
-	reader := bufio.NewReader(conn)
+	reader := bufio.NewReaderSize(conn, maxIPCMessageSize)
 
 	// 1. Read AUTH frame.
 	authLine, err := reader.ReadString('\n')
 	if err != nil {
 		log.Printf("ipc: auth read error: %v", err)
+		return
+	}
+	if len(authLine) > maxIPCMessageSize {
+		log.Printf("ipc: AUTH message too long: %d bytes", len(authLine))
 		return
 	}
 	authLine = strings.TrimSuffix(authLine, "\n")
@@ -170,6 +178,10 @@ func (s *IPCServer) handleConnection(conn net.Conn) {
 	regLine, err := reader.ReadString('\n')
 	if err != nil {
 		log.Printf("ipc: reg read error: %v", err)
+		return
+	}
+	if len(regLine) > maxIPCMessageSize {
+		log.Printf("ipc: REG message too long: %d bytes", len(regLine))
 		return
 	}
 	regLine = strings.TrimSuffix(regLine, "\n")
@@ -221,6 +233,11 @@ func (s *IPCServer) handleConnection(conn net.Conn) {
 			s.Deregister(moduleID)
 			log.Printf("ipc: module %s disconnected: %v", moduleID, err)
 			return
+		}
+		// W20 fix: Reject oversized health messages.
+		if len(line) > maxIPCMessageSize {
+			log.Printf("ipc: message too long from %s: %d bytes", moduleID, len(line))
+			continue
 		}
 		line = strings.TrimSuffix(line, "\n")
 

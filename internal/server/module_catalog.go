@@ -36,6 +36,9 @@ type ModuleCatalog struct {
 
 	// Metrics collector (C15 fix: wired).
 	metrics *metrics.ModuleMetrics
+
+	// Close guard (W7 fix: prevent double-close panic).
+	closeOnce sync.Once
 }
 
 // CommittedCatalog is a validated catalog ready for discovery and invocation.
@@ -171,6 +174,9 @@ func (mc *ModuleCatalog) handleSnapshotStart(payload json.RawMessage) error {
 	return nil
 }
 
+// reassemblyTimeout is the maximum time allowed for a snapshot reassembly.
+const reassemblyTimeout = 5 * time.Minute
+
 // handleSnapshotChunk receives a chunk of snapshot data.
 func (mc *ModuleCatalog) handleSnapshotChunk(payload json.RawMessage) error {
 	var p moduleproto.SnapshotChunkPayload
@@ -183,6 +189,13 @@ func (mc *ModuleCatalog) handleSnapshotChunk(payload json.RawMessage) error {
 
 	if mc.reassembly == nil {
 		return fmt.Errorf("no reassembly in progress")
+	}
+
+	// W16 fix: Check for stale reassembly (timeout).
+	if time.Since(mc.reassembly.StartedAt) > reassemblyTimeout {
+		log.Printf("catalog: reassembly timed out (epoch=%s, started=%v)", mc.reassembly.Epoch, mc.reassembly.StartedAt)
+		mc.reassembly = nil
+		return fmt.Errorf("reassembly timed out")
 	}
 
 	// Validate sequence number.
@@ -379,8 +392,10 @@ func (mc *ModuleCatalog) Revision() int {
 	return mc.committed.Revision
 }
 
-// Close shuts down the catalog and its validation workers.
+// Close shuts down the catalog and its validation workers (W7 fix: safe for double-close).
 func (mc *ModuleCatalog) Close() {
-	close(mc.validationQueue)
-	mc.validationWg.Wait()
+	mc.closeOnce.Do(func() {
+		close(mc.validationQueue)
+		mc.validationWg.Wait()
+	})
 }

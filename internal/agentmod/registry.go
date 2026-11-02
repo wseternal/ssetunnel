@@ -2,6 +2,7 @@ package agentmod
 
 import (
 	"context"
+	cryptoRand "crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -409,9 +410,11 @@ func calculateBackoff(count int) time.Duration {
 	return d + jitter
 }
 
-// randFloat returns a random float in [0, 1).
+// randFloat returns a random float in [0, 1) using crypto/rand (W21 fix).
 func randFloat() float64 {
-	return float64(time.Now().UnixNano()%1000) / 1000.0
+	var b [2]byte
+	cryptoRand.Read(b[:])
+	return float64(uint16(b[0])<<8|uint16(b[1])) / 65536.0
 }
 
 // ErrModuleNotRunning is returned when trying to stop a module that isn't running.

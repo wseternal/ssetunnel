@@ -11,6 +11,7 @@ import (
 	"github.com/wseternal/ssetunnel/internal/auth"
 	"github.com/wseternal/ssetunnel/internal/consoleapi"
 	"github.com/wseternal/ssetunnel/internal/metrics"
+	"github.com/wseternal/ssetunnel/internal/moduleui"
 	"github.com/wseternal/ssetunnel/internal/server"
 )
 
@@ -53,6 +54,13 @@ func NewConsoleHandler(ctx context.Context, pool *pgxpool.Pool, store *auth.Stor
 		r.Handle("/console/api/v1/modules/invoke/{agent-id}/{module-id}/{path:.*}", userAuth(http.HandlerFunc(modRoutes.handleInvoke)))
 		r.Handle("/console/api/v1/modules/invoke/{agent-id}/{module-id}", userAuth(http.HandlerFunc(modRoutes.handleInvoke)))
 		r.Handle("/console/api/v1/modules/{agent-id}/{module-id}", userAuth(http.HandlerFunc(modRoutes.handleGetModule))).Methods("GET")
+
+		// Module UI routes: asset serving for federation.
+		uiStore := moduleui.NewStore(moduleui.MaxCacheSize)
+		uiRoutes := newModuleUIRoutes(srv, uiStore)
+		r.Handle("/console/api/v1/modules/ui/{agent-id}/{module-id}", userAuth(http.HandlerFunc(uiRoutes.handleListModuleUI))).Methods("GET")
+		r.Handle("/console/api/v1/modules/ui/consumer/{package-digest}/{path:.*}", userAuth(http.HandlerFunc(uiRoutes.handleGetConsumerAsset))).Methods("GET")
+		r.Handle("/console/api/v1/modules/ui/provider/{agent-id}/{module-id}/{path:.*}", userAuth(http.HandlerFunc(uiRoutes.handleGetProviderAsset))).Methods("GET")
 	}
 
 	// API routes — strip /console so the inner router sees /api/v1/...

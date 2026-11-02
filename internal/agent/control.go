@@ -140,8 +140,8 @@ func (a *Agent) dispatchControlMessage(msg *mux.ControlMessage) {
 		return
 	case moduleproto.MsgModuleOpen:
 		if a.moduleInvoker != nil {
-			// The module invoker needs the yamux session to open reverse streams.
-			// We access it via the agent's yamux session stored during runOnce.
+			// W18: TODO: use agent's run context instead of Background().
+			// The control handler doesn't currently carry a context.
 			if err := a.moduleInvoker.HandleModuleOpen(context.Background(), msg, a.currentYamuxSession()); err != nil {
 				log.Printf("agent: module_open failed: %v", err)
 			}

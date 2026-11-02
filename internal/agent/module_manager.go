@@ -79,7 +79,7 @@ func (m *ModuleManager) OnConnect(ctx context.Context, epoch string) error {
 
 // OnRegistryChange is called when the registry changes (install, remove, enable, disable).
 // It coalesces updates and publishes after a brief delay.
-func (m *ModuleManager) OnRegistryChange(ctx context.Context) {
+func (m *ModuleManager) OnRegistryChange() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 

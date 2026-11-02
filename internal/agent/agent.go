@@ -298,7 +298,7 @@ func (a *Agent) runOnce(ctx context.Context) error {
 				if s == nil {
 					return fmt.Errorf("control stream not available")
 				}
-				s(msg)
+				s(msg) // controlSender returns no error; failures are logged downstream
 				return nil
 			})
 			// Publish catalog snapshot on connect.

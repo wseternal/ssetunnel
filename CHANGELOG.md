@@ -1,5 +1,21 @@
 # Changelog
 
+## [Unreleased]
+
+### Features
+
+* **modules:** agent module registry with pluggable HTTP services
+  - Provider SDK (`sdk/provider.go`) for module authors with `http.Handler` interface
+  - Consumer SDK (`sdk/discovery.go`) for service discovery and invocation
+  - Catalog snapshots via control stream (start/chunk/commit with SHA-256 verification)
+  - Reverse-opened invocation streams (server sends `module_open`, agent opens reverse yamux stream)
+  - Secure IPC with owner-only Unix sockets and random credential authentication
+  - Console "Modules" tab for discovery and OpenAPI inspection
+  - Trusted UI package store with digest-keyed caching (8 MiB per asset, 64 MiB bounded cache)
+  - Per-agent metrics collection (invocations, pending opens, errors, bytes)
+  - Process supervisor with exponential backoff (500 ms → 30 s cap)
+  - Package validation with symlink traversal protection
+
 ## [1.13.1](https://github.com/wseternal/ssetunnel/compare/v1.13.0...v1.13.1) (2026-11-01)
 
 
