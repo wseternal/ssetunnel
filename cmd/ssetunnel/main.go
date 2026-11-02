@@ -382,6 +382,16 @@ func runAgent(ctx context.Context, args []string) error {
 		Verbose:          *verbose,
 		OnTokenRefresh:   refreshFn,
 	}
+
+	// Initialize the module subsystem (registry, IPC, supervisor).
+	dataDir, dirErr := agentDataDir()
+	if dirErr != nil {
+		return dirErr
+	}
+	if err := ag.InitModules(ctx, dataDir); err != nil {
+		return fmt.Errorf("init modules: %w", err)
+	}
+
 	return ag.Run(ctx)
 }
 

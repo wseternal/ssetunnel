@@ -1,0 +1,76 @@
+openapi: "3.0.3"
+info:
+  title: Echo Module
+  description: |
+    A simple echo service that returns the incoming request details as JSON.
+    Useful as a quick-start example for module developers.
+  version: "0.1.0"
+paths:
+  /echo:
+    get:
+      operationId: echoGet
+      summary: Echo query parameters
+      parameters:
+        - name: message
+          in: query
+          schema:
+            type: string
+          description: Optional message to echo back
+      responses:
+        "200":
+          description: Echoed request details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EchoResponse"
+    post:
+      operationId: echoPost
+      summary: Echo request body
+      requestBody:
+        content:
+          application/json:
+            schema: {}
+          text/plain:
+            schema:
+              type: string
+      responses:
+        "200":
+          description: Echoed request details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EchoResponse"
+  /health:
+    get:
+      operationId: healthCheck
+      summary: Health check
+      responses:
+        "200":
+          description: Module is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+components:
+  schemas:
+    EchoResponse:
+      type: object
+      properties:
+        method:
+          type: string
+        path:
+          type: string
+        query:
+          type: string
+        headers:
+          type: object
+          additionalProperties:
+            type: array
+            items:
+              type: string
+        body:
+          type: string
+          nullable: true

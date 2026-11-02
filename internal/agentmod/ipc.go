@@ -7,8 +7,10 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -35,6 +37,16 @@ type IPCServer struct {
 	closed     bool
 	ctx        context.Context
 	cancel     context.CancelFunc
+
+	// onRegister is called after a module successfully registers.
+	// Used by the agent to auto-install the module into the registry
+	// and trigger a catalog snapshot publish.
+	onRegister func(reg *Registration)
+
+	// onDeregister is called after a module disconnects.
+	// Used by the agent to remove the module from the registry
+	// and trigger a catalog snapshot publish.
+	onDeregister func(moduleID string)
 }
 
 // Registration represents a live module registration from a connected process.
@@ -46,13 +58,20 @@ type Registration struct {
 	Health          string
 	Conn            net.Conn // the control connection to the module process
 	InvEndpoint     string   // invocation socket endpoint for fresh connections per invocation
+	OpenAPIYAML     []byte   // OpenAPI spec sent by the module (may be nil)
 }
 
-// NewIPCServer creates a new IPC server with a random launch credential.
+// NewIPCServer creates a new IPC server. The launch credential is read from
+// the SSETUNNEL_MODULE_IPC_CREDENTIAL environment variable if set (useful for
+// local development); otherwise a random 32-byte hex token is generated.
 func NewIPCServer() (*IPCServer, error) {
-	cred, err := generateCredential()
-	if err != nil {
-		return nil, fmt.Errorf("generate credential: %w", err)
+	cred := os.Getenv("SSETUNNEL_MODULE_IPC_CREDENTIAL")
+	if cred == "" {
+		var err error
+		cred, err = generateCredential()
+		if err != nil {
+			return nil, fmt.Errorf("generate credential: %w", err)
+		}
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	return &IPCServer{
@@ -67,6 +86,22 @@ func NewIPCServer() (*IPCServer, error) {
 // module processes (via environment variable or inherited file descriptor).
 func (s *IPCServer) Credential() string {
 	return s.credential
+}
+
+// SetOnRegister sets a callback invoked after a module successfully registers.
+// Used by the agent to auto-install the module into the registry.
+func (s *IPCServer) SetOnRegister(fn func(reg *Registration)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.onRegister = fn
+}
+
+// SetOnDeregister sets a callback invoked after a module disconnects.
+// Used by the agent to remove the module from the registry.
+func (s *IPCServer) SetOnDeregister(fn func(moduleID string)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.onDeregister = fn
 }
 
 // SetListener attaches a listener to the IPC server for accepting
@@ -219,8 +254,55 @@ func (s *IPCServer) handleConnection(conn net.Conn) {
 
 	log.Printf("ipc: module %s registered (version=%s, revision=%s)", moduleID, version, revision)
 
+	// 2b. Read optional OPENAPI message (length-prefixed YAML).
+	conn.SetDeadline(time.Now().Add(5 * time.Second))
+	openapiLine, err := reader.ReadString('\n')
+	if err != nil {
+		log.Printf("ipc: openapi read error: %v", err)
+		s.Deregister(moduleID)
+		return
+	}
+	openapiLine = strings.TrimSuffix(openapiLine, "\n")
+	if strings.HasPrefix(openapiLine, "OPENAPI ") {
+		yamlLen, parseErr := strconv.Atoi(strings.TrimPrefix(openapiLine, "OPENAPI "))
+		if parseErr != nil || yamlLen < 0 || yamlLen > 1<<20 {
+			log.Printf("ipc: invalid OPENAPI length: %v", parseErr)
+			s.Deregister(moduleID)
+			return
+		}
+		yamlBuf := make([]byte, yamlLen)
+		if yamlLen > 0 {
+			if _, err := io.ReadFull(reader, yamlBuf); err != nil {
+				log.Printf("ipc: openapi yaml read error: %v", err)
+				s.Deregister(moduleID)
+				return
+			}
+		}
+		s.mu.Lock()
+		if r, ok := s.modules[moduleID]; ok {
+			r.OpenAPIYAML = yamlBuf
+		}
+		s.mu.Unlock()
+		log.Printf("ipc: module %s sent %d bytes of OpenAPI YAML", moduleID, yamlLen)
+	} else {
+		// No OPENAPI message — old client. Push back the line for the health loop.
+		// We cannot unread from a bufio.Reader, so we handle it inline below.
+		// Process this line as the first health message.
+		conn.SetDeadline(time.Time{})
+		s.handleHealthLine(moduleID, openapiLine)
+	}
+
 	// Clear deadline for health loop.
 	conn.SetDeadline(time.Time{})
+
+	// Fire registration callback (auto-install into registry).
+	s.mu.RLock()
+	onReg := s.onRegister
+	currentReg := s.modules[moduleID]
+	s.mu.RUnlock()
+	if onReg != nil && currentReg != nil {
+		onReg(currentReg)
+	}
 
 	// 3. Health reporting loop.
 	for {
@@ -240,27 +322,31 @@ func (s *IPCServer) handleConnection(conn net.Conn) {
 			continue
 		}
 		line = strings.TrimSuffix(line, "\n")
+		s.handleHealthLine(moduleID, line)
+	}
+}
 
-		if strings.HasPrefix(line, "HEALTH ") {
-			healthParts := strings.SplitN(line[7:], " ", 2)
-			status := healthParts[0]
-			message := ""
-			if len(healthParts) > 1 {
-				message = healthParts[1]
-			}
-
-			s.mu.Lock()
-			if r, ok := s.modules[moduleID]; ok {
-				r.Health = status
-			}
-			s.mu.Unlock()
-
-			if status != "healthy" {
-				log.Printf("ipc: module %s health=%s: %s", moduleID, status, message)
-			}
-		} else {
-			log.Printf("ipc: unexpected message from %s: %q", moduleID, line)
+// handleHealthLine processes a single health message from a module.
+func (s *IPCServer) handleHealthLine(moduleID, line string) {
+	if strings.HasPrefix(line, "HEALTH ") {
+		healthParts := strings.SplitN(line[7:], " ", 2)
+		status := healthParts[0]
+		message := ""
+		if len(healthParts) > 1 {
+			message = healthParts[1]
 		}
+
+		s.mu.Lock()
+		if r, ok := s.modules[moduleID]; ok {
+			r.Health = status
+		}
+		s.mu.Unlock()
+
+		if status != "healthy" {
+			log.Printf("ipc: module %s health=%s: %s", moduleID, status, message)
+		}
+	} else {
+		log.Printf("ipc: unexpected message from %s: %q", moduleID, line)
 	}
 }
 
@@ -291,12 +377,17 @@ func (s *IPCServer) Register(reg *Registration) error {
 // Deregister removes a module registration and closes its connection.
 func (s *IPCServer) Deregister(moduleID string) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	var cb func(string)
 	if reg, ok := s.modules[moduleID]; ok {
 		if reg.Conn != nil {
 			reg.Conn.Close()
 		}
 		delete(s.modules, moduleID)
+		cb = s.onDeregister
+	}
+	s.mu.Unlock()
+	if cb != nil {
+		cb(moduleID)
 	}
 }
 

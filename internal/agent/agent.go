@@ -120,11 +120,38 @@ func (a *Agent) InitModules(ctx context.Context, dataDir string) error {
 	// Attach listener to IPC server for accept loop.
 	ipc.SetListener(listener, endpoint)
 
+	log.Printf("agent: module IPC listening on %s", endpoint)
+	log.Printf("agent: module IPC credential: %s", ipc.Credential())
+
 	supervisor := agentmod.NewSupervisor(ctx, registry, ipc)
 	a.modRegistry = registry
 	a.modIPC = ipc
 	a.moduleManager = NewModuleManager(registry, ipc, supervisor)
 	a.moduleInvoker = NewModuleInvoker(a, ipc, registry)
+
+	// Wire IPC registration → auto-install into registry → snapshot publish.
+	// This allows manually started modules to appear in the console.
+	ipc.SetOnRegister(func(reg *agentmod.Registration) {
+		// Use IPC endpoint as executable placeholder — the supervisor will
+		// log a start failure, but the module is already running manually.
+		if err := registry.InstallFromIPC(
+			reg.ModuleID, reg.ServiceName, reg.Version, reg.Revision,
+			reg.OpenAPIYAML, ipc.Endpoint(),
+		); err != nil {
+			log.Printf("agent: auto-install module %s: %v", reg.ModuleID, err)
+			return
+		}
+		log.Printf("agent: auto-installed module %s into registry", reg.ModuleID)
+		a.moduleManager.OnRegistryChange()
+	})
+
+	// Wire IPC deregister callback to remove the module from the registry
+	// and trigger a catalog snapshot publish.
+	ipc.SetOnDeregister(func(moduleID string) {
+		registry.Uninstall(moduleID)
+		log.Printf("agent: uninstalled module %s from registry", moduleID)
+		a.moduleManager.OnRegistryChange()
+	})
 
 	// Reconcile desired state: start enabled modules.
 	if err := supervisor.Reconcile(); err != nil {

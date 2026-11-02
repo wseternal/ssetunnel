@@ -214,9 +214,14 @@ func (s *Server) acceptModuleStreams(ms *yamux.Session, sess *Session, handler *
 			continue
 		}
 
-		// Extract invocation ID from marker.
-		invocationID := strings.TrimPrefix(markerLine, moduleproto.ModuleStreamMarker)
-		invocationID = strings.TrimSuffix(invocationID, "\n")
+		// The invocation ID is on the second line (marker is "__module__\n<id>\n").
+		invocationIDLine, err := reader.ReadString('\n')
+		if err != nil {
+			log.Printf("server: read invocation ID: %v", err)
+			stream.Close()
+			continue
+		}
+		invocationID := strings.TrimSuffix(invocationIDLine, "\n")
 
 		// Wrap stream with buffered reader to preserve any bytes read beyond the marker (C17 fix).
 		bufferedConn := &bufioReadConn{Conn: stream, reader: reader}

@@ -365,6 +365,46 @@ export default function App() {
   const [selectedModule, setSelectedModule] = useState<ModuleSummary | null>(null);
   const [moduleOpenAPI, setModuleOpenAPI] = useState<string>('');
 
+  // Echo module interaction state
+  const [echoMethod, setEchoMethod] = useState<string>('POST');
+  const [echoPath, setEchoPath] = useState<string>('/echo');
+  const [echoHeaders, setEchoHeaders] = useState<string>('Content-Type: application/json');
+  const [echoBody, setEchoBody] = useState<string>('{"message": "Hello from the console!"}');
+  const [echoResponse, setEchoResponse] = useState<{status: number; headers: Record<string, string>; body: string} | null>(null);
+  const [echoLoading, setEchoLoading] = useState(false);
+  const [echoError, setEchoError] = useState<string>('');
+
+  const invokeEcho = async () => {
+    if (!moduleAgent || !selectedModule) return;
+    setEchoLoading(true);
+    setEchoError('');
+    setEchoResponse(null);
+    try {
+      const hdrs: Record<string, string> = {};
+      if (echoHeaders.trim()) {
+        for (const line of echoHeaders.split('\n')) {
+          const idx = line.indexOf(':');
+          if (idx > 0) hdrs[line.slice(0, idx).trim()] = line.slice(idx + 1).trim();
+        }
+      }
+      const invPath = echoPath || '/echo';
+      const url = `/console/api/v1/modules/invoke/${encodeURIComponent(moduleAgent)}/${encodeURIComponent(selectedModule.module_id)}${invPath.startsWith('/') ? invPath : '/' + invPath}`;
+      const res = await fetch(url, {
+        method: echoMethod,
+        headers: { ...authHeaders(), ...hdrs },
+        body: (echoMethod !== 'GET' && echoBody) ? echoBody : undefined,
+      });
+      const respHeaders: Record<string, string> = {};
+      res.headers.forEach((v, k) => { respHeaders[k] = v; });
+      const body = await res.text();
+      setEchoResponse({ status: res.status, headers: respHeaders, body });
+    } catch (e: any) {
+      setEchoError(e?.message || 'Request failed');
+    } finally {
+      setEchoLoading(false);
+    }
+  };
+
   // Cloud Shell
   const [connectedAgents, setConnectedAgents] = useState<ConnectedAgent[]>([]);
   const [shellAgent, setShellAgent] = useState<string>('');
@@ -3330,6 +3370,69 @@ export default function App() {
                                 <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
                                   {selectedModule.module_id} · v{selectedModule.service_version}
                                 </Typography>
+
+                                {/* Echo module interaction panel */}
+                                {selectedModule.service_name === 'echo' && (
+                                  <Box sx={{ mb: 3 }}>
+                                    <Typography variant="subtitle1" sx={{ mb: 1, fontWeight: 600 }}>Try It</Typography>
+                                    <Paper variant="outlined" sx={{ p: 2 }}>
+                                      <Box sx={{ display: 'flex', gap: 1, mb: 1.5 }}>
+                                        <Select size="small" value={echoMethod} onChange={(e) => setEchoMethod(e.target.value)} sx={{ minWidth: 100 }}>
+                                          <MenuItem value="GET">GET</MenuItem>
+                                          <MenuItem value="POST">POST</MenuItem>
+                                          <MenuItem value="PUT">PUT</MenuItem>
+                                          <MenuItem value="DELETE">DELETE</MenuItem>
+                                        </Select>
+                                        <TextField size="small" value={echoPath} onChange={(e) => setEchoPath(e.target.value)} label="Path" sx={{ flex: 1 }} />
+                                        <Button variant="contained" onClick={invokeEcho} disabled={echoLoading} size="small">
+                                          {echoLoading ? 'Sending...' : 'Send'}
+                                        </Button>
+                                      </Box>
+                                      <TextField
+                                        size="small" multiline minRows={2} maxRows={4} fullWidth
+                                        value={echoHeaders} onChange={(e) => setEchoHeaders(e.target.value)}
+                                        label="Headers (one per line: Key: Value)" sx={{ mb: 1 }}
+                                      />
+                                      {echoMethod !== 'GET' && (
+                                        <TextField
+                                          size="small" multiline minRows={3} maxRows={8} fullWidth
+                                          value={echoBody} onChange={(e) => setEchoBody(e.target.value)}
+                                          label="Body"
+                                        />
+                                      )}
+                                      {echoError && (
+                                        <Alert severity="error" sx={{ mt: 1 }}>{echoError}</Alert>
+                                      )}
+                                      {echoResponse && (
+                                        <Box sx={{ mt: 1.5 }}>
+                                          <Box sx={{ display: 'flex', gap: 1, alignItems: 'center', mb: 1 }}>
+                                            <Chip
+                                              size="small"
+                                              label={`${echoResponse.status}`}
+                                              color={echoResponse.status < 300 ? 'success' : echoResponse.status < 500 ? 'warning' : 'error'}
+                                            />
+                                            <Typography variant="caption" color="text.secondary">Response</Typography>
+                                          </Box>
+                                          {Object.keys(echoResponse.headers).length > 0 && (
+                                            <Paper variant="outlined" sx={{ p: 1, mb: 1, maxHeight: 120, overflow: 'auto' }}>
+                                              <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 600 }}>Headers</Typography>
+                                              <pre style={{ fontSize: 11, margin: 0 }}>
+                                                {Object.entries(echoResponse.headers).map(([k, v]) => `${k}: ${v}`).join('\n')}
+                                              </pre>
+                                            </Paper>
+                                          )}
+                                          <Paper variant="outlined" sx={{ p: 1, maxHeight: 300, overflow: 'auto' }}>
+                                            <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 600 }}>Body</Typography>
+                                            <pre style={{ fontSize: 12, margin: 0, whiteSpace: 'pre-wrap' }}>
+                                              {(() => { try { return JSON.stringify(JSON.parse(echoResponse.body), null, 2); } catch { return echoResponse.body; } })()}
+                                            </pre>
+                                          </Paper>
+                                        </Box>
+                                      )}
+                                    </Paper>
+                                  </Box>
+                                )}
+
                                 <Typography variant="subtitle2" sx={{ mb: 1 }}>OpenAPI Specification</Typography>
                                 {moduleOpenAPI ? (
                                   <Paper variant="outlined" sx={{ p: 2, maxHeight: 500, overflow: 'auto' }}>
@@ -3608,6 +3711,69 @@ export default function App() {
                                 <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
                                   {selectedModule.module_id} · v{selectedModule.service_version}
                                 </Typography>
+
+                                {/* Echo module interaction panel (non-admin) */}
+                                {selectedModule.service_name === 'echo' && (
+                                  <Box sx={{ mb: 3 }}>
+                                    <Typography variant="subtitle1" sx={{ mb: 1, fontWeight: 600 }}>Try It</Typography>
+                                    <Paper variant="outlined" sx={{ p: 2 }}>
+                                      <Box sx={{ display: 'flex', gap: 1, mb: 1.5 }}>
+                                        <Select size="small" value={echoMethod} onChange={(e) => setEchoMethod(e.target.value)} sx={{ minWidth: 100 }}>
+                                          <MenuItem value="GET">GET</MenuItem>
+                                          <MenuItem value="POST">POST</MenuItem>
+                                          <MenuItem value="PUT">PUT</MenuItem>
+                                          <MenuItem value="DELETE">DELETE</MenuItem>
+                                        </Select>
+                                        <TextField size="small" value={echoPath} onChange={(e) => setEchoPath(e.target.value)} label="Path" sx={{ flex: 1 }} />
+                                        <Button variant="contained" onClick={invokeEcho} disabled={echoLoading} size="small">
+                                          {echoLoading ? 'Sending...' : 'Send'}
+                                        </Button>
+                                      </Box>
+                                      <TextField
+                                        size="small" multiline minRows={2} maxRows={4} fullWidth
+                                        value={echoHeaders} onChange={(e) => setEchoHeaders(e.target.value)}
+                                        label="Headers (one per line: Key: Value)" sx={{ mb: 1 }}
+                                      />
+                                      {echoMethod !== 'GET' && (
+                                        <TextField
+                                          size="small" multiline minRows={3} maxRows={8} fullWidth
+                                          value={echoBody} onChange={(e) => setEchoBody(e.target.value)}
+                                          label="Body"
+                                        />
+                                      )}
+                                      {echoError && (
+                                        <Alert severity="error" sx={{ mt: 1 }}>{echoError}</Alert>
+                                      )}
+                                      {echoResponse && (
+                                        <Box sx={{ mt: 1.5 }}>
+                                          <Box sx={{ display: 'flex', gap: 1, alignItems: 'center', mb: 1 }}>
+                                            <Chip
+                                              size="small"
+                                              label={`${echoResponse.status}`}
+                                              color={echoResponse.status < 300 ? 'success' : echoResponse.status < 500 ? 'warning' : 'error'}
+                                            />
+                                            <Typography variant="caption" color="text.secondary">Response</Typography>
+                                          </Box>
+                                          {Object.keys(echoResponse.headers).length > 0 && (
+                                            <Paper variant="outlined" sx={{ p: 1, mb: 1, maxHeight: 120, overflow: 'auto' }}>
+                                              <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 600 }}>Headers</Typography>
+                                              <pre style={{ fontSize: 11, margin: 0 }}>
+                                                {Object.entries(echoResponse.headers).map(([k, v]) => `${k}: ${v}`).join('\n')}
+                                              </pre>
+                                            </Paper>
+                                          )}
+                                          <Paper variant="outlined" sx={{ p: 1, maxHeight: 300, overflow: 'auto' }}>
+                                            <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 600 }}>Body</Typography>
+                                            <pre style={{ fontSize: 12, margin: 0, whiteSpace: 'pre-wrap' }}>
+                                              {(() => { try { return JSON.stringify(JSON.parse(echoResponse.body), null, 2); } catch { return echoResponse.body; } })()}
+                                            </pre>
+                                          </Paper>
+                                        </Box>
+                                      )}
+                                    </Paper>
+                                  </Box>
+                                )}
+
                                 <Typography variant="subtitle2" sx={{ mb: 1 }}>OpenAPI Specification</Typography>
                                 {moduleOpenAPI ? (
                                   <Paper variant="outlined" sx={{ p: 2, maxHeight: 500, overflow: 'auto' }}>
