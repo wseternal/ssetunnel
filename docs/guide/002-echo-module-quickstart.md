@@ -166,29 +166,37 @@ ls -la echo
 
 ## Step 5: Register with the Agent
 
-The agent provides two environment variables to module processes:
+The agent manages module processes through its supervisor. You cannot run a module standalone — the agent creates the IPC socket and generates the credential that the module needs.
 
-| Variable | Purpose |
-|----------|---------|
-| `SSETUNNEL_MODULE_IPC_ENDPOINT` | Path to the IPC Unix socket (or named pipe on Windows) |
-| `SSETUNNEL_MODULE_IPC_CREDENTIAL` | Random credential for authenticating with the agent |
+| Variable | Purpose | Set by |
+|----------|---------|--------|
+| `SSETUNNEL_MODULE_IPC_ENDPOINT` | Path to the IPC unix socket | Agent |
+| `SSETUNNEL_MODULE_IPC_CREDENTIAL` | Random credential for authenticating | Agent |
 
-The agent sets these automatically when it starts a module process through the supervisor. For manual testing, you can set them yourself:
+**The workflow:**
+
+1. Start the agent — it creates an IPC socket at `<dataDir>/module.sock` and a random credential
+2. Install the echo module package through the console API
+3. Enable the module — the supervisor spawns the echo process with the correct env vars
+4. The module connects, authenticates, registers, and starts serving
 
 ```bash
-SSETUNNEL_MODULE_IPC_ENDPOINT=/tmp/ssetunnel-mod.sock \
-SSETUNNEL_MODULE_IPC_CREDENTIAL=your-credential-here \
-./echo
+# 1. Start the agent (creates the IPC socket).
+./ssetunnel agent --server-url http://localhost:8080 --token YOUR_TOKEN
+
+# 2. The supervisor manages the module lifecycle automatically.
+#    On agent restart, enabled modules are restored from desired_state.json.
 ```
 
-The module will:
-1. Connect to the IPC endpoint
-2. Authenticate with the credential
-3. Register itself as `com.example.echo`
-4. Start serving HTTP requests on the invocation socket
-5. Report health every 30 seconds
+**What happens when the supervisor starts the module:**
+1. The supervisor spawns the echo binary as a child process
+2. Sets `SSETUNNEL_MODULE_IPC_ENDPOINT` and `SSETUNNEL_MODULE_IPC_CREDENTIAL` in the child's environment
+3. The module connects to the IPC endpoint and authenticates
+4. The module registers itself as `com.example.echo`
+5. The module starts serving HTTP requests on the invocation socket
+6. Health is reported every 30 seconds
 
-**Production mode:** Place the binary in a package directory and install it through the console API or CLI. The agent's supervisor manages the process lifecycle — starting, stopping, and restarting the module on crashes with jittered exponential backoff.
+**Crash recovery:** If the module crashes, the supervisor restarts it with jittered exponential backoff (500 ms base, 30 s cap).
 
 ## Step 6: Test from the Console
 

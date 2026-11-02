@@ -2,11 +2,9 @@
 // ssetunnel agent module registry. It echoes back every HTTP request as a
 // JSON object containing the method, path, headers, and body.
 //
-// Usage:
-//
-//	SSETUNNEL_MODULE_IPC_ENDPOINT=/tmp/ssetunnel-mod.sock \
-//	SSETUNNEL_MODULE_IPC_CREDENTIAL=$(cat /tmp/ssetunnel-mod.cred) \
-//	./echo
+// The agent's supervisor starts this binary as a child process and provides
+// the IPC endpoint and credential via environment variables. The module
+// cannot run standalone without a running agent.
 package main
 
 import (
