@@ -91,8 +91,10 @@ func (p *Provider) serve(ctx context.Context, endpoint, credential string) error
 		}
 	}()
 
-	// IPC reconnect loop with exponential backoff (500ms → 30s).
-	backoff := 500 * time.Millisecond
+	// IPC reconnect loop.
+	// Phase 1: fast reconnect (2s intervals, 5 attempts) for agent restarts.
+	// Phase 2: exponential backoff (1s → 30s) for extended outages.
+	attempt := 0
 	for {
 		if ctx.Err() != nil {
 			return nil
@@ -102,16 +104,24 @@ func (p *Provider) serve(ctx context.Context, endpoint, credential string) error
 			return nil
 		}
 		if err != nil {
-			log.Printf("provider: connection lost, reconnecting in %v...", backoff)
+			var delay time.Duration
+			if attempt < 5 {
+				delay = 2 * time.Second
+			} else {
+				delay = time.Duration(1<<min(attempt-5, 5)) * time.Second
+				if delay > 30*time.Second {
+					delay = 30 * time.Second
+				}
+			}
+			log.Printf("provider: connection lost (attempt %d), reconnecting in %v...", attempt+1, delay)
 			select {
-			case <-time.After(backoff):
+			case <-time.After(delay):
 			case <-ctx.Done():
 				return nil
 			}
-			backoff *= 2
-			if backoff > 30*time.Second {
-				backoff = 30 * time.Second
-			}
+			attempt++
+		} else {
+			attempt = 0 // Reset on clean disconnect
 		}
 	}
 }
