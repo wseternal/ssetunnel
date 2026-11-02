@@ -145,6 +145,14 @@ func (a *Agent) InitModules(ctx context.Context, dataDir string) error {
 		a.moduleManager.OnRegistryChange()
 	})
 
+	// Wire IPC deregister callback to remove the module from the registry
+	// and trigger a catalog snapshot publish.
+	ipc.SetOnDeregister(func(moduleID string) {
+		registry.Uninstall(moduleID)
+		log.Printf("agent: uninstalled module %s from registry", moduleID)
+		a.moduleManager.OnRegistryChange()
+	})
+
 	// Reconcile desired state: start enabled modules.
 	if err := supervisor.Reconcile(); err != nil {
 		log.Printf("agent: module reconcile: %v", err)

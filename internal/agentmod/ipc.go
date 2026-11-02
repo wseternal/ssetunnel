@@ -42,6 +42,11 @@ type IPCServer struct {
 	// Used by the agent to auto-install the module into the registry
 	// and trigger a catalog snapshot publish.
 	onRegister func(reg *Registration)
+
+	// onDeregister is called after a module disconnects.
+	// Used by the agent to remove the module from the registry
+	// and trigger a catalog snapshot publish.
+	onDeregister func(moduleID string)
 }
 
 // Registration represents a live module registration from a connected process.
@@ -89,6 +94,14 @@ func (s *IPCServer) SetOnRegister(fn func(reg *Registration)) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.onRegister = fn
+}
+
+// SetOnDeregister sets a callback invoked after a module disconnects.
+// Used by the agent to remove the module from the registry.
+func (s *IPCServer) SetOnDeregister(fn func(moduleID string)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.onDeregister = fn
 }
 
 // SetListener attaches a listener to the IPC server for accepting
@@ -364,12 +377,17 @@ func (s *IPCServer) Register(reg *Registration) error {
 // Deregister removes a module registration and closes its connection.
 func (s *IPCServer) Deregister(moduleID string) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	var cb func(string)
 	if reg, ok := s.modules[moduleID]; ok {
 		if reg.Conn != nil {
 			reg.Conn.Close()
 		}
 		delete(s.modules, moduleID)
+		cb = s.onDeregister
+	}
+	s.mu.Unlock()
+	if cb != nil {
+		cb(moduleID)
 	}
 }
 

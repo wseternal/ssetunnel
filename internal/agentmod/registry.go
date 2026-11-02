@@ -187,6 +187,19 @@ func (r *Registry) InstallFromIPC(moduleID, serviceName, version, revision strin
 	return r.saveDesiredState()
 }
 
+// Uninstall removes a module package from the registry.
+// The desired state is updated to reflect that the module is no longer enabled.
+func (r *Registry) Uninstall(moduleID string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	delete(r.packages, moduleID)
+	delete(r.desired, moduleID)
+	if err := r.saveDesiredState(); err != nil {
+		log.Printf("registry: failed to save desired state after uninstall: %v", err)
+	}
+}
+
 // desiredStatePath returns the path to the desired state file.
 func (r *Registry) desiredStatePath() string {
 	return filepath.Join(r.dataDir, "desired_state.json")
