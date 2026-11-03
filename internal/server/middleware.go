@@ -56,6 +56,23 @@ func UserSessionFromContext(r *http.Request) *auth.UserSessionInfo {
 	return nil
 }
 
+// requireSessionAccess verifies that the current user may access a session
+// owned by ownerUserID. It writes an HTTP error and returns false when
+// access is denied. When auth is disabled, UserSessionMiddleware injects a
+// synthetic admin with UserID=0, so sessInfo is never nil.
+func requireSessionAccess(w http.ResponseWriter, r *http.Request, ownerUserID int64) bool {
+	sessInfo := UserSessionFromContext(r)
+	if sessInfo == nil {
+		http.Error(w, "Unauthorized: user session required", http.StatusUnauthorized)
+		return false
+	}
+	if !isAdmin(sessInfo) && sessInfo.UserID != ownerUserID {
+		http.Error(w, "access denied", http.StatusForbidden)
+		return false
+	}
+	return true
+}
+
 // AgentAuthMiddleware protects endpoints requiring agent-role tokens.
 // It tries bearer-token validation first (tokens table), then falls back to
 // user-session validation (user_sessions table, from `ssetunnel login`).
@@ -129,12 +146,20 @@ func AdminSessionMiddleware(store *auth.Store) func(http.Handler) http.Handler {
 // permissions. Like AgentAuthMiddleware, it supports both bearer tokens (from the
 // tokens table) and user session tokens (from `ssetunnel login`). Query token
 // extraction is enabled for SSE endpoints that cannot set custom headers.
-// If store is nil, auth is disabled and requests pass through.
+// If store is nil, auth is disabled and a synthetic admin session is injected.
 func ConnectAuthMiddleware(store *auth.Store) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if store == nil {
-				next.ServeHTTP(w, r)
+				// Auth disabled: inject synthetic admin so requireSessionAccess works.
+				sessInfo := &auth.UserSessionInfo{
+					UserID:      0,
+					Role:        "admin",
+					PermConnect: true,
+					PermAgent:   true,
+				}
+				ctx := context.WithValue(r.Context(), userSessionKey, sessInfo)
+				next.ServeHTTP(w, r.WithContext(ctx))
 				return
 			}
 

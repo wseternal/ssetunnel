@@ -29,6 +29,7 @@ type Caps struct {
 	Concurrency int  // upstream POST sender depth; 0 or 1 = serial cycle-1
 	Batch       int  // max batch bytes; 0 = unspecified
 	Gzip        bool // gzip-per-batch allowed
+	Modules     bool // module registry protocol supported
 }
 
 // ParseCaps parses an X-SSET-Caps header value
@@ -50,6 +51,8 @@ func ParseCaps(h string) Caps {
 			}
 		case "gzip":
 			c.Gzip = true
+		case "modules":
+			c.Modules = true
 		}
 	}
 	return c
@@ -71,6 +74,7 @@ func NegotiateCaps(want, advertised Caps) Caps {
 		Concurrency: min(want.Concurrency, advertised.Concurrency),
 		Batch:       min(want.Batch, advertised.Batch),
 		Gzip:        want.Gzip && advertised.Gzip,
+		Modules:     want.Modules && advertised.Modules,
 	}
 }
 
@@ -83,6 +87,9 @@ func (c Caps) String() string {
 	}
 	if c.Gzip {
 		s += ";gzip"
+	}
+	if c.Modules {
+		s += ";modules"
 	}
 	return s
 }

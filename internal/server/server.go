@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bufio"
 	"io"
 	"log"
 	"net"
@@ -9,8 +10,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/hashicorp/yamux"
 	"github.com/wseternal/ssetunnel/internal/auth"
 	"github.com/wseternal/ssetunnel/internal/metrics"
+	"github.com/wseternal/ssetunnel/internal/moduleproto"
 	"github.com/wseternal/ssetunnel/internal/mux"
 )
 
@@ -159,11 +162,93 @@ func (s *Server) attach(sess *Session) {
 		sess.SetControlStream(cs)
 		log.Printf("server: control stream accepted for session %s", sess.ID())
 
+		// Initialize module catalog and stream handler for this session.
+		mc := NewModuleCatalog(sess.ID())
+		sess.SetModuleCatalog(mc)
+		streamHandler := NewModuleStreamHandler(sess)
+		sess.SetModuleStreamHandler(streamHandler)
+
+		// Accept module streams in background (agent opens these for invocations).
+		go s.acceptModuleStreams(ms, sess, streamHandler)
+
 		// Read loop: receive control messages from the agent (e.g.,
 		// log responses, future trace events). Runs until the stream
 		// closes or the session dies.
 		sess.readControlLoop(cs)
 	}()
+}
+
+// acceptModuleStreams accepts streams opened by the agent for module
+// invocations. Each stream starts with the module marker followed by
+// the invocation ID. Runs until the yamux session closes.
+func (s *Server) acceptModuleStreams(ms *yamux.Session, sess *Session, handler *ModuleStreamHandler) {
+	for {
+		stream, err := ms.Accept()
+		if err != nil {
+			// Session closed or error — clean up.
+			if sess.ModuleCatalog() != nil {
+				sess.ModuleCatalog().Close()
+			}
+			if sess.ModuleStreamHandler() != nil {
+				sess.ModuleStreamHandler().Close()
+			}
+			return
+		}
+
+		// Read the module marker with a deadline using bufio.Reader (C17 fix).
+		const markerReadTimeout = 5 * time.Second
+		stream.SetReadDeadline(time.Now().Add(markerReadTimeout))
+
+		reader := bufio.NewReader(stream)
+		markerLine, err := reader.ReadString('\n')
+		if err != nil {
+			log.Printf("server: read module marker: %v", err)
+			stream.Close()
+			continue
+		}
+		stream.SetReadDeadline(time.Time{}) // clear deadline
+
+		if !strings.HasPrefix(markerLine, moduleproto.ModuleStreamMarker) {
+			log.Printf("server: unexpected stream marker: %q", markerLine)
+			stream.Close()
+			continue
+		}
+
+		// The invocation ID is on the second line (marker is "__module__\n<id>\n").
+		invocationIDLine, err := reader.ReadString('\n')
+		if err != nil {
+			log.Printf("server: read invocation ID: %v", err)
+			stream.Close()
+			continue
+		}
+		invocationID := strings.TrimSuffix(invocationIDLine, "\n")
+
+		// Wrap stream with buffered reader to preserve any bytes read beyond the marker (C17 fix).
+		bufferedConn := &bufioReadConn{Conn: stream, reader: reader}
+
+		// Deliver to stream handler.
+		if err := handler.DeliverStream(bufferedConn, invocationID); err != nil {
+			log.Printf("server: deliver module stream: %v", err)
+			stream.Close()
+		}
+	}
+}
+
+// bufioReadConn wraps a net.Conn with a buffered reader.
+// Used when bytes are read ahead during marker parsing (C17 fix).
+type bufioReadConn struct {
+	net.Conn
+	reader *bufio.Reader
+}
+
+func (c *bufioReadConn) Read(b []byte) (int, error) {
+	return c.reader.Read(b)
+}
+
+// BufioReader returns the underlying buffered reader, allowing callers
+// to avoid double-wrapping with bufio.NewReader.
+func (c *bufioReadConn) BufioReader() *bufio.Reader {
+	return c.reader
 }
 
 // HTTPHandler returns the tunnel endpoint handler (/events, /up).
@@ -173,6 +258,22 @@ func (s *Server) HTTPHandler() http.Handler { return s.handler }
 // Used by the console server to proxy shell connect requests through the
 // existing /connect and /connect-up endpoints.
 func (s *Server) TunnelHandler() *Handler { return s.handler }
+
+// FindSessionByAgent finds the session for a specific agent ID that is
+// accessible to the given user. Admin users can access any agent's session.
+// Returns nil if not found or not accessible.
+// When auth is disabled, sessInfo carries a synthetic admin role, so the
+// check passes. No legacy fallback exists.
+func (s *Server) FindSessionByAgent(agentID string, sessInfo *auth.UserSessionInfo) *Session {
+	_, sess := s.handler.findYamuxByAgentID(agentID)
+	if sess == nil {
+		return nil
+	}
+	if !isAdmin(sessInfo) && sess.UserID() != sessInfo.UserID {
+		return nil
+	}
+	return sess
+}
 
 // StartShellCleanup starts the background goroutine that periodically
 // cleans up idle persistent shell sessions. It stops when done is closed.

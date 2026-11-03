@@ -52,6 +52,7 @@ import ZoomInIcon from '@mui/icons-material/ZoomIn';
 import KeyboardIcon from '@mui/icons-material/Keyboard';
 import KeyboardArrowDownIcon from '@mui/icons-material/KeyboardArrowDown';
 import KeyboardArrowUpIcon from '@mui/icons-material/KeyboardArrowUp';
+import ExtensionIcon from '@mui/icons-material/Extension';
 import { Terminal, type IDisposable } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
@@ -350,6 +351,60 @@ export default function App() {
     return { from: from.toISOString(), to: now.toISOString() };
   };
 
+  // Module discovery state (Task 17: Console Module Federation)
+  interface ModuleSummary {
+    module_id: string;
+    service_name: string;
+    service_version: string;
+    revision?: string;
+    health: string;
+    has_ui: boolean;
+  }
+  const [moduleAgent, setModuleAgent] = useState<string>('');
+  const [modules, setModules] = useState<ModuleSummary[]>([]);
+  const [selectedModule, setSelectedModule] = useState<ModuleSummary | null>(null);
+  const [moduleOpenAPI, setModuleOpenAPI] = useState<string>('');
+
+  // Echo module interaction state
+  const [echoMethod, setEchoMethod] = useState<string>('POST');
+  const [echoPath, setEchoPath] = useState<string>('/echo');
+  const [echoHeaders, setEchoHeaders] = useState<string>('Content-Type: application/json');
+  const [echoBody, setEchoBody] = useState<string>('{"message": "Hello from the console!"}');
+  const [echoResponse, setEchoResponse] = useState<{status: number; headers: Record<string, string>; body: string} | null>(null);
+  const [echoLoading, setEchoLoading] = useState(false);
+  const [echoError, setEchoError] = useState<string>('');
+
+  const invokeEcho = async () => {
+    if (!moduleAgent || !selectedModule) return;
+    setEchoLoading(true);
+    setEchoError('');
+    setEchoResponse(null);
+    try {
+      const hdrs: Record<string, string> = {};
+      if (echoHeaders.trim()) {
+        for (const line of echoHeaders.split('\n')) {
+          const idx = line.indexOf(':');
+          if (idx > 0) hdrs[line.slice(0, idx).trim()] = line.slice(idx + 1).trim();
+        }
+      }
+      const invPath = echoPath || '/echo';
+      const url = `/console/api/v1/modules/invoke/${encodeURIComponent(moduleAgent)}/${encodeURIComponent(selectedModule.module_id)}${invPath.startsWith('/') ? invPath : '/' + invPath}`;
+      const res = await fetch(url, {
+        method: echoMethod,
+        headers: { ...authHeaders(), ...hdrs },
+        body: (echoMethod !== 'GET' && echoBody) ? echoBody : undefined,
+      });
+      const respHeaders: Record<string, string> = {};
+      res.headers.forEach((v, k) => { respHeaders[k] = v; });
+      const body = await res.text();
+      setEchoResponse({ status: res.status, headers: respHeaders, body });
+    } catch (e: any) {
+      setEchoError(e?.message || 'Request failed');
+    } finally {
+      setEchoLoading(false);
+    }
+  };
+
   // Cloud Shell
   const [connectedAgents, setConnectedAgents] = useState<ConnectedAgent[]>([]);
   const [shellAgent, setShellAgent] = useState<string>('');
@@ -523,6 +578,26 @@ export default function App() {
     try {
       const res = await fetch('/console/api/v1/connected-agents', { headers: authHeaders() });
       if (checkAuth(res) && res.ok) setConnectedAgents(await res.json());
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  // Module discovery (Task 17: Console Module Federation)
+  const fetchModules = async (agentId: string) => {
+    if (!agentId) { setModules([]); return; }
+    try {
+      const res = await fetch(`/console/api/v1/modules?agent=${encodeURIComponent(agentId)}`, { headers: authHeaders() });
+      if (checkAuth(res) && res.ok) setModules(await res.json());
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  const fetchModuleOpenAPI = async (agentId: string, moduleId: string) => {
+    try {
+      const res = await fetch(`/console/api/v1/modules/openapi/${encodeURIComponent(agentId)}/${encodeURIComponent(moduleId)}`, { headers: authHeaders() });
+      if (checkAuth(res) && res.ok) setModuleOpenAPI(await res.text());
     } catch (e) {
       console.error(e);
     }
@@ -2983,6 +3058,7 @@ export default function App() {
                     <Tab label="Statistics" />
                     <Tab label="Shell" icon={<TerminalIcon />} iconPosition="start" />
                     <Tab label="Desktop" icon={<DesktopWindowsIcon />} iconPosition="start" />
+                    <Tab label="Modules" icon={<ExtensionIcon />} iconPosition="start" />
                   </Tabs>
                 </Paper>
 
@@ -3212,6 +3288,172 @@ export default function App() {
 
                 {renderShellPanel(4)}
                 {tabIndex === 5 && desktopPanel}
+
+                {/* Modules tab (Task 17: Console Module Federation) */}
+                {tabIndex === 6 && (
+                  <Box>
+                    <PageHeader
+                      title="Module Registry"
+                      actions={
+                        <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
+                          <FormControl size="small" sx={{ minWidth: 200 }}>
+                            <InputLabel>Agent</InputLabel>
+                            <Select
+                              value={moduleAgent}
+                              label="Agent"
+                              onChange={(e) => { setModuleAgent(e.target.value); fetchModules(e.target.value); }}
+                            >
+                              {connectedAgents.map((a) => (
+                                <MenuItem key={a.agent_id} value={a.agent_id}>{a.agent_id}</MenuItem>
+                              ))}
+                            </Select>
+                          </FormControl>
+                          <Button startIcon={<RefreshIcon />} onClick={() => fetchModules(moduleAgent)} size="small" disabled={!moduleAgent}>
+                            Refresh
+                          </Button>
+                        </Box>
+                      }
+                    />
+
+                    {!moduleAgent && (
+                      <EmptyState
+                        icon={<ExtensionIcon sx={{ fontSize: 48, color: 'text.disabled' }} />}
+                        title="Select an agent to view modules"
+                      />
+                    )}
+
+                    {moduleAgent && modules.length === 0 && (
+                      <EmptyState
+                        icon={<ExtensionIcon sx={{ fontSize: 48, color: 'text.disabled' }} />}
+                        title="No modules registered"
+                      />
+                    )}
+
+                    {modules.length > 0 && (
+                      <Box sx={{ display: 'flex', gap: 3 }}>
+                        {/* Module list */}
+                        <Box sx={{ flex: '0 0 300px' }}>
+                          {modules.map((mod) => (
+                            <Card
+                              key={mod.module_id}
+                              sx={{ mb: 1, cursor: 'pointer', border: selectedModule?.module_id === mod.module_id ? '2px solid' : '1px solid', borderColor: selectedModule?.module_id === mod.module_id ? 'primary.main' : 'divider' }}
+                              onClick={() => {
+                                setSelectedModule(mod);
+                                setModuleOpenAPI('');
+                                fetchModuleOpenAPI(moduleAgent, mod.module_id);
+                              }}
+                            >
+                              <CardContent sx={{ py: 1.5, '&:last-child': { pb: 1.5 } }}>
+                                <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                  <Typography variant="subtitle2">{mod.service_name}</Typography>
+                                  <StatusPill tone={mod.health === 'ready' ? 'success' : mod.health === 'degraded' ? 'warning' : 'error'}>
+                                    {mod.health}
+                                  </StatusPill>
+                                </Box>
+                                <Typography variant="caption" color="text.secondary">{mod.module_id}</Typography>
+                                <Box sx={{ display: 'flex', gap: 1, mt: 0.5 }}>
+                                  <Chip size="small" label={`v${mod.service_version}`} />
+                                  {mod.has_ui && <Chip size="small" label="UI" color="primary" variant="outlined" />}
+                                  {mod.revision && <Chip size="small" label={mod.revision.slice(0, 7)} variant="outlined" />}
+                                </Box>
+                              </CardContent>
+                            </Card>
+                          ))}
+                        </Box>
+
+                        {/* Module detail */}
+                        <Box sx={{ flex: 1 }}>
+                          {selectedModule ? (
+                            <Card>
+                              <CardContent>
+                                <Typography variant="h6">{selectedModule.service_name}</Typography>
+                                <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+                                  {selectedModule.module_id} · v{selectedModule.service_version}
+                                </Typography>
+
+                                {/* Echo module interaction panel */}
+                                {selectedModule.service_name === 'echo' && (
+                                  <Box sx={{ mb: 3 }}>
+                                    <Typography variant="subtitle1" sx={{ mb: 1, fontWeight: 600 }}>Try It</Typography>
+                                    <Paper variant="outlined" sx={{ p: 2 }}>
+                                      <Box sx={{ display: 'flex', gap: 1, mb: 1.5 }}>
+                                        <Select size="small" value={echoMethod} onChange={(e) => setEchoMethod(e.target.value)} sx={{ minWidth: 100 }}>
+                                          <MenuItem value="GET">GET</MenuItem>
+                                          <MenuItem value="POST">POST</MenuItem>
+                                          <MenuItem value="PUT">PUT</MenuItem>
+                                          <MenuItem value="DELETE">DELETE</MenuItem>
+                                        </Select>
+                                        <TextField size="small" value={echoPath} onChange={(e) => setEchoPath(e.target.value)} label="Path" sx={{ flex: 1 }} />
+                                        <Button variant="contained" onClick={invokeEcho} disabled={echoLoading} size="small">
+                                          {echoLoading ? 'Sending...' : 'Send'}
+                                        </Button>
+                                      </Box>
+                                      <TextField
+                                        size="small" multiline minRows={2} maxRows={4} fullWidth
+                                        value={echoHeaders} onChange={(e) => setEchoHeaders(e.target.value)}
+                                        label="Headers (one per line: Key: Value)" sx={{ mb: 1 }}
+                                      />
+                                      {echoMethod !== 'GET' && (
+                                        <TextField
+                                          size="small" multiline minRows={3} maxRows={8} fullWidth
+                                          value={echoBody} onChange={(e) => setEchoBody(e.target.value)}
+                                          label="Body"
+                                        />
+                                      )}
+                                      {echoError && (
+                                        <Alert severity="error" sx={{ mt: 1 }}>{echoError}</Alert>
+                                      )}
+                                      {echoResponse && (
+                                        <Box sx={{ mt: 1.5 }}>
+                                          <Box sx={{ display: 'flex', gap: 1, alignItems: 'center', mb: 1 }}>
+                                            <Chip
+                                              size="small"
+                                              label={`${echoResponse.status}`}
+                                              color={echoResponse.status < 300 ? 'success' : echoResponse.status < 500 ? 'warning' : 'error'}
+                                            />
+                                            <Typography variant="caption" color="text.secondary">Response</Typography>
+                                          </Box>
+                                          {Object.keys(echoResponse.headers).length > 0 && (
+                                            <Paper variant="outlined" sx={{ p: 1, mb: 1, maxHeight: 120, overflow: 'auto' }}>
+                                              <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 600 }}>Headers</Typography>
+                                              <pre style={{ fontSize: 11, margin: 0 }}>
+                                                {Object.entries(echoResponse.headers).map(([k, v]) => `${k}: ${v}`).join('\n')}
+                                              </pre>
+                                            </Paper>
+                                          )}
+                                          <Paper variant="outlined" sx={{ p: 1, maxHeight: 300, overflow: 'auto' }}>
+                                            <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 600 }}>Body</Typography>
+                                            <pre style={{ fontSize: 12, margin: 0, whiteSpace: 'pre-wrap' }}>
+                                              {(() => { try { return JSON.stringify(JSON.parse(echoResponse.body), null, 2); } catch { return echoResponse.body; } })()}
+                                            </pre>
+                                          </Paper>
+                                        </Box>
+                                      )}
+                                    </Paper>
+                                  </Box>
+                                )}
+
+                                <Typography variant="subtitle2" sx={{ mb: 1 }}>OpenAPI Specification</Typography>
+                                {moduleOpenAPI ? (
+                                  <Paper variant="outlined" sx={{ p: 2, maxHeight: 500, overflow: 'auto' }}>
+                                    <pre style={{ fontSize: 12, margin: 0, whiteSpace: 'pre-wrap' }}>{moduleOpenAPI}</pre>
+                                  </Paper>
+                                ) : (
+                                  <Typography variant="body2" color="text.secondary">Loading...</Typography>
+                                )}
+                              </CardContent>
+                            </Card>
+                          ) : (
+                            <EmptyState
+                              icon={<ExtensionIcon sx={{ fontSize: 48, color: 'text.disabled' }} />}
+                              title="Select a module to view details"
+                            />
+                          )}
+                        </Box>
+                      </Box>
+                    )}
+                  </Box>
+                )}
               </>
             ) : (
               <>
@@ -3222,6 +3464,7 @@ export default function App() {
                     <Tab label="Statistics" />
                     <Tab label="Shell" icon={<TerminalIcon />} iconPosition="start" />
                     <Tab label="Desktop" icon={<DesktopWindowsIcon />} iconPosition="start" />
+                    <Tab label="Modules" icon={<ExtensionIcon />} iconPosition="start" />
                   </Tabs>
                 </Paper>
 
@@ -3390,6 +3633,168 @@ export default function App() {
 
                 {renderShellPanel(3)}
                 {tabIndex === 4 && desktopPanel}
+
+                {/* Modules tab (non-admin, Task 17) */}
+                {tabIndex === 5 && (
+                  <Box>
+                    <PageHeader
+                      title="Module Registry"
+                      actions={
+                        <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
+                          <FormControl size="small" sx={{ minWidth: 200 }}>
+                            <InputLabel>Agent</InputLabel>
+                            <Select
+                              value={moduleAgent}
+                              label="Agent"
+                              onChange={(e) => { setModuleAgent(e.target.value); fetchModules(e.target.value); }}
+                            >
+                              {connectedAgents.map((a) => (
+                                <MenuItem key={a.agent_id} value={a.agent_id}>{a.agent_id}</MenuItem>
+                              ))}
+                            </Select>
+                          </FormControl>
+                          <Button startIcon={<RefreshIcon />} onClick={() => fetchModules(moduleAgent)} size="small" disabled={!moduleAgent}>
+                            Refresh
+                          </Button>
+                        </Box>
+                      }
+                    />
+
+                    {!moduleAgent && (
+                      <EmptyState
+                        icon={<ExtensionIcon sx={{ fontSize: 48, color: 'text.disabled' }} />}
+                        title="Select an agent to view modules"
+                      />
+                    )}
+
+                    {moduleAgent && modules.length === 0 && (
+                      <EmptyState
+                        icon={<ExtensionIcon sx={{ fontSize: 48, color: 'text.disabled' }} />}
+                        title="No modules registered"
+                      />
+                    )}
+
+                    {modules.length > 0 && (
+                      <Box sx={{ display: 'flex', gap: 3 }}>
+                        <Box sx={{ flex: '0 0 300px' }}>
+                          {modules.map((mod) => (
+                            <Card
+                              key={mod.module_id}
+                              sx={{ mb: 1, cursor: 'pointer', border: selectedModule?.module_id === mod.module_id ? '2px solid' : '1px solid', borderColor: selectedModule?.module_id === mod.module_id ? 'primary.main' : 'divider' }}
+                              onClick={() => {
+                                setSelectedModule(mod);
+                                setModuleOpenAPI('');
+                                fetchModuleOpenAPI(moduleAgent, mod.module_id);
+                              }}
+                            >
+                              <CardContent sx={{ py: 1.5, '&:last-child': { pb: 1.5 } }}>
+                                <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                  <Typography variant="subtitle2">{mod.service_name}</Typography>
+                                  <StatusPill tone={mod.health === 'ready' ? 'success' : mod.health === 'degraded' ? 'warning' : 'error'}>
+                                    {mod.health}
+                                  </StatusPill>
+                                </Box>
+                                <Typography variant="caption" color="text.secondary">{mod.module_id}</Typography>
+                                <Box sx={{ display: 'flex', gap: 1, mt: 0.5 }}>
+                                  <Chip size="small" label={`v${mod.service_version}`} />
+                                  {mod.has_ui && <Chip size="small" label="UI" color="primary" variant="outlined" />}
+                                </Box>
+                              </CardContent>
+                            </Card>
+                          ))}
+                        </Box>
+                        <Box sx={{ flex: 1 }}>
+                          {selectedModule ? (
+                            <Card>
+                              <CardContent>
+                                <Typography variant="h6">{selectedModule.service_name}</Typography>
+                                <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+                                  {selectedModule.module_id} · v{selectedModule.service_version}
+                                </Typography>
+
+                                {/* Echo module interaction panel (non-admin) */}
+                                {selectedModule.service_name === 'echo' && (
+                                  <Box sx={{ mb: 3 }}>
+                                    <Typography variant="subtitle1" sx={{ mb: 1, fontWeight: 600 }}>Try It</Typography>
+                                    <Paper variant="outlined" sx={{ p: 2 }}>
+                                      <Box sx={{ display: 'flex', gap: 1, mb: 1.5 }}>
+                                        <Select size="small" value={echoMethod} onChange={(e) => setEchoMethod(e.target.value)} sx={{ minWidth: 100 }}>
+                                          <MenuItem value="GET">GET</MenuItem>
+                                          <MenuItem value="POST">POST</MenuItem>
+                                          <MenuItem value="PUT">PUT</MenuItem>
+                                          <MenuItem value="DELETE">DELETE</MenuItem>
+                                        </Select>
+                                        <TextField size="small" value={echoPath} onChange={(e) => setEchoPath(e.target.value)} label="Path" sx={{ flex: 1 }} />
+                                        <Button variant="contained" onClick={invokeEcho} disabled={echoLoading} size="small">
+                                          {echoLoading ? 'Sending...' : 'Send'}
+                                        </Button>
+                                      </Box>
+                                      <TextField
+                                        size="small" multiline minRows={2} maxRows={4} fullWidth
+                                        value={echoHeaders} onChange={(e) => setEchoHeaders(e.target.value)}
+                                        label="Headers (one per line: Key: Value)" sx={{ mb: 1 }}
+                                      />
+                                      {echoMethod !== 'GET' && (
+                                        <TextField
+                                          size="small" multiline minRows={3} maxRows={8} fullWidth
+                                          value={echoBody} onChange={(e) => setEchoBody(e.target.value)}
+                                          label="Body"
+                                        />
+                                      )}
+                                      {echoError && (
+                                        <Alert severity="error" sx={{ mt: 1 }}>{echoError}</Alert>
+                                      )}
+                                      {echoResponse && (
+                                        <Box sx={{ mt: 1.5 }}>
+                                          <Box sx={{ display: 'flex', gap: 1, alignItems: 'center', mb: 1 }}>
+                                            <Chip
+                                              size="small"
+                                              label={`${echoResponse.status}`}
+                                              color={echoResponse.status < 300 ? 'success' : echoResponse.status < 500 ? 'warning' : 'error'}
+                                            />
+                                            <Typography variant="caption" color="text.secondary">Response</Typography>
+                                          </Box>
+                                          {Object.keys(echoResponse.headers).length > 0 && (
+                                            <Paper variant="outlined" sx={{ p: 1, mb: 1, maxHeight: 120, overflow: 'auto' }}>
+                                              <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 600 }}>Headers</Typography>
+                                              <pre style={{ fontSize: 11, margin: 0 }}>
+                                                {Object.entries(echoResponse.headers).map(([k, v]) => `${k}: ${v}`).join('\n')}
+                                              </pre>
+                                            </Paper>
+                                          )}
+                                          <Paper variant="outlined" sx={{ p: 1, maxHeight: 300, overflow: 'auto' }}>
+                                            <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 600 }}>Body</Typography>
+                                            <pre style={{ fontSize: 12, margin: 0, whiteSpace: 'pre-wrap' }}>
+                                              {(() => { try { return JSON.stringify(JSON.parse(echoResponse.body), null, 2); } catch { return echoResponse.body; } })()}
+                                            </pre>
+                                          </Paper>
+                                        </Box>
+                                      )}
+                                    </Paper>
+                                  </Box>
+                                )}
+
+                                <Typography variant="subtitle2" sx={{ mb: 1 }}>OpenAPI Specification</Typography>
+                                {moduleOpenAPI ? (
+                                  <Paper variant="outlined" sx={{ p: 2, maxHeight: 500, overflow: 'auto' }}>
+                                    <pre style={{ fontSize: 12, margin: 0, whiteSpace: 'pre-wrap' }}>{moduleOpenAPI}</pre>
+                                  </Paper>
+                                ) : (
+                                  <Typography variant="body2" color="text.secondary">Loading...</Typography>
+                                )}
+                              </CardContent>
+                            </Card>
+                          ) : (
+                            <EmptyState
+                              icon={<ExtensionIcon sx={{ fontSize: 48, color: 'text.disabled' }} />}
+                              title="Select a module to view details"
+                            />
+                          )}
+                        </Box>
+                      </Box>
+                    )}
+                  </Box>
+                )}
               </>
             )}
 

@@ -44,6 +44,7 @@ commands:
             service actions: run, start, stop, restart, status, uninstall
   login     authenticate and store a session for agent/connect
   probe     measure a server's POST path (body cap, throttling)
+  module    manage agent modules (install, start, stop, restart, status, remove, list)
   version   print the build version and git revision
 `
 
@@ -91,6 +92,8 @@ func main() {
 		err = runLogin(ctx, os.Args[2:])
 	case "probe":
 		err = runProbe(ctx, os.Args[2:])
+	case "module":
+		err = runModule(os.Args[2:])
 	case "version":
 		fmt.Println(BuildVersion())
 		return
@@ -379,6 +382,16 @@ func runAgent(ctx context.Context, args []string) error {
 		Verbose:          *verbose,
 		OnTokenRefresh:   refreshFn,
 	}
+
+	// Initialize the module subsystem (registry, IPC, supervisor).
+	dataDir, dirErr := agentDataDir()
+	if dirErr != nil {
+		return dirErr
+	}
+	if err := ag.InitModules(ctx, dataDir); err != nil {
+		return fmt.Errorf("init modules: %w", err)
+	}
+
 	return ag.Run(ctx)
 }
 

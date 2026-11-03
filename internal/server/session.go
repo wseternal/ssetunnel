@@ -13,6 +13,7 @@ import (
 
 	"github.com/hashicorp/yamux"
 	"github.com/wseternal/ssetunnel/internal/metrics"
+	"github.com/wseternal/ssetunnel/internal/moduleproto"
 	"github.com/wseternal/ssetunnel/internal/mux"
 	"github.com/wseternal/ssetunnel/internal/transport"
 )
@@ -82,6 +83,12 @@ type Session struct {
 	// read loop delivers the response via handleLogResponse.
 	pendingLogsMu sync.Mutex
 	pendingLogs   map[string]chan []string
+
+	// Module registry state (catalog snapshots from agent).
+	moduleCatalog *ModuleCatalog
+
+	// Module stream handler (invocation stream management).
+	moduleStreamHandler *ModuleStreamHandler
 
 	closeOnce sync.Once
 	closeCh   chan struct{} // closed by Close(); for monitor goroutines
@@ -304,14 +311,24 @@ func (s *Session) readControlLoop(cs net.Conn) {
 }
 
 // handleControlMessage dispatches an incoming control message from the
-// agent. Currently handles log responses; future messages (traces) go
-// in the default case.
+// agent. Currently handles log responses and module messages; future
+// messages (traces) go in the default case.
 func (s *Session) handleControlMessage(msg *mux.ControlMessage) {
 	switch msg.Type {
 	case mux.MsgLogResponse:
 		s.handleLogResponse(msg)
 	case mux.MsgTrace:
 		// Reserved for ADR-001 diagnostic tracing.
+	case moduleproto.MsgSnapshotStart, moduleproto.MsgSnapshotChunk,
+		moduleproto.MsgSnapshotCommit, moduleproto.MsgModuleHealth,
+		moduleproto.MsgModuleRemove:
+		if s.moduleCatalog != nil {
+			if err := s.moduleCatalog.HandleControlMessage(msg); err != nil {
+				log.Printf("server: module catalog error: %v", err)
+			}
+		} else {
+			log.Printf("server: module message received but no catalog initialized")
+		}
 	default:
 		log.Printf("server: unexpected control message type=%s from agent session %s",
 			msg.Type, s.id)
@@ -499,4 +516,24 @@ func (r *Registry) IDs() []string {
 		ids = append(ids, id)
 	}
 	return ids
+}
+
+// ModuleCatalog returns the module catalog for this session.
+func (s *Session) ModuleCatalog() *ModuleCatalog {
+	return s.moduleCatalog
+}
+
+// SetModuleCatalog sets the module catalog for this session.
+func (s *Session) SetModuleCatalog(mc *ModuleCatalog) {
+	s.moduleCatalog = mc
+}
+
+// ModuleStreamHandler returns the module stream handler for this session.
+func (s *Session) ModuleStreamHandler() *ModuleStreamHandler {
+	return s.moduleStreamHandler
+}
+
+// SetModuleStreamHandler sets the module stream handler for this session.
+func (s *Session) SetModuleStreamHandler(h *ModuleStreamHandler) {
+	s.moduleStreamHandler = h
 }
