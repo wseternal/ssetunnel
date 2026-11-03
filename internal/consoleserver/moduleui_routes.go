@@ -30,7 +30,7 @@ func newModuleUIRoutes(srv *server.Server, uiStore *moduleui.Store) *moduleUIRou
 }
 
 // handleGetConsumerAsset serves a cached consumer UI asset.
-// GET /console/api/v1/modules/ui/consumer/{package-digest}/{path:.*}
+// GET /api/v1/modules/ui/consumer/{package-digest}/{path:.*}
 //
 // Consumer assets are served from the local trusted package store.
 // Every request verifies the package is still trusted and the asset
@@ -87,7 +87,7 @@ func (m *moduleUIRoutes) handleGetConsumerAsset(w http.ResponseWriter, r *http.R
 }
 
 // handleGetProviderAsset proxies a request to a module's declared asset operation.
-// GET /console/api/v1/modules/ui/provider/{agent-id}/{module-id}/{path:.*}
+// GET /api/v1/modules/ui/provider/{agent-id}/{module-id}/{path:.*}
 //
 // Provider assets are fetched by invoking the module's asset operation
 // (declared in OpenAPI). The response is verified against the manifest
@@ -231,7 +231,7 @@ func (m *moduleUIRoutes) handleGetProviderAsset(w http.ResponseWriter, r *http.R
 }
 
 // handleListModuleUI returns the UI descriptors for a module.
-// GET /console/api/v1/modules/ui/{agent-id}/{module-id}
+// GET /api/v1/modules/ui/{agent-id}/{module-id}
 func (m *moduleUIRoutes) handleListModuleUI(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)

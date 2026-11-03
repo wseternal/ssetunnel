@@ -638,7 +638,7 @@ func (h *Handler) handleConnectUp(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleConnectResize serves the cloud-shell resize POST (reached via
-// ShellConnectResizeHandler at /console/api/v1/shell/resize): it forwards
+// ShellConnectResizeHandler at /api/v1/shell/resize): it forwards
 // PTY resize requests from the shell frontend into the target session's
 // resize channel. For shell sessions that channel is the ShellSession's
 // resizeCh, drained by resizeForwarder and sent to the agent over the

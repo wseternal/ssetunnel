@@ -46,8 +46,8 @@ The server maintains an in-memory asset store (`moduleui.Store`) with:
 3. Assets are cached via `CacheAsset()` which verifies size and digest match the manifest
 
 **Serving flow**:
-- **Consumer assets** (server-installed UI): served from the trusted store at `/console/api/v1/modules/ui/consumer/{digest}/{path}`. The digest in the URL enables immutable caching (`Cache-Control: public, max-age=31536000, immutable`).
-- **Provider assets** (agent-side UI): proxied through module invocation at `/console/api/v1/modules/ui/provider/{agent-id}/{module-id}/{path}`. Response body bounded by `MaxAssetSize` (8 MiB).
+- **Consumer assets** (server-installed UI): served from the trusted store at `/api/v1/modules/ui/consumer/{digest}/{path}`. The digest in the URL enables immutable caching (`Cache-Control: public, max-age=31536000, immutable`).
+- **Provider assets** (agent-side UI): proxied through module invocation at `/api/v1/modules/ui/provider/{agent-id}/{module-id}/{path}`. Response body bounded by `MaxAssetSize` (8 MiB).
 
 ### Path Traversal Prevention
 
@@ -66,9 +66,9 @@ The frontend SPA adds a "Modules" tab with:
 - Links to module UIs when `has_ui: true`
 
 The modules API endpoints:
-- `GET /console/api/v1/modules?agent=<id>` — list modules with summaries
-- `GET /console/api/v1/modules/<agent-id>/<module-id>` — full detail with OpenAPI
-- `GET /console/api/v1/modules/openapi/<agent-id>/<module-id>` — raw OpenAPI YAML
+- `GET /api/v1/modules?agent=<id>` — list modules with summaries
+- `GET /api/v1/modules/<agent-id>/<module-id>` — full detail with OpenAPI
+- `GET /api/v1/modules/openapi/<agent-id>/<module-id>` — raw OpenAPI YAML
 
 ### Catalog Reassembly
 

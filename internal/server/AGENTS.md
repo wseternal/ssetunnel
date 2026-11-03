@@ -9,9 +9,9 @@ HTTP :8080                                  HTTP :8081
   │                                           │
 Handler (mux.ServeMux)                   ConsoleHandler (gorilla/mux)
   │                                           │
-├── /events      (SSE, agent)            ├── /console/api/v1/shell/* (cloud shell proxy)
-├── /up          (POST, agent)           ├── /console/api/v1/* (consoleapi)
-├── /connect     (SSE, connect client)   └── /console/* (SPA)
+├── /events      (SSE, agent)            ├── /api/v1/shell/* (cloud shell proxy)
+├── /up          (POST, agent)           ├── /api/v1/* (consoleapi)
+├── /connect     (SSE, connect client)   └── /* (SPA)
 ├── /connect-up  (POST, connect client)
 └── /probe
   │
@@ -25,7 +25,7 @@ OpenStream() → bidirectional io.Copy ↔ connect client
 ## Core Types
 
 ### `Server`
-Top-level server. Owns the `Registry`, `Handler`, and optional `auth.Store` and `metrics.MetricsCollector`. Created via `NewServer(heartbeat)` or `NewServerWithBase(heartbeat, basePath)`. `SetAuthStore` and `SetMetricsCollector` recreate the handler to inject dependencies. `FindSession(agentID)` looks up a session for auto-tuner tune frame delivery.
+Top-level server. Owns the `Registry`, `Handler`, and optional `auth.Store` and `metrics.MetricsCollector`. Created via `NewServer(heartbeat)`. `SetAuthStore` and `SetMetricsCollector` recreate the handler to inject dependencies. `FindSession(agentID)` looks up a session for auto-tuner tune frame delivery.
 
 ### `Handler`
 HTTP handler serving tunnel endpoints:
@@ -33,7 +33,7 @@ HTTP handler serving tunnel endpoints:
 - **`/up`**: Accepts upstream POST batches with `X-SSET-Session` and `X-SSET-Seq` headers. Validates session, negotiates gzip, pushes to session's reorder window or serial pipe. Records POST metrics (size, RTT) on success, error metrics on rejection.
 - **`/connect?id=<sessionID>&agent=<agentID>&target=<target>`**: Opens an SSE stream for connect clients. Short-polls for agent availability (3 s timeout, 25 ms poll). Finds the target agent's yamux session, opens a stream, bridges bidirectionally. The upstream goroutine is a plain byte pipe from POST data into the yamux stream (no resize multiplexing; PTY resize is shell-only and travels the control stream). Agent session death is detected promptly via `sess.Done()` monitor goroutine.
 - **`/connect-up`**: Accepts upstream POST batches from connect clients, writes to the connect session's up pipe. Rejects `X-SSET-Flags` (no reorder window on connect path). Records connect upstream metrics.
-- **`handleConnectResize`** (not registered in handler mux): Accepts PTY resize POST requests (`{id, cols, rows}`), sends to the connect session's resize channel. Mounted externally by `consoleserver` at `/console/api/v1/shell/resize`.
+- **`handleConnectResize`** (not registered in handler mux): Accepts PTY resize POST requests (`{id, cols, rows}`), sends to the connect session's resize channel. Mounted externally by `consoleserver` at `/api/v1/shell/resize`.
 - **`/probe`**: Diagnostic endpoint — reads and discards body, returns 200.
 
 Server capabilities advertised: `concurrency=4;batch=1048576;gzip`.

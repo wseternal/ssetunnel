@@ -85,16 +85,15 @@ A typical deployment: server behind Caddy reverse proxy on a public VPS, agent o
 Start the server as a background service with embedded PostgreSQL:
 
 ```bash
-ssetunnel server start --base /sse --db-url "postgres:embedded:?datapath=$HOME/.ssetunnel/data"
+ssetunnel server start --db-url "postgres:embedded:?datapath=$HOME/.ssetunnel/data"
 ```
 
-Configure Caddy to route traffic:
+Configure Caddy to route traffic (the reverse proxy strips the path prefix so the server sees root-relative routes):
 
 ```caddyfile
 https://tunnel.example.com {
-    reverse_proxy /sse*     http://127.0.0.1:8080
-    reverse_proxy /console* http://127.0.0.1:8081
-    file_server
+    handle_path /sse*     { reverse_proxy http://127.0.0.1:8080 }
+    handle_path /console* { reverse_proxy http://127.0.0.1:8081 }
 }
 ```
 
@@ -111,7 +110,7 @@ ssetunnel login --server https://tunnel.example.com
 Start the agent as a background service:
 
 ```bash
-ssetunnel agent start --id office --base /sse
+ssetunnel agent start --id office
 ```
 
 ### Client (any machine)
@@ -124,22 +123,22 @@ ssetunnel login --server https://tunnel.example.com
 
 **SSH via ProxyCommand:**
 ```bash
-ssh -o ProxyCommand="ssetunnel connect --base /sse --server https://tunnel.example.com --agent office --target 127.0.0.1:22 --local -" user@127.0.0.1
+ssh -o ProxyCommand="ssetunnel connect --server https://tunnel.example.com/sse --agent office --target 127.0.0.1:22 --local -" user@127.0.0.1
 ```
 
 **VNC via local TCP port:**
 ```bash
-ssetunnel connect --base /sse --server https://tunnel.example.com --agent office --target 127.0.0.1:5900 --local 127.0.0.1:5900
+ssetunnel connect --server https://tunnel.example.com/sse --agent office --target 127.0.0.1:5900 --local 127.0.0.1:5900
 ```
 Then connect your VNC client to `127.0.0.1:5900`.
 
 **Named daemon connections** (run multiple connections simultaneously as background services):
 ```bash
 # Start a persistent SSH connection daemon named "office-ssh"
-ssetunnel connect start --name office-ssh --base /sse --agent office --target 127.0.0.1:22 --local 127.0.0.1:2222
+ssetunnel connect start --name office-ssh --agent office --target 127.0.0.1:22 --local 127.0.0.1:2222
 
 # Start a persistent DB connection daemon named "office-db"
-ssetunnel connect start --name office-db --base /sse --agent office --target 127.0.0.1:5432 --local 127.0.0.1:5432
+ssetunnel connect start --name office-db --agent office --target 127.0.0.1:5432 --local 127.0.0.1:5432
 
 # Manage individual connections
 ssetunnel connect status --name office-ssh

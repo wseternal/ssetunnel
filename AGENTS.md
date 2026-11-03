@@ -73,7 +73,7 @@ User (SSH, DB client, ...)
 * **Path**: `internal/consoleapi/`
 
 ### 9. [Console Server](internal/consoleserver/AGENTS.md)
-* **Responsibility**: Combines the console API router with the React SPA static file server via `litespaserver`. Proxies cloud shell endpoints (`/console/api/v1/shell/connect`, `/connect-up`, `/resize`) to the tunnel handler with forced `__shell__` target and user-scoped agent access.
+* **Responsibility**: Combines the console API router with the React SPA static file server via `litespaserver`. Proxies cloud shell endpoints (`/api/v1/shell/connect`, `/connect-up`, `/resize`) to the tunnel handler with forced `__shell__` target and user-scoped agent access.
 * **Path**: `internal/consoleserver/`
 
 ### 10. [Probe](internal/probe/AGENTS.md)
@@ -184,4 +184,4 @@ Diagnosis instruments: `window.__shellDbg` (byte-pipeline counters) and `window.
 The `AutoTuner` evaluates agents every 30 s: throughput saturation adjusts batch size (4 KiB–1 MiB), p95 latency adjusts concurrency (1–4), and bandwidth level toggles gzip. Decisions are pushed via SSE `event: tune` control frames. Agents apply batch-size and compress changes live; concurrency changes are deferred to next reconnect. The tuner enforces a 2-minute cooldown between decisions per agent.
 
 ### Base Path Prefix
-All tunnel endpoints support a `--base` flag (e.g. `--base /tunnel`) for reverse-proxy setups. The prefix is prepended to `/events`, `/up`, `/connect`, `/connect-up`, `/probe`. Both agent and connect client pass the same `--base` to match the server.
+All route handlers are defined relative to root (`/`). Subpath prefixing and stripping is delegated entirely to the reverse proxy (e.g., Caddy's `uri strip_prefix`).

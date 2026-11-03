@@ -94,7 +94,7 @@ func NewConsumer(serverURL, authToken string, httpClient *http.Client) *Consumer
 // epoch and module revisions in the result must be used for subsequent
 // invocations — stale epochs are rejected with a 409 Conflict.
 func (c *Consumer) Discover(ctx context.Context, agentID string) (*Catalog, error) {
-	url := fmt.Sprintf("%s/console/api/v1/modules?agent=%s", c.serverURL, agentID)
+	url := fmt.Sprintf("%s/api/v1/modules?agent=%s", c.serverURL, agentID)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
@@ -148,7 +148,7 @@ type moduleEntryJSON struct {
 
 // Contract fetches the full OpenAPI YAML for the specified module revision.
 func (c *Consumer) Contract(ctx context.Context, ref ModuleRef) (*Contract, error) {
-	url := fmt.Sprintf("%s/console/api/v1/modules/openapi/%s/%s",
+	url := fmt.Sprintf("%s/api/v1/modules/openapi/%s/%s",
 		c.serverURL, ref.AgentID, ref.ModuleID)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -190,7 +190,7 @@ func (c *Consumer) Invoke(ctx context.Context, ref ModuleRef, req *http.Request)
 	if path == "" {
 		path = "/"
 	}
-	url := fmt.Sprintf("%s/console/api/v1/modules/invoke/%s/%s%s",
+	url := fmt.Sprintf("%s/api/v1/modules/invoke/%s/%s%s",
 		c.serverURL, ref.AgentID, ref.ModuleID, path)
 	if req.URL.RawQuery != "" {
 		url += "?" + req.URL.RawQuery

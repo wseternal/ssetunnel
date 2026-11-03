@@ -5,12 +5,11 @@ Combines the console API router with the React SPA static file server and cloud 
 ## Architecture
 
 Uses `gorilla/mux` to mount:
-- `/console/api/v1/shell/connect` (GET) → tunnel handler's `ShellConnectHandler` (cloud shell SSE)
-- `/console/api/v1/shell/connect-up` (POST) → tunnel handler's `ShellConnectUpHandler`
-- `/console/api/v1/shell/resize` (POST) → tunnel handler's `ShellConnectResizeHandler`
-- `/console/api/v1/*` (prefix) → `consoleapi.NewRouter` (JSON management API, stripped of `/console`)
-- `/console` → redirect to `/console/`
-- `/console/*` (catch-all GET) → `litespaserver.ServeRoot` (React SPA)
+- `/api/v1/shell/connect` (GET) → tunnel handler's `ShellConnectHandler` (cloud shell SSE)
+- `/api/v1/shell/connect-up` (POST) → tunnel handler's `ShellConnectUpHandler`
+- `/api/v1/shell/resize` (POST) → tunnel handler's `ShellConnectResizeHandler`
+- `/api/v1/*` (prefix) → `consoleapi.NewRouter` (JSON management API)
+- `/` (catch-all GET) → `litespaserver.ServeRoot` (React SPA)
 
 The SPA is served from `frontend.ConsoleWebRootFs` (embedded via `go:embed`).
 
@@ -24,7 +23,7 @@ func NewConsoleHandler(ctx context.Context, pool *pgxpool.Pool, store *auth.Stor
 
 ## Cloud Shell Proxy
 
-Shell endpoints are registered **before** the `/console/api/v1/` prefix catch-all (gorilla/mux matches the first route). They use `UserSessionMiddleware` for auth. The `ShellConnectHandler` forces `target=__shell__` and validates user-scoped agent access (non-admin users can only shell into their own agents).
+Shell endpoints are registered **before** the `/api/v1/` prefix catch-all (gorilla/mux matches the first route). They use `UserSessionMiddleware` for auth. The `ShellConnectHandler` forces `target=__shell__` and validates user-scoped agent access (non-admin users can only shell into their own agents).
 
 ## Rules
 * The console server runs on a separate port (`:8081` by default) from the tunnel HTTP server (`:8080`).

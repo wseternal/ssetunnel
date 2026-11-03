@@ -5,7 +5,7 @@
 SSH into machines behind corporate firewalls. Forward VNC, databases, any TCP port. No inbound rules, no VPN, no port forwarding. Just outbound HTTP.
 
 ```
-ssh -o ProxyCommand="ssetunnel connect --base /sse --server https://www.yourserver.com --agent mm --target 127.0.0.1:22 --local -" your_ssh_user@127.0.0.1
+ssh -o ProxyCommand="ssetunnel connect --server https://www.yourserver.com --agent mm --target 127.0.0.1:22 --local -" your_ssh_user@127.0.0.1
 ```
 
 That's it. One command. You're in.
@@ -95,15 +95,15 @@ Start as a managed OS service (systemd / launchd):
 
 ```bash
 # Server (public VPS)
-ssetunnel server start --base /sse --db-url "postgres:embedded:?datapath=$HOME/.ssetunnel/data"
+ssetunnel server start --db-url "postgres:embedded:?datapath=$HOME/.ssetunnel/data"
 
 # Agent (private machine) — login once, then start
 ssetunnel login --server https://tunnel.example.com
-ssetunnel agent start --id office --base /sse
+ssetunnel agent start --id office
 
 # Client (anywhere) — SSH in
 ssetunnel login --server https://tunnel.example.com
-ssh -o ProxyCommand="ssetunnel connect --base /sse --server https://tunnel.example.com --agent office --target 127.0.0.1:22 --local -" user@127.0.0.1
+ssh -o ProxyCommand="ssetunnel connect --server https://tunnel.example.com --agent office --target 127.0.0.1:22 --local -" user@127.0.0.1
 ```
 
 ---

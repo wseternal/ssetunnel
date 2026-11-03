@@ -7,23 +7,23 @@ Multi-command CLI binary. Dispatches to server, agent, connect, login, or probe 
 ### `server`
 ```bash
 ssetunnel server [--listen :8080] [--console-listen :8081] \
-  [--base /tunnel] [--heartbeat 15s] [--db-url URL] \
+  [--heartbeat 15s] [--db-url URL] \
   [--metrics-dir ~/.ssetunnel/metrics] [--metrics-retention 7d] [--metrics-flush 10s] [--tuner-interval 30s] \
   [--disable-auth]
 ```
-Runs the public tunnel server. Opens HTTP listener (agent tunnel + connect endpoints) and optional console HTTP listener. With `--disable-auth`, skips DB pool, auth store, and console server. Auto-seeds an admin user on first startup. `--base` prefixes all tunnel endpoints (e.g. `/tunnel/events`). `--metrics-dir` defaults to `~/.ssetunnel/metrics` (pass `--metrics-dir=""` to disable). `--totp-secret` is deprecated (per-user TOTP is now used).
+Runs the public tunnel server. Opens HTTP listener (agent tunnel + connect endpoints) and optional console HTTP listener. With `--disable-auth`, skips DB pool, auth store, and console server. Auto-seeds an admin user on first startup. All routes are root-relative; subpath prefixing is delegated to the reverse proxy. `--metrics-dir` defaults to `~/.ssetunnel/metrics` (pass `--metrics-dir=""` to disable). `--totp-secret` is deprecated (per-user TOTP is now used).
 
 ### `agent`
 ```bash
 ssetunnel agent [--target 127.0.0.1:22] [--server <URL>] \
-  [--base /tunnel] [--id mydevbox] [--batch-size 262144] [--concurrency 1] [--compress] \
+  [--id mydevbox] [--batch-size 262144] [--concurrency 1] [--compress] \
   [--no-auto-tune]
 ```
-Runs the restricted-network agent. `--target` is optional (empty = dynamic target mode). `--server` is optional (default: from saved session). `--id` identifies the agent for server-side routing. `--base` must match the server's `--base`. `--no-auto-tune` disables server-driven parameter tuning (keeps static CLI flags). Uses session from `~/.ssetunnel/session` if available.
+Runs the restricted-network agent. `--target` is optional (empty = dynamic target mode). `--server` is optional (default: from saved session). `--id` identifies the agent for server-side routing. `--no-auto-tune` disables server-driven parameter tuning (keeps static CLI flags). Uses session from `~/.ssetunnel/session` if available.
 
 ### `connect`
 ```bash
-ssetunnel connect --local 127.0.0.1:3306 [--server <URL>] [--base /tunnel] [--agent dev] [--target 127.0.0.1:22] [--batch-size 262144]
+ssetunnel connect --local 127.0.0.1:3306 [--server <URL>] [--agent dev] [--target 127.0.0.1:22] [--batch-size 262144]
 ssetunnel connect --local -  # Stdio mode for SSH ProxyCommand
 ```
 User-side connection wrapper. Uses HTTP transport (SSE-down + POST-up) to connect to the server. `--server` is optional (default: from saved session). `--local -` enables stdio mode (stdin/stdout pipes for SSH ProxyCommand). `--agent` routes to a specific agent. `--target` enables dynamic target mode. `--batch-size` sets the upstream batch ceiling (0 = 256 KiB default; clamped to 1024..1048576).
@@ -38,7 +38,7 @@ Interactive username/password login with per-user TOTP and recovery code support
 
 ### `probe`
 ```bash
-ssetunnel probe --server http://tunnel.example.com [--base /tunnel]
+ssetunnel probe --server http://tunnel.example.com
 ```
 Network diagnostics — outputs plain-text report with `--batch-size` / `--concurrency` recommendations.
 
@@ -86,7 +86,6 @@ Session tokens are proactively refreshed when the remaining TTL falls below 7 da
 * Agent flags are clamped: batch-size 1024..1048576, concurrency 1..4.
 * Connect batch-size is clamped the same way; 0 means 256 KiB default.
 * Git short SHA is embedded in the binary via ldflags and printed by `version` command.
-* `--base` must start with `/` (validated by `validateBasePath`).
 * Embedded postgres cannot run as root (initdb restriction).
 * SIGHUP handler is installed for server and agent (placeholder for config reload). Connect services do not support reload.
 * Connect service commands require `--name` to uniquely identify each daemon instance (service name: `ssetunnel-connect-<name>`).

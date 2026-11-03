@@ -27,7 +27,7 @@ func newModuleRoutes(srv *server.Server) *moduleRoutes {
 }
 
 // handleListModules returns all modules for agents accessible to the current user.
-// GET /console/api/v1/modules?agent=<agent-id>
+// GET /api/v1/modules?agent=<agent-id>
 func (m *moduleRoutes) handleListModules(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -81,7 +81,7 @@ func (m *moduleRoutes) handleListModules(w http.ResponseWriter, r *http.Request)
 }
 
 // handleGetModule returns details for a specific module.
-// GET /console/api/v1/modules/<agent-id>/<module-id>
+// GET /api/v1/modules/<agent-id>/<module-id>
 func (m *moduleRoutes) handleGetModule(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -132,7 +132,7 @@ func (m *moduleRoutes) handleGetModule(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleGetOpenAPI returns the OpenAPI YAML for a module.
-// GET /console/api/v1/modules/openapi/<agent-id>/<module-id>
+// GET /api/v1/modules/openapi/<agent-id>/<module-id>
 func (m *moduleRoutes) handleGetOpenAPI(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -173,7 +173,7 @@ func (m *moduleRoutes) handleGetOpenAPI(w http.ResponseWriter, r *http.Request) 
 }
 
 // handleInvoke invokes a module operation.
-// POST /console/api/v1/modules/invoke/<agent-id>/<module-id>/<operation-path...>
+// POST /api/v1/modules/invoke/<agent-id>/<module-id>/<operation-path...>
 func (m *moduleRoutes) handleInvoke(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodOptions {
 		// W4 fix: Do not reflect arbitrary Origin as Access-Control-Allow-Origin.

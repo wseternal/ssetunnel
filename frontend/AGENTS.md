@@ -103,7 +103,7 @@ Uses `AdminTable` for data tables, `StatusPill` for status badges, `PageHeader` 
 
 ## Session Persistence
 
-Login state is persisted to `localStorage` (sessionToken + userRole) and validated via `/console/api/v1/me` on page refresh. 401 responses trigger automatic logout.
+Login state is persisted to `localStorage` (sessionToken + userRole) and validated via `/api/v1/me` on page refresh. 401 responses trigger automatic logout.
 
 ## Integration
 
