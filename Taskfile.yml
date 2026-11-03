@@ -192,9 +192,9 @@ tasks:
       # bundle that throws at runtime — it wedged xterm's write loop and froze
       # the cloud shell (see docs/rca/001). Keep build.target at es2022+.
       - |
-        if grep -Eq 'void 0\|\|\([A-Za-z_$][A-Za-z0-9_$]*=\{\}\)' dist/index.html; then
+        if grep -rEq 'void 0\|\|([A-Za-z_$][A-Za-z0-9_$]*=\{\})' dist/assets/*.js; then
           echo "ERROR: built bundle has a miscompiled TS enum (dropped variable). Keep build.target >= es2022 in vite.config.ts." >&2
-          grep -Eon 'void 0\|\|\([A-Za-z_$][A-Za-z0-9_$]*=\{\}\)' dist/index.html | head -5 >&2
+          grep -rEon 'void 0\|\|([A-Za-z_$][A-Za-z0-9_$]*=\{\})' dist/assets/*.js | head -5 >&2
           exit 1
         fi
         echo "enum-miscompile guard: OK (0 sites)"

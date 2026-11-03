@@ -68,15 +68,18 @@ func NewConsoleHandler(ctx context.Context, pool *pgxpool.Pool, store *auth.Stor
 	apiRouter.SetMetrics(mc)
 	r.PathPrefix("/console/api/v1/").Handler(http.StripPrefix("/console", apiRouter))
 
-	// SPA catch-all
+	// SPA catch-all — strip /console so litespaserver sees paths relative
+	// to the SPA root (e.g. /console/assets/x.js → /assets/x.js), matching
+	// the Vite build output where base defaults to "/".
 	spaCfg := litespaserver.Config{
 		EmbeddedContent: frontend.ConsoleWebRootFs,
+		StaticPaths:     []string{"/assets/**"},
 		CSP: litespaserver.CSPConfig{
 			Disable: true,
 		},
 	}
 	spaServer := litespaserver.NewServer(ctx, pool, spaCfg)
-	r.PathPrefix("/console/").HandlerFunc(spaServer.ServeRoot).Methods("GET")
+	r.PathPrefix("/console/").Handler(http.StripPrefix("/console", http.HandlerFunc(spaServer.ServeRoot))).Methods("GET")
 
 	return r
 }

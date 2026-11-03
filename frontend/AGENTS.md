@@ -8,6 +8,8 @@ React admin console SPA built with Vite + TypeScript + MUI v9 + orca-ui. Mercury
 frontend/
 ├── console/
 │   ├── dist/           # Built assets (committed for go:embed)
+│   │   ├── index.html
+│   │   └── assets/     # JS/CSS bundles (standard Vite output)
 │   ├── src/
 │   │   ├── App.tsx          # Main application component
 │   │   ├── main.tsx         # Entry point
@@ -105,7 +107,7 @@ Login state is persisted to `localStorage` (sessionToken + userRole) and validat
 
 ## Integration
 
-The SPA is served by `consoleserver.NewConsoleHandler` via `litespaserver.ServeRoot` at `/console/` on the console listen address (`:8081`). API routes under `/console/api/v1/` are handled by `consoleapi`. Shell routes under `/console/api/v1/shell/` are registered by `consoleserver` and proxy to the server's cloud shell handlers.
+The SPA is served by `consoleserver.NewConsoleHandler` via `litespaserver.ServeRoot` at `/console/` on the console listen address (`:8081`). The SPA handler is wrapped with `http.StripPrefix("/console", ...)` so litespaserver sees paths relative to the SPA root. Static asset paths (`/assets/**`) are allow-listed via `litespaserver.Config.StaticPaths`. API routes under `/console/api/v1/` are handled by `consoleapi`. Shell routes under `/console/api/v1/shell/` are registered by `consoleserver` and proxy to the server's cloud shell handlers.
 
 ## Rules
 * Always rebuild `dist/` before committing Go changes that touch the frontend.
