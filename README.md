@@ -85,9 +85,8 @@ Deploy the server on a public VPS behind Caddy:
 
 ```caddyfile
 https://tunnel.example.com {
-    reverse_proxy /sse*     http://127.0.0.1:8080
-    reverse_proxy /console* http://127.0.0.1:8081
-    file_server
+    handle_path /sse*     { reverse_proxy http://127.0.0.1:8080 }
+    handle_path /console* { reverse_proxy http://127.0.0.1:8081 }
 }
 ```
 

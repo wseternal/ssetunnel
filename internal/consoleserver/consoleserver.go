@@ -66,7 +66,10 @@ func NewConsoleHandler(ctx context.Context, pool *pgxpool.Pool, store *auth.Stor
 	// SPA catch-all
 	spaCfg := litespaserver.Config{
 		EmbeddedContent: frontend.ConsoleWebRootFs,
-		StaticPaths:     []string{"/assets/**"},
+		// IMPORTANT: StaticPaths assumes the reverse proxy strips the base prefix
+		// (e.g. /console) from ALL requests, not just /api. When VITE_BASE=/console/,
+		// the browser requests /console/assets/... which must arrive here as /assets/...
+		StaticPaths: []string{"/assets/**"},
 		CSP: litespaserver.CSPConfig{
 			Disable: true,
 		},

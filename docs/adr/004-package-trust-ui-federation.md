@@ -13,7 +13,9 @@ Modules (ADR-002) ship as packages containing an executable, an OpenAPI spec, an
 1. **Package integrity**: how does the server verify that a module's executable and assets haven't been tampered with?
 2. **UI trust**: the console SPA loads and executes JavaScript from modules. A malicious or compromised module UI could steal admin credentials or corrupt tunnel state.
 
-The tunnel already serves a single-file React SPA (via `vite-plugin-singlefile` + `go:embed`). Module UIs must integrate without breaking this deployment model.
+The tunnel already serves a React SPA (via standard Vite build + `go:embed`). Module UIs must integrate without breaking this deployment model.
+
+> **Amendment (2026-11):** `vite-plugin-singlefile` was removed in PR #90. The SPA now produces standard multi-file output (index.html + assets/) served by litespaserver with `StaticPaths`.
 
 ## Decision
 

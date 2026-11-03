@@ -26,6 +26,8 @@ export default defineConfig({
     port: 3000,
     https,
     proxy: {
+      // Dev-only: matches when base='/' (VITE_BASE unset).
+      // Production deployments use a reverse proxy for path stripping.
       '/api': 'http://localhost:8081',
     },
   },

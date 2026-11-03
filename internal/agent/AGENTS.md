@@ -27,7 +27,6 @@ runOnce(ctx)
 ```go
 type Agent struct {
     ServerURL       string        // tunnel server base URL
-    BasePath        string        // HTTP path prefix (e.g. "/tunnel")
     Target          string        // TCP address to forward streams to (empty = dynamic target mode)
     AgentID         string        // agent identifier for routing
     Token           string        // Bearer token or single-use PIN
