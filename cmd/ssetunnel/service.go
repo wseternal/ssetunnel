@@ -165,7 +165,7 @@ func dispatchServiceAction(subcommand string, args []string) (handled bool, err 
 
 	// When "start" is invoked without runtime flags, load persisted
 	// flags from the previous "start" (if any) so the user doesn't
-	// have to re-specify --base, --db-url, etc. every time.
+	// have to re-specify --db-url, etc. every time.
 	svcName := "ssetunnel-" + subcommand
 	if connectName != "" {
 		svcName = "ssetunnel-connect-" + connectName

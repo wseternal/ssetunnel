@@ -13,7 +13,6 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -39,7 +38,6 @@ var ErrUnauthorized = errors.New("unauthorized: server rejected token with 401")
 // Config configures DialAgent.
 type Config struct {
 	URL            string        // tunnel server base URL, e.g. http://host:port
-	BasePath       string        // HTTP path prefix prepended to all endpoints (e.g. "/tunnel"); empty means no prefix
 	SessionID      string        // 128-bit random hex; generated when empty
 	Client         *http.Client  // nil → default tunnel client
 	MaxBatchSize   int           // 0 → DefaultMaxBatchSize
@@ -190,10 +188,6 @@ func DialAgent(ctx context.Context, cfg Config) (*Conn, error) {
 	if upPath == "" {
 		upPath = "/up"
 	}
-	// Prepend base path to all endpoints.
-	basePath := strings.TrimRight(cfg.BasePath, "/")
-	eventsPath = basePath + eventsPath
-	upPath = basePath + upPath
 
 	c := &Conn{
 		client:   client,

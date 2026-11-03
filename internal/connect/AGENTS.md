@@ -17,7 +17,7 @@ SSH ProxyCommand (--local -)          Local Port Mode (--local 127.0.0.1:3306)
 ## Core Types
 
 ### `Client`
-Holds `serverURL`, `token`, `agentID` (for routing), `target` (for dynamic target mode), and `basePath` (HTTP path prefix). Created via `NewClient(url, token, agentID, target, basePath)`.
+Holds `serverURL`, `token`, `agentID` (for routing), and `target` (for dynamic target mode). Created via `NewClient(url, token, agentID, target)`.
 
 - **`BatchSize`**: Upstream batch ceiling; 0 → 256 KiB default.
 - **`MaxWait`**: Batcher flush ceiling; 0 → 25 ms.

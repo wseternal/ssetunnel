@@ -53,7 +53,6 @@ type Handler struct {
 	heartbeat time.Duration
 	store     *auth.Store
 	metrics   *metrics.MetricsCollector // nil when metrics are disabled
-	basePath  string                    // HTTP path prefix for all endpoints (empty = no prefix)
 	mux       *http.ServeMux
 
 	// connectSessions maps connect session IDs to connectSession structs,
@@ -78,26 +77,24 @@ type Handler struct {
 
 // NewHandler builds the tunnel handler without auth.
 func NewHandler(reg *Registry, heartbeat time.Duration) *Handler {
-	return NewHandlerWithAuth(reg, heartbeat, nil, "")
+	return NewHandlerWithAuth(reg, heartbeat, nil)
 }
 
-// NewHandlerWithAuth builds the tunnel handler with an optional auth store
-// and an HTTP path prefix for all endpoints (empty = no prefix).
-func NewHandlerWithAuth(reg *Registry, heartbeat time.Duration, store *auth.Store, basePath string) *Handler {
-	return NewHandlerWithMetrics(reg, heartbeat, store, nil, basePath)
+// NewHandlerWithAuth builds the tunnel handler with an optional auth store.
+func NewHandlerWithAuth(reg *Registry, heartbeat time.Duration, store *auth.Store) *Handler {
+	return NewHandlerWithMetrics(reg, heartbeat, store, nil)
 }
 
 // NewHandlerWithMetrics builds the tunnel handler with optional auth and metrics.
-func NewHandlerWithMetrics(reg *Registry, heartbeat time.Duration, store *auth.Store, mc *metrics.MetricsCollector, basePath string) *Handler {
-	basePath = strings.TrimRight(basePath, "/")
-	h := &Handler{reg: reg, heartbeat: heartbeat, store: store, metrics: mc, basePath: basePath, mux: http.NewServeMux(), shellSessions: NewShellSessionRegistry()}
+func NewHandlerWithMetrics(reg *Registry, heartbeat time.Duration, store *auth.Store, mc *metrics.MetricsCollector) *Handler {
+	h := &Handler{reg: reg, heartbeat: heartbeat, store: store, metrics: mc, mux: http.NewServeMux(), shellSessions: NewShellSessionRegistry()}
 	agentAuth := AgentAuthMiddleware(store)
 	connectAuth := ConnectAuthMiddleware(store)
-	h.mux.Handle(basePath+"/events", agentAuth(http.HandlerFunc(h.handleEvents)))
-	h.mux.Handle(basePath+"/up", agentAuth(http.HandlerFunc(h.handleUp)))
-	h.mux.Handle(basePath+"/connect", connectAuth(http.HandlerFunc(h.handleConnect)))
-	h.mux.Handle(basePath+"/connect-up", connectAuth(http.HandlerFunc(h.handleConnectUp)))
-	h.mux.HandleFunc(basePath+"/probe", h.handleProbe)
+	h.mux.Handle("/events", agentAuth(http.HandlerFunc(h.handleEvents)))
+	h.mux.Handle("/up", agentAuth(http.HandlerFunc(h.handleUp)))
+	h.mux.Handle("/connect", connectAuth(http.HandlerFunc(h.handleConnect)))
+	h.mux.Handle("/connect-up", connectAuth(http.HandlerFunc(h.handleConnectUp)))
+	h.mux.HandleFunc("/probe", h.handleProbe)
 	return h
 }
 

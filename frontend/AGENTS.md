@@ -107,7 +107,7 @@ Login state is persisted to `localStorage` (sessionToken + userRole) and validat
 
 ## Integration
 
-The SPA is served by `consoleserver.NewConsoleHandler` via `litespaserver.ServeRoot` at `/console/` on the console listen address (`:8081`). The SPA handler is wrapped with `http.StripPrefix("/console", ...)` so litespaserver sees paths relative to the SPA root. Static asset paths (`/assets/**`) are allow-listed via `litespaserver.Config.StaticPaths`. API routes under `/console/api/v1/` are handled by `consoleapi`. Shell routes under `/console/api/v1/shell/` are registered by `consoleserver` and proxy to the server's cloud shell handlers.
+The SPA is served by `consoleserver.NewConsoleHandler` via `litespaserver.ServeRoot` at `/` on the console listen address (`:8081`). Static asset paths (`/assets/**`) are allow-listed via `litespaserver.Config.StaticPaths`. API routes under `/api/v1/` are handled by `consoleapi`. Shell routes under `/api/v1/shell/` are registered by `consoleserver` and proxy to the server's cloud shell handlers. Path prefixing for reverse-proxy deployments (e.g. `/console`) is handled at the proxy level via `handle_path` with `uri strip_prefix`.
 
 ## Rules
 * Always rebuild `dist/` before committing Go changes that touch the frontend.

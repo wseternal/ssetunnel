@@ -100,8 +100,8 @@ func TestBuildServiceArgs(t *testing.T) {
 		},
 		{
 			"strips --service-user equals form",
-			"server", []string{"start", "--service-user=bob", "--base", "/foo"},
-			[]string{"server", "run", "--base", "/foo"},
+			"server", []string{"start", "--service-user=bob", "--heartbeat", "20s"},
+			[]string{"server", "run", "--heartbeat", "20s"},
 		},
 	}
 	for _, tt := range tests {
@@ -201,7 +201,7 @@ func TestSaveLoadServiceArgs(t *testing.T) {
 	}
 
 	// Save and load roundtrip.
-	want := []string{"--base", "/sse", "--db-url", "postgres:embedded:?datapath=/tmp/data"}
+	want := []string{"--heartbeat", "20s", "--db-url", "postgres:embedded:?datapath=/tmp/data"}
 	if err := saveServiceArgsToDir(tmpDir, name, want); err != nil {
 		t.Fatalf("saveServiceArgs: %v", err)
 	}
@@ -226,7 +226,7 @@ func TestServiceUserPersistedInSavedArgs(t *testing.T) {
 	tmpDir := t.TempDir()
 	name := "test-svc-user"
 
-	saved := []string{"--service-user", "svcuser", "--base", "/foo"}
+	saved := []string{"--service-user", "svcuser", "--heartbeat", "20s"}
 	if err := saveServiceArgsToDir(tmpDir, name, saved); err != nil {
 		t.Fatalf("saveServiceArgs: %v", err)
 	}
@@ -240,9 +240,9 @@ func TestServiceUserPersistedInSavedArgs(t *testing.T) {
 	if svcUser != "svcuser" {
 		t.Errorf("extracted --service-user = %q, want %q", svcUser, "svcuser")
 	}
-	// Remaining should be just --base /foo.
-	if len(remaining) != 2 || remaining[0] != "--base" || remaining[1] != "/foo" {
-		t.Errorf("remaining after extract = %v, want [--base /foo]", remaining)
+	// Remaining should be just --heartbeat 20s.
+	if len(remaining) != 2 || remaining[0] != "--heartbeat" || remaining[1] != "20s" {
+		t.Errorf("remaining after extract = %v, want [--heartbeat 20s]", remaining)
 	}
 }
 
@@ -256,7 +256,7 @@ func TestBareStartLoadsSavedArgs(t *testing.T) {
 
 	// Pre-save args for "ssetunnel-server" (the name dispatchServiceAction
 	// builds for subcommand="server").
-	want := []string{"--base", "/sse", "--listen", ":9090"}
+	want := []string{"--heartbeat", "20s", "--listen", ":9090"}
 	if err := saveServiceArgsToDir(tmpDir, "ssetunnel-server", want); err != nil {
 		t.Fatalf("saveServiceArgs: %v", err)
 	}
@@ -279,7 +279,7 @@ func TestBareStartLoadsSavedArgs(t *testing.T) {
 	// Verify that the loaded flags produce the correct buildServiceArgs
 	// output when used as runtimeFlags in a bare start.
 	svcArgs := buildServiceArgs("server", append([]string{"start"}, got...))
-	wantSvc := []string{"server", "run", "--base", "/sse", "--listen", ":9090"}
+	wantSvc := []string{"server", "run", "--heartbeat", "20s", "--listen", ":9090"}
 	if len(svcArgs) != len(wantSvc) {
 		t.Fatalf("buildServiceArgs = %v, want %v", svcArgs, wantSvc)
 	}
@@ -327,7 +327,7 @@ func TestUninstallCleansSavedArgs(t *testing.T) {
 	t.Cleanup(func() { pidDir = origPidDir })
 
 	// Pre-save args for "ssetunnel-server".
-	if err := saveServiceArgsToDir(tmpDir, "ssetunnel-server", []string{"--base", "/foo"}); err != nil {
+	if err := saveServiceArgsToDir(tmpDir, "ssetunnel-server", []string{"--heartbeat", "20s"}); err != nil {
 		t.Fatalf("saveServiceArgs: %v", err)
 	}
 	// Write a fake PID file.
@@ -368,7 +368,7 @@ func TestStripFlag(t *testing.T) {
 	}{
 		{"not present", []string{"--listen", ":8080"}, "--service-user", []string{"--listen", ":8080"}},
 		{"space form", []string{"--service-user", "alice", "--listen", ":8080"}, "--service-user", []string{"--listen", ":8080"}},
-		{"equals form", []string{"--service-user=bob", "--base", "/foo"}, "--service-user", []string{"--base", "/foo"}},
+		{"equals form", []string{"--service-user=bob", "--heartbeat", "20s"}, "--service-user", []string{"--heartbeat", "20s"}},
 		{"only flag", []string{"--service-user", "carol"}, "--service-user", nil},
 	}
 	for _, tt := range tests {

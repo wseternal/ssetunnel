@@ -10,7 +10,6 @@ const https = process.env.CI === "true" || process.argv.includes("build") ?
     : undefined;
 
 export default defineConfig({
-  base: '/console/',
   plugins: [react()],
   build: {
     // esbuild's default build target lowers TypeScript enums inside methods
@@ -26,7 +25,7 @@ export default defineConfig({
     port: 3000,
     https,
     proxy: {
-      '/console/api': 'http://localhost:8081',
+      '/api': 'http://localhost:8081',
     },
   },
 });

@@ -192,7 +192,7 @@ func TestResolveServerURL_RefreshSuccess(t *testing.T) {
 
 	// Mock refresh server.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/console/api/v1/refresh-session" {
+		if r.URL.Path != "/api/v1/refresh-session" {
 			t.Errorf("unexpected path: %s", r.URL.Path)
 		}
 		authHeader := r.Header.Get("Authorization")
