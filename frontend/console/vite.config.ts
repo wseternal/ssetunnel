@@ -10,6 +10,7 @@ const https = process.env.CI === "true" || process.argv.includes("build") ?
     : undefined;
 
 export default defineConfig({
+  base: '/console/',
   plugins: [react()],
   build: {
     // esbuild's default build target lowers TypeScript enums inside methods
