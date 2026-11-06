@@ -58,7 +58,7 @@ func RefreshSession(consoleURL, currentToken string) (newToken string, newExpire
 		return "", time.Time{}, err
 	}
 
-	url := strings.TrimRight(consoleURL, "/") + "/console/api/v1/refresh-session"
+	url := strings.TrimRight(consoleURL, "/") + "/api/v1/refresh-session"
 
 	req, err := http.NewRequest(http.MethodPost, url, nil)
 	if err != nil {

@@ -40,7 +40,7 @@ func TestRefreshSession_Success(t *testing.T) {
 		if r.Method != http.MethodPost {
 			t.Errorf("method = %s, want POST", r.Method)
 		}
-		if r.URL.Path != "/console/api/v1/refresh-session" {
+		if r.URL.Path != "/api/v1/refresh-session" {
 			t.Errorf("path = %s", r.URL.Path)
 		}
 		authHeader := r.Header.Get("Authorization")

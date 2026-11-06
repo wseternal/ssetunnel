@@ -14,6 +14,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -106,11 +107,27 @@ func main() {
 	}
 }
 
+// acceptDeprecatedBaseFlag keeps --base parseable after route prefixing moved
+// to the reverse proxy. A package upgrade does not rewrite an installed unit
+// file, so a service started with --base keeps passing it on every restart;
+// rejecting the flag would abort the daemon into a restart loop that a bare
+// `start` then re-poisons from the saved args file. The value is read back only
+// so the caller can say it no longer does anything.
+func acceptDeprecatedBaseFlag(fs *flag.FlagSet) *string {
+	return fs.String("base", "", "DEPRECATED: ignored — path prefixing is delegated to the reverse proxy")
+}
+
+func warnDeprecatedBase(prefix, base string) {
+	if base == "" {
+		return
+	}
+	log.Printf("%s: WARNING: --base %q is ignored. Strip the prefix at the reverse proxy (Caddy `handle_path`) and drop --base from this service's arguments.", prefix, base)
+}
+
 func runServer(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("server", flag.ContinueOnError)
 	listen := fs.String("listen", ":8080", "HTTP listen address for tunnel endpoints")
 	consoleListen := fs.String("console-listen", ":8081", "HTTP listen address for admin console SPA")
-	basePath := fs.String("base", "", "HTTP path prefix for all tunnel endpoints (e.g. /tunnel)")
 	heartbeat := fs.Duration("heartbeat", 15*time.Second, "SSE heartbeat interval")
 	dbURL := fs.String("db-url", os.Getenv("DATABASE_URL"), "PostgreSQL DB connection URL (default uses testcontainer if empty)")
 	// Default metrics directory: ~/.ssetunnel/metrics (empty = metrics disabled).
@@ -126,13 +143,12 @@ func runServer(ctx context.Context, args []string) error {
 	tunerInterval := fs.Duration("tuner-interval", 30*time.Second, "Interval for auto-tuner evaluation (default: 30s)")
 	// Accept --totp-secret for backward compatibility (silently ignored).
 	_ = fs.String("totp-secret", "", "DEPRECATED: per-user TOTP is now used; this flag is ignored")
+	base := acceptDeprecatedBaseFlag(fs)
 
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if err := validateBasePath(*basePath); err != nil {
-		return err
-	}
+	warnDeprecatedBase("server", *base)
 
 	// Deprecation warning for removed global TOTP secret.
 	if os.Getenv("SSETUNNEL_TOTP_SECRET") != "" {
@@ -143,7 +159,7 @@ func runServer(ctx context.Context, args []string) error {
 	installSIGHUPHandler("server", "SIGHUP received, reloading configuration...")
 	// TODO: re-read config files, refresh auth pepper, etc.
 
-	srv := server.NewServerWithBase(*heartbeat, *basePath)
+	srv := server.NewServer(*heartbeat)
 
 	// Metrics and auto-tuner setup (optional, enabled by --metrics-dir).
 	if *metricsDir != "" {
@@ -247,18 +263,21 @@ func runServer(ctx context.Context, args []string) error {
 	}
 
 	if consoleLn != nil {
-		consoleHandler := consoleserver.NewConsoleHandler(ctx, pool, store, srv.Reg, srv.MetricsCollector(), srv)
+		consoleHandler := consoleserver.NewConsoleHandler(ctx, store, srv.Reg, srv.MetricsCollector(), srv)
 		consoleSrv := &http.Server{
 			Handler:      consoleHandler,
 			ReadTimeout:  15 * time.Second,
 			WriteTimeout: 0, // must not kill SSE (cloud shell streams indefinitely)
 		}
+		// net/http answers OPTIONS * itself, before the console handler, so that
+		// response would bypass the security headers the router declares.
+		consoleserver.ApplyServerDefaults(consoleSrv)
 		go func() {
 			<-ctx.Done()
 			consoleSrv.Shutdown(context.Background())
 		}()
 		go func() {
-			log.Printf("server: admin console http://localhost%s/console/", *consoleListen)
+			log.Printf("server: admin console http://localhost%s/", *consoleListen)
 			if err := consoleSrv.Serve(consoleLn); !errors.Is(err, http.ErrServerClosed) {
 				log.Printf("server: console error: %v", err)
 			}
@@ -291,7 +310,6 @@ func runServer(ctx context.Context, args []string) error {
 func runAgent(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("agent", flag.ContinueOnError)
 	serverURL := fs.String("server", "", "tunnel server URL (default: from saved session)")
-	basePath := fs.String("base", "", "HTTP path prefix for tunnel endpoints (must match server --base)")
 	target := fs.String("target", "", "TCP address to forward streams to (empty = dynamic target mode)")
 	agentID := fs.String("id", "", "agent identifier for routing (e.g. mydevbox)")
 	batchSize := fs.Int("batch-size", 262144, "upstream batch ceiling in bytes (1024..1048576)")
@@ -299,13 +317,12 @@ func runAgent(ctx context.Context, args []string) error {
 	compress := fs.Bool("compress", false, "negotiate gzip-per-batch upstream encoding")
 	noAutoTune := fs.Bool("no-auto-tune", false, "disable server auto-tuning (keep static CLI flags)")
 	verbose := fs.Bool("verbose", false, "enable detailed shell/control tracing logs")
+	base := acceptDeprecatedBaseFlag(fs)
 
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if err := validateBasePath(*basePath); err != nil {
-		return err
-	}
+	warnDeprecatedBase("agent", *base)
 	batch, conc := clampAgentFlags(*batchSize, *concurrency)
 
 	// Resolve server URL and session token.
@@ -369,18 +386,17 @@ func runAgent(ctx context.Context, args []string) error {
 	}
 
 	ag := &agent.Agent{
-		ServerURL:        url,
-		BasePath:         *basePath,
-		Target:           *target,
-		AgentID:          *agentID,
-		Token:            sessToken,
-		RequestModifier:  reqMod,
-		BatchSize:        batch,
-		Concurrency:      conc,
-		Compress:         *compress,
-		NoAutoTune:       *noAutoTune,
-		Verbose:          *verbose,
-		OnTokenRefresh:   refreshFn,
+		ServerURL:       url,
+		Target:          *target,
+		AgentID:         *agentID,
+		Token:           sessToken,
+		RequestModifier: reqMod,
+		BatchSize:       batch,
+		Concurrency:     conc,
+		Compress:        *compress,
+		NoAutoTune:      *noAutoTune,
+		Verbose:         *verbose,
+		OnTokenRefresh:  refreshFn,
 	}
 
 	// Initialize the module subsystem (registry, IPC, supervisor).
@@ -398,18 +414,16 @@ func runAgent(ctx context.Context, args []string) error {
 func runConnect(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("connect", flag.ContinueOnError)
 	server := fs.String("server", "", "tunnel server URL (default: from saved session)")
-	basePath := fs.String("base", "", "HTTP path prefix for tunnel endpoints (must match server --base)")
 	agentID := fs.String("agent", "", "agent identifier to connect to (e.g. mydevbox)")
 	target := fs.String("target", "", "target address on the agent machine (e.g. 127.0.0.1:22)")
 	local := fs.String("local", "", "local listen TCP address (e.g. 127.0.0.1:3306) or '-' for Stdio mode")
 	batchSize := fs.Int("batch-size", 0, "upstream batch ceiling in bytes (0 = 256 KiB default; 1024..1048576)")
+	base := acceptDeprecatedBaseFlag(fs)
 
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if err := validateBasePath(*basePath); err != nil {
-		return err
-	}
+	warnDeprecatedBase("connect", *base)
 	if *local == "" {
 		return errors.New("--local is required (e.g. --local 127.0.0.1:3306 or --local -)")
 	}
@@ -420,7 +434,7 @@ func runConnect(ctx context.Context, args []string) error {
 		return err
 	}
 
-	client := connect.NewClient(url, sessToken, *agentID, *target, *basePath)
+	client := connect.NewClient(url, sessToken, *agentID, *target)
 	// Clamp --batch-size the same way the agent path does: 0 means "use
 	// default" (no clamp), anything else is bounded to 1 KiB..1 MiB so a
 	// typo can't trigger a 413 on the server.
@@ -522,10 +536,44 @@ func resolveServerURL(serverFlag, prefix string) (url, token, consoleURL string,
 	return url, token, consoleURL, nil
 }
 
-// deriveTunnelURL maps a console URL (default port 8081) to the tunnel
-// URL (default port 8080) by replacing the trailing port.
-func deriveTunnelURL(consoleURL string) string {
-	return strings.Replace(consoleURL, ":8081", ":8080", 1)
+// deriveTunnelURL maps a console URL on the default port 8081 to the tunnel URL
+// on 8080. derived is false whenever a port swap is not the whole mapping, which
+// is the case the documented proxy layout produces: console at the root and the
+// tunnel under a prefix that cannot be recovered from the console URL.
+//
+// It parses rather than scanning for ":8081" because a substring match rewrites
+// things it must not touch — http://host:80810 became http://host:80800, a
+// query string or userinfo containing :8081 got rewritten, and an IPv6 address
+// holding 8081 in a segment had its host mangled, all while reporting success.
+func deriveTunnelURL(consoleURL string) (string, bool) {
+	u, err := url.Parse(consoleURL)
+	if err != nil {
+		return consoleURL, false
+	}
+	// net/url accepts a lot that cannot be dialled: "//host:8081" parses with no
+	// scheme, and "http://:8081" parses with no host. Both would come back as a
+	// "successful" derivation that the agent then fails to reach.
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return consoleURL, false
+	}
+	if u.Hostname() == "" || u.Port() != "8081" {
+		return consoleURL, false
+	}
+	if strings.TrimRight(u.Path, "/") != "" {
+		// The console itself sits behind a path prefix, so the tunnel is not
+		// reachable by changing the port alone.
+		return consoleURL, false
+	}
+	// Rebuild host:port from the parsed pieces. Rewriting u.Host as a string
+	// would replace the first ":8081" it finds, and for an IPv6 literal that one
+	// is inside the address: http://[2001:db8:8081::1]:8081 came back as
+	// http://[2001:db8:8080::1]:8081 — host mangled, port untouched, no warning.
+	host := u.Hostname()
+	if strings.Contains(host, ":") {
+		host = "[" + host + "]"
+	}
+	u.Host = host + ":8080"
+	return u.String(), true
 }
 
 func clampAgentFlags(batchSize, concurrency int) (int, int) {
@@ -548,17 +596,6 @@ func clampAgentFlags(batchSize, concurrency int) (int, int) {
 	return batchSize, concurrency
 }
 
-// validateBasePath rejects --base values that are non-empty but lack a
-// leading "/".  Without the slash the server registers host-specific
-// ServeMux patterns that never match, and client URLs lose the path
-// separator (e.g. http://host:porttunnel/events).
-func validateBasePath(basePath string) error {
-	if basePath != "" && !strings.HasPrefix(basePath, "/") {
-		return fmt.Errorf("--base must start with / (got %q)", basePath)
-	}
-	return nil
-}
-
 // isEmbeddedPostgres reports whether dbURL refers to an embedded or
 // testcontainer-managed PostgreSQL instance (as opposed to an external
 // connection string like postgres://...).
@@ -570,17 +607,15 @@ func isEmbeddedPostgres(dbURL string) bool {
 func runProbe(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("probe", flag.ContinueOnError)
 	serverURL := fs.String("server", "", "tunnel server URL, e.g. http://tunnel.example.com")
-	basePath := fs.String("base", "", "HTTP path prefix for tunnel endpoints (must match server --base)")
+	base := acceptDeprecatedBaseFlag(fs)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if err := validateBasePath(*basePath); err != nil {
-		return err
-	}
+	warnDeprecatedBase("probe", *base)
 	if *serverURL == "" {
 		return errors.New("--server is required")
 	}
-	rep, err := probe.Run(ctx, probe.Config{URL: *serverURL, BasePath: *basePath})
+	rep, err := probe.Run(ctx, probe.Config{URL: *serverURL})
 	if err != nil {
 		return err
 	}
@@ -599,8 +634,8 @@ func runLogin(_ context.Context, args []string) error {
 	// Trim trailing slash to avoid double-slash in API paths.
 	*serverURL = strings.TrimRight(*serverURL, "/")
 
-	// Console API is at <server>/console/api/v1/...
-	consoleBase := *serverURL + "/console/api/v1"
+	// Console API is at <server>/api/v1/...
+	consoleBase := *serverURL + "/api/v1"
 
 	reader := bufio.NewReader(os.Stdin)
 
@@ -683,7 +718,21 @@ func runLogin(_ context.Context, args []string) error {
 	// Determine tunnel URL for session storage.
 	tunnelURL := *tunnelServer
 	if tunnelURL == "" {
-		tunnelURL = deriveTunnelURL(*serverURL)
+		var derived bool
+		if tunnelURL, derived = deriveTunnelURL(*serverURL); !derived {
+			// Nothing was derived — the saved tunnel URL equals the console URL.
+			// Agents will then dial the console and the SPA answers them 200
+			// index.html, which the transport now reports instead of retrying
+			// silently. Say it at the moment the value is chosen, not only in
+			// the reconnect loop an hour later, but never refuse to save: a
+			// console and tunnel that really do share a URL is a valid layout.
+			// No reason is printed: "not derivable" covers several distinct
+			// causes (no :8081 port, a path prefix on the console itself, an
+			// unparseable URL), and claiming the wrong one previously sent
+			// operators chasing a port that was there all along.
+			fmt.Printf("Warning: the tunnel URL could not be derived from %s, so the session stores it as %s.\n", *serverURL, tunnelURL)
+			fmt.Printf("If the tunnel sits behind a prefix or a different port, re-run with --tunnel-server (agents will otherwise dial %s/events).\n", tunnelURL)
+		}
 	}
 	tunnelURL = strings.TrimRight(tunnelURL, "/")
 

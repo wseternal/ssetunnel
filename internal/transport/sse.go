@@ -25,10 +25,15 @@ const maxSSELineSize = 1 << 20 // 1 MiB
 // stops nginx-style proxies from buffering the stream. Cache-Control
 // forbids storage (not just revalidation) because shell output often
 // contains secrets (pasted credentials, env vars, file contents).
+// no-transform is load-bearing, not just hygiene: the cloud shell streams over
+// the console port, so a proxy that enables compression for console traffic
+// would gzip the terminal stream too — measured to add 12% bytes with per-frame
+// flushing. Caddy's encode directive honours no-transform and leaves the stream
+// alone, which makes the stream safe regardless of how the operator scopes it.
 func WriteHeaders(w http.ResponseWriter) {
 	h := w.Header()
 	h.Set("Content-Type", "text/event-stream")
-	h.Set("Cache-Control", "no-cache, no-store, must-revalidate")
+	h.Set("Cache-Control", "no-cache, no-store, must-revalidate, no-transform")
 	h.Set("Pragma", "no-cache")
 	h.Set("Expires", "0")
 	h.Set("X-Accel-Buffering", "no")
