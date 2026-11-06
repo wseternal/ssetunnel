@@ -1,7 +1,6 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import { readFileSync, existsSync } from "fs";
-import { viteSingleFile } from 'vite-plugin-singlefile';
 
 // Dev HTTPS: generate certs with `mkcert localhost` or similar.
 const https = process.env.CI === "true" || process.argv.includes("build") ?
@@ -11,10 +10,9 @@ const https = process.env.CI === "true" || process.argv.includes("build") ?
     : undefined;
 
 export default defineConfig({
-  base: '/console/',
-  plugins: [react(), viteSingleFile()],
+  base: process.env.VITE_BASE || '/',
+  plugins: [react()],
   build: {
-    cssCodeSplit: false,
     // esbuild's default build target lowers TypeScript enums inside methods
     // to an IIFE and, together with minify's dead-code pass, drops the enum
     // variable declaration — emitting `void 0||(r={})` with no `var r`. In the
@@ -28,7 +26,17 @@ export default defineConfig({
     port: 3000,
     https,
     proxy: {
-      '/console/api': 'http://localhost:8081',
+      // Dev-only: matches when base='/' (VITE_BASE unset).
+      // Production deployments use a reverse proxy for path stripping.
+      // timeout: 0 disables the default ~120s proxy timeout so long-lived
+      // SSE streams (cloud shell, remote desktop) are not killed during idle.
+      '/api': {
+        target: 'http://localhost:8081',
+        timeout: 0,
+        proxyTimeout: 0,
+      },
+      // NOTE: If you set VITE_BASE=/console/ during dev, change this key
+      // to '/console/api' so it matches the prefixed fetch URLs.
     },
   },
 });
