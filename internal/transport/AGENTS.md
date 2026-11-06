@@ -18,7 +18,6 @@ yamux → Session.Write → down Pipe → GET /events SSE → readLoop → down 
 | Field | Type | Purpose |
 |-------|------|---------|
 | `URL` | `string` | Tunnel server base URL (required) |
-| `BasePath` | `string` | HTTP path prefix prepended to all endpoints (e.g. `/tunnel`); empty = no prefix |
 | `SessionID` | `string` | 128-bit random hex; auto-generated when empty |
 | `Token` | `string` | Bearer token for agent authentication |
 | `RequestModifier` | `func(*http.Request)` | Dynamic auth header injection (takes precedence over Token) |
@@ -81,6 +80,5 @@ Connect clients use `DialConnect` which sets `EventsPath=/connect` and `UpPath=/
 * **POST body cap**: Server rejects bodies > `maxUpBody` (1 MiB + 64 KiB) with 413.
 * **Gzip only on windowed sessions**: Server returns 400 for gzip flag on non-negotiated session.
 * **No compression on transport layer**: `DisableCompression: true` — SSE must not be gzip-buffered.
-* **BasePath**: Prepended to all endpoint paths (events + up). Used for reverse-proxy setups (`--base` flag).
 * **RequestModifier**: When set, takes precedence over `Token` for auth header injection. Called before every HTTP request.
 * **Auto-tune control frames**: `event: tune` SSE frames carry JSON-encoded `TransportParams`. The `readLoop` dispatches these to `OnTune` instead of the downstream pipe.

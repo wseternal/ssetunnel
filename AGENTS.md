@@ -73,7 +73,7 @@ User (SSH, DB client, ...)
 * **Path**: `internal/consoleapi/`
 
 ### 9. [Console Server](internal/consoleserver/AGENTS.md)
-* **Responsibility**: Combines the console API router with the React SPA static file server via `litespaserver`. Proxies cloud shell endpoints (`/console/api/v1/shell/connect`, `/connect-up`, `/resize`) to the tunnel handler with forced `__shell__` target and user-scoped agent access.
+* **Responsibility**: Combines the console API router with the React SPA static file server via `litespaserver`. Proxies cloud shell endpoints (`/api/v1/shell/connect`, `/connect-up`, `/resize`) to the tunnel handler with forced `__shell__` target and user-scoped agent access.
 * **Path**: `internal/consoleserver/`
 
 ### 10. [Probe](internal/probe/AGENTS.md)
@@ -184,4 +184,11 @@ Diagnosis instruments: `window.__shellDbg` (byte-pipeline counters) and `window.
 The `AutoTuner` evaluates agents every 30 s: throughput saturation adjusts batch size (4 KiB–1 MiB), p95 latency adjusts concurrency (1–4), and bandwidth level toggles gzip. Decisions are pushed via SSE `event: tune` control frames. Agents apply batch-size and compress changes live; concurrency changes are deferred to next reconnect. The tuner enforces a 2-minute cooldown between decisions per agent.
 
 ### Base Path Prefix
-All tunnel endpoints support a `--base` flag (e.g. `--base /tunnel`) for reverse-proxy setups. The prefix is prepended to `/events`, `/up`, `/connect`, `/connect-up`, `/probe`. Both agent and connect client pass the same `--base` to match the server.
+All route handlers are defined relative to root (`/`). Subpath prefixing and stripping is delegated entirely to the reverse proxy (e.g., Caddy's `handle_path`). The supported layout puts the **admin console at the proxy root** and the tunnel endpoints under a stripped prefix such as `/sse` — see README "Production (Behind a Reverse Proxy)".
+
+The console is served at root because `frontend/console/dist/` is built with Vite `base: '/'` and committed, so asset URLs in `index.html` (`/assets/index-<hash>.js`) are root-absolute. Mounting the console at a subpath therefore needs a rebuild with `VITE_BASE=/console/` **and** a recompile, since the bundle is baked in by `go:embed`. `VITE_BASE` is an escape hatch, not the default deployment shape; nothing in CI or the Taskfile sets it.
+
+Three invariants depend on this and are enforced by `internal/consoleserver/console_routes_test.go`:
+* `/assets/**` must be registered before the SPA `PathPrefix("/")` catch-all, and the catch-all must be last — otherwise it serves `index.html` where JS or JSON was expected.
+* The console's own fetches send `Accept: */*`, so litespaserver's JSON guard does not fire; unmatched `/api/`, exact `/api` and bare `/assets` paths need the explicit not-found guards.
+* Every response class carries `nosniff`/`X-Frame-Options`/`Referrer-Policy`, with `Cache-Control` defaulting to `no-store` and overridden by handlers — including the 404/405/301 responses gorilla/mux writes itself. That forces the headers to be declared by a wrapper **above** mux, which must pass the original `http.ResponseWriter` through: wrapping it breaks the cloud shell's `w.(http.Flusher)` assertion.

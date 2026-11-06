@@ -230,7 +230,7 @@ The agent manages module processes through its supervisor. You cannot run a modu
 
 ```
 Console UI
-  │  POST /console/api/v1/modules/invoke/{agent}/{module}/echo
+  │  POST /api/v1/modules/invoke/{agent}/{module}/echo
   ▼
 Server (module_routes.go)
   │  Auth check + OpenAPI validation + send module_open control message

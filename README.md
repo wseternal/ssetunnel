@@ -5,7 +5,7 @@
 SSH into machines behind corporate firewalls. Forward VNC, databases, any TCP port. No inbound rules, no VPN, no port forwarding. Just outbound HTTP.
 
 ```
-ssh -o ProxyCommand="ssetunnel connect --base /sse --server https://www.yourserver.com --agent mm --target 127.0.0.1:22 --local -" your_ssh_user@127.0.0.1
+ssh -o ProxyCommand="ssetunnel connect --server https://www.yourserver.com --agent mm --target 127.0.0.1:22 --local -" your_ssh_user@127.0.0.1
 ```
 
 That's it. One command. You're in.
@@ -81,29 +81,52 @@ ssetunnel connect --server http://127.0.0.1:8080 --agent mybox --target 127.0.0.
 
 ## Production (Behind a Reverse Proxy)
 
-Deploy the server on a public VPS behind Caddy:
+Deploy the server on a public VPS behind Caddy. The admin console is served at the
+proxy **root**; only the tunnel endpoints sit under a prefix, which the proxy strips so
+the server sees root-relative routes:
 
 ```caddyfile
 https://tunnel.example.com {
-    reverse_proxy /sse*     http://127.0.0.1:8080
-    reverse_proxy /console* http://127.0.0.1:8081
-    file_server
+	handle_path /sse* {
+		reverse_proxy http://127.0.0.1:8080
+	}
+	handle /assets/* {
+		encode zstd gzip
+		reverse_proxy http://127.0.0.1:8081
+	}
+	handle {
+		reverse_proxy http://127.0.0.1:8081
+	}
 }
 ```
+
+Keep the braces on their own lines: `handle_path /sse* { reverse_proxy ... }` written on a
+single line does not parse (Caddy v2.11 rejects it with "Unexpected next token after '{'
+on same line"). `handle_path` is matched first, so `/sse/*` reaches the tunnel server with
+the prefix stripped, then `/assets/*`, then the bare `handle` catches the rest of the console.
+
+Put `encode` in the `/assets/*` block and nowhere else. Scoping it to the console port is
+**not** enough: the cloud shell streams over `/api/v1/shell/connect` on that same port, and
+Caddy's default matcher compresses any `text/*`, so it gzip-buffers the live terminal —
+measured at 12% more bytes with per-frame flushing. Only the hashed bundles want
+compression: the JS is 1,304,069 bytes raw, 393,664 gzipped (385,845 with zstd). The server
+also marks SSE responses `no-transform`, so a stray site-level `encode` cannot capture them.
 
 Start as a managed OS service (systemd / launchd):
 
 ```bash
 # Server (public VPS)
-ssetunnel server start --base /sse --db-url "postgres:embedded:?datapath=$HOME/.ssetunnel/data"
+ssetunnel server start --db-url "postgres:embedded:?datapath=$HOME/.ssetunnel/data"
 
-# Agent (private machine) — login once, then start
-ssetunnel login --server https://tunnel.example.com
-ssetunnel agent start --id office --base /sse
+# Agent (private machine) — login once, then start.
+# --tunnel-server is required here: the login URL is the console root, and only
+# a :8081→:8080 port swap is derived automatically, not a different path prefix.
+ssetunnel login --server https://tunnel.example.com --tunnel-server https://tunnel.example.com/sse
+ssetunnel agent start --id office
 
 # Client (anywhere) — SSH in
-ssetunnel login --server https://tunnel.example.com
-ssh -o ProxyCommand="ssetunnel connect --base /sse --server https://tunnel.example.com --agent office --target 127.0.0.1:22 --local -" user@127.0.0.1
+ssetunnel login --server https://tunnel.example.com --tunnel-server https://tunnel.example.com/sse
+ssh -o ProxyCommand="ssetunnel connect --server https://tunnel.example.com/sse --agent office --target 127.0.0.1:22 --local -" user@127.0.0.1
 ```
 
 ---

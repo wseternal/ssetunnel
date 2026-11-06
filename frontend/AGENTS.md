@@ -8,6 +8,8 @@ React admin console SPA built with Vite + TypeScript + MUI v9 + orca-ui. Mercury
 frontend/
 ├── console/
 │   ├── dist/           # Built assets (committed for go:embed)
+│   │   ├── index.html
+│   │   └── assets/     # JS/CSS bundles (standard Vite output)
 │   ├── src/
 │   │   ├── App.tsx          # Main application component
 │   │   ├── main.tsx         # Entry point
@@ -31,10 +33,31 @@ frontend/
 ## Build
 
 ```bash
-cd frontend/console && npm install && npx vite build
+task fe:install && task fe:build     # from the repo root (bun, not npm)
 ```
 
 Output goes to `frontend/console/dist/`, which is embedded by `frontend.go`.
+`dist/` is a committed build artifact, so rebuild it whenever `src/` changes —
+`task ci` now rebuilds it and fails on any drift against the committed bundle.
+
+`fe:build` also runs the esbuild enum-miscompile guard (see RCA-001): it
+self-tests its own regex, then fails closed if `dist/assets/` holds no JS or
+the bundle contains a miscompiled function-local enum.
+
+### Subpath Deployment (escape hatch, not the default)
+
+The default build is `base: '/'` and that is what is committed and shipped, so
+the console is served at the reverse-proxy root. Mounting it at a subpath is
+possible but requires a rebuild with `VITE_BASE` **and** a recompile, because
+`go:embed` bakes the bundle into the binary:
+
+```bash
+VITE_BASE=/console/ bun run build
+```
+
+`VITE_BASE` prefixes every asset URL, so the proxy must strip the prefix from
+**ALL** requests (not just `/api`) for `/console/assets/...` to arrive as
+`/assets/...`. Nothing in CI or the Taskfile sets it — prefer root mounting.
 
 ## Tabs
 
@@ -101,15 +124,15 @@ Uses `AdminTable` for data tables, `StatusPill` for status badges, `PageHeader` 
 
 ## Session Persistence
 
-Login state is persisted to `localStorage` (sessionToken + userRole) and validated via `/console/api/v1/me` on page refresh. 401 responses trigger automatic logout.
+Login state is persisted to `localStorage` (sessionToken + userRole) and validated via `/api/v1/me` on page refresh. 401 responses trigger automatic logout.
 
 ## Integration
 
-The SPA is served by `consoleserver.NewConsoleHandler` via `litespaserver.ServeRoot` at `/console/` on the console listen address (`:8081`). API routes under `/console/api/v1/` are handled by `consoleapi`. Shell routes under `/console/api/v1/shell/` are registered by `consoleserver` and proxy to the server's cloud shell handlers.
+The SPA is served by `consoleserver.NewConsoleHandler` at `/` on the console listen address (`:8081`). Hashed assets under `/assets/**` are served by a dedicated handler in `consoleserver.go` that reads them from the embedded FS and marks them `immutable` — it deliberately bypasses `litespaserver`, which would force `no-store` on them, while the security headers that library applies are declared once for the whole router by the `consoleHeaders` wrapper. API routes under `/api/v1/` are handled by `consoleapi`. Shell routes under `/api/v1/shell/` are registered by `consoleserver` and proxy to the server's cloud shell handlers. Unmatched `/api/` and bare `/assets` paths hit explicit not-found guards registered before the SPA catch-all, so a wrong prefix surfaces as a 404 rather than as `index.html` with a 200. Route order and per-class headers are pinned by `internal/consoleserver/console_routes_test.go`.
 
 ## Rules
-* Always rebuild `dist/` before committing Go changes that touch the frontend.
-* Static asset paths (`/assets/**`) are allow-listed by `litespaserver.Config.StaticPaths`.
+* Always rebuild `dist/` before committing changes that touch `src/` — CI enforces it with `task fe:build` + `git diff --exit-code -- frontend/console/dist`.
+* `/assets/**` is served by the dedicated handler, not by `litespaserver.Config.StaticPaths`; anything registered after the SPA catch-all silently returns `index.html`.
 * Use theme tokens instead of raw hex colors.
 * Use orca-ui kit components (AdminTable, PageHeader, StatusPill, EmptyState) for consistency.
 * Shell SSE uses `fetch` ReadableStream (not `EventSource`) to control auth headers.
