@@ -39,7 +39,6 @@ var ErrUnauthorized = errors.New("unauthorized: server rejected token with 401")
 // Config configures DialAgent.
 type Config struct {
 	URL            string        // tunnel server base URL, e.g. http://host:port
-	BasePath       string        // HTTP path prefix prepended to all endpoints (e.g. "/tunnel"); empty means no prefix
 	SessionID      string        // 128-bit random hex; generated when empty
 	Client         *http.Client  // nil → default tunnel client
 	MaxBatchSize   int           // 0 → DefaultMaxBatchSize
@@ -190,10 +189,6 @@ func DialAgent(ctx context.Context, cfg Config) (*Conn, error) {
 	if upPath == "" {
 		upPath = "/up"
 	}
-	// Prepend base path to all endpoints.
-	basePath := strings.TrimRight(cfg.BasePath, "/")
-	eventsPath = basePath + eventsPath
-	upPath = basePath + upPath
 
 	c := &Conn{
 		client:   client,
@@ -254,7 +249,26 @@ func DialAgent(ctx context.Context, cfg Config) (*Conn, error) {
 		if resp.StatusCode == http.StatusUnauthorized {
 			return nil, fmt.Errorf("%w: %s", ErrUnauthorized, resp.Status)
 		}
+		// A 404 here is almost always a deployment mismatch — an agent still
+		// sending a --base prefix against a server whose routes are
+		// root-relative, or the reverse proxy not stripping what the server
+		// expects. The caller retries forever with backoff, so name the URL and
+		// the fix instead of leaving the operator to guess which layer failed.
+		if resp.StatusCode == http.StatusNotFound {
+			return nil, fmt.Errorf("open events stream: status %s at %s — the server has no route there; if it sits behind a prefix, strip it at the proxy (Caddy `handle_path`) and drop --base from this agent", resp.Status, eventsURL)
+		}
 		return nil, fmt.Errorf("open events stream: status %s", resp.Status)
+	}
+	// A 200 that is not an SSE stream means something answered in place of the
+	// tunnel — typically the console's SPA catch-all returning index.html for a
+	// path the proxy sent to the console port instead of the tunnel port. The SSE
+	// decoder skips lines it does not recognise, so accepting that turns the agent
+	// into a zombie that reconnects forever while reporting nothing.
+	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "text/event-stream") {
+		io.Copy(io.Discard, resp.Body) // always drain (decision 7)
+		resp.Body.Close()
+		c.cancel()
+		return nil, fmt.Errorf("open events stream: %s at %s answered %q, not text/event-stream — the tunnel server did not handle this request; route the tunnel prefix to the tunnel port (default :8080), not the console", resp.Status, eventsURL, ct)
 	}
 	if upgraded := resp.Header.Get("X-SSET-Token"); upgraded != "" && cfg.OnTokenUpgrade != nil {
 		c.token.Store(upgraded)

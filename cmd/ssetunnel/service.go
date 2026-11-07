@@ -109,7 +109,7 @@ func dispatchServiceAction(subcommand string, args []string) (handled bool, err 
 	// stop/restart/status/uninstall identify the service by name alone.
 	if serviceUser == "" && (action == "start" || action == "run") && subcommand != "connect" {
 		if os.Getuid() == 0 {
-			return true, fmt.Errorf("running as root is not supported (embedded postgres initdb restriction); "+
+			return true, fmt.Errorf("running as root is not supported (embedded postgres initdb restriction); " +
 				"specify --service-user <name> to run the daemon as a non-root user")
 		}
 		if u, err := user.Current(); err == nil && u.Username != "root" {
@@ -165,7 +165,7 @@ func dispatchServiceAction(subcommand string, args []string) (handled bool, err 
 
 	// When "start" is invoked without runtime flags, load persisted
 	// flags from the previous "start" (if any) so the user doesn't
-	// have to re-specify --base, --db-url, etc. every time.
+	// have to re-specify --db-url, etc. every time.
 	svcName := "ssetunnel-" + subcommand
 	if connectName != "" {
 		svcName = "ssetunnel-connect-" + connectName
@@ -222,6 +222,11 @@ func dispatchServiceAction(subcommand string, args []string) (handled bool, err 
 		}
 		// Persist runtime flags so a subsequent bare "start" reuses them.
 		// New flags fully replace any previously saved flags.
+		// --base is dropped on the way in, the same as in the unit file, so a
+		// legacy install cannot keep echoing "Using saved service args: --base
+		// /sse" and re-writing it on every start. It is stripped here rather
+		// than where runtimeFlags are read because buildRunFn hands that same
+		// slice to runServer, and the deprecation warning has to fire there.
 		if len(runtimeFlags) > 0 {
 			if prev, _ := loadServiceArgs(svcConfig.Name); len(prev) > 0 {
 				fmt.Println("NOTE: new flags replace previously saved flags.")
@@ -307,12 +312,39 @@ func buildRunFn(subcommand string, args []string) func(context.Context) error {
 // We replace the action verb with "run" and preserve all remaining flags.
 // --service-user is stripped: it is consumed by the service installer
 // (service.Config.UserName) and is not a runtime flag the daemon recognises.
+// --base is stripped: route prefixing is the reverse proxy's job now, so a
+// re-install must not carry the retired flag forward into the unit file.
 func buildServiceArgs(subcommand string, args []string) []string {
 	out := []string{subcommand, "run"}
 	if len(args) > 1 {
 		out = append(out, args[1:]...)
 	}
-	return stripFlag(out, "--service-user")
+	return stripRetiredBase(stripFlag(out, "--service-user"))
+}
+
+// stripRetiredBase removes every spelling of the retired --base flag from a
+// persisted or supplied argument list. extractFlag is not used here because it
+// only recognises the long form and, when --base is the last argument, leaves it
+// in place — which would make the installed unit fail with "flag needs an
+// argument: -base" and restart-loop exactly the way removing the flag did.
+func stripRetiredBase(args []string) []string {
+	out := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case arg == "--base", arg == "-base":
+			// Drop the flag; drop its value only when the next token is
+			// actually a value rather than the following flag.
+			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+				i++
+			}
+		case strings.HasPrefix(arg, "--base="), strings.HasPrefix(arg, "-base="):
+			// self-contained, drop
+		default:
+			out = append(out, arg)
+		}
+	}
+	return out
 }
 
 // sendReload sends SIGHUP to the running service process.  It reads the
@@ -387,11 +419,17 @@ func saveServiceArgs(name string, args []string) error {
 	return saveServiceArgsToDir(pidDir(), name, args)
 }
 
-// saveServiceArgsToDir is the testable core of saveServiceArgs.
+// saveServiceArgsToDir is the testable core of saveServiceArgs. The retired
+// --base is stripped here, at the single point where args become durable, so the
+// production path and its test cannot drift apart: a bare "start" reloads this
+// file, prints it as if it were still valid, and re-saves it, which is how a
+// retired flag outlives every other fix. Runtime flags keep --base on the way to
+// runServer, where warnDeprecatedBase still has to see it.
 func saveServiceArgsToDir(dir, name string, args []string) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
+	args = stripRetiredBase(args)
 	return os.WriteFile(filepath.Join(dir, name+".args"), []byte(strings.Join(args, "\n")), 0o600)
 }
 

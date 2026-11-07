@@ -11,6 +11,7 @@
 # Build output
 build/
 dist/
+!frontend/console/dist/
 /ssetunnel
 version.txt
 

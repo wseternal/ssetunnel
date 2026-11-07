@@ -73,7 +73,7 @@ User (SSH, DB client, ...)
 * **Path**: `internal/consoleapi/`
 
 ### 9. [Console Server](internal/consoleserver/AGENTS.md)
-* **Responsibility**: Combines the console API router with the React SPA static file server via `litespaserver`. Proxies cloud shell endpoints (`/console/api/v1/shell/connect`, `/connect-up`, `/resize`) to the tunnel handler with forced `__shell__` target and user-scoped agent access.
+* **Responsibility**: Combines the console API router with the React SPA static file server via `litespaserver`. Proxies cloud shell endpoints (`/api/v1/shell/connect`, `/connect-up`, `/resize`) to the tunnel handler with forced `__shell__` target and user-scoped agent access.
 * **Path**: `internal/consoleserver/`
 
 ### 10. [Probe](internal/probe/AGENTS.md)
@@ -125,8 +125,20 @@ ssetunnel connect stop --name my-ssh               # stop the named connection
 ssetunnel connect status --name my-ssh             # check status
 ```
 
+### Testing Policy
+
+These rules apply to all test work in this project. They are derived from the global testing rules and override any conflicting project convention.
+
+* **No frontend tests.** Do not add or run Vitest, Jest, React Testing Library, or any test that mounts components, renders DOM nodes, inspects JSX, or mocks component props. To validate frontend behavior, ask the user for permission first, then use browser-based e2e tests.
+* **No mocks in backend tests.** Never mock databases, network layers, HTTP servers, or internal classes. Backend verification must either test pure non-I/O logic directly or run as an integration test against a real boundary (`httptest.Server`, TestContainers, real `net.Conn`). If a real boundary does not exist, do not write the test.
+* **Default to zero tests.** Do not create or update test files automatically as part of feature implementation. Tests are added only when:
+  - The user explicitly requests them.
+  - A pure, non-I/O algorithmic function needs edge cases proven (parsers, data transformations, math).
+  - A bug fix needs a reproduction test to prevent regression (test-first for bugs).
+* **No snapshot or tautology tests.** Never write `toMatchSnapshot` tests, tests that assert framework behavior, type interfaces, or basic getters/setters.
+* **Test-first for bugs**: When fixing a bug, write a reproduction test that fails before the fix and passes after. The `TestServeRW_ServerClosesReturns` test was written to prove the SSH ProxyCommand deadlock before the fix. This is the one exception to the default-to-zero rule — regression tests for real bugs are always warranted.
+
 ### Key Conventions
-* **Test-first for bugs**: Always write a reproduction test before fixing. The `TestServeRW_ServerClosesReturns` test was written to prove the SSH ProxyCommand deadlock before the fix.
 * **Bidirectional proxy pattern**: Every hop uses two goroutines with `io.CopyBuffer` + `sync.Pool` 32 KiB buffers. When one direction hits EOF, the corresponding connection/stream must be closed to unblock the other direction.
 * **Fail-fast model**: POST failures, stream deaths, and pipe closures are terminal — sessions die and agents reconnect. No partial recovery.
 * **No goroutine leaks**: Every goroutine hangs off a context owned by its conn/session. `Close()` always tears down cleanly.
@@ -184,4 +196,11 @@ Diagnosis instruments: `window.__shellDbg` (byte-pipeline counters) and `window.
 The `AutoTuner` evaluates agents every 30 s: throughput saturation adjusts batch size (4 KiB–1 MiB), p95 latency adjusts concurrency (1–4), and bandwidth level toggles gzip. Decisions are pushed via SSE `event: tune` control frames. Agents apply batch-size and compress changes live; concurrency changes are deferred to next reconnect. The tuner enforces a 2-minute cooldown between decisions per agent.
 
 ### Base Path Prefix
-All tunnel endpoints support a `--base` flag (e.g. `--base /tunnel`) for reverse-proxy setups. The prefix is prepended to `/events`, `/up`, `/connect`, `/connect-up`, `/probe`. Both agent and connect client pass the same `--base` to match the server.
+The frontend base path is `/console`, defined as a single constant in `frontend/console/vite.config.ts`. This is the only place the base is set; the Taskfile build tasks (`fe:build`, `fe:ci-build`) run `bun run build` with no environment overrides. All route handlers inside the console server are defined relative to root (`/`).
+
+The server's `--console-prefix` flag (default `/console`) wraps the console handler with `http.StripPrefix`, so direct access on the console port works without a reverse proxy. Behind a reverse proxy that already strips the prefix, pass `--console-prefix=""` to disable the server-side stripping and let the proxy handle it.
+
+Three invariants depend on this and are enforced by `internal/consoleserver/console_routes_test.go`:
+* `/assets/**` must be registered before the SPA `PathPrefix("/")` catch-all, and the catch-all must be last — otherwise it serves `index.html` where JS or JSON was expected.
+* The console's own fetches send `Accept: */*`, so litespaserver's JSON guard does not fire; unmatched `/api/`, exact `/api` and bare `/assets` paths need the explicit not-found guards.
+* Every response class carries `nosniff`/`X-Frame-Options`/`Referrer-Policy`, with `Cache-Control` defaulting to `no-store` and overridden by handlers — including the 404/405/301 responses gorilla/mux writes itself. That forces the headers to be declared by a wrapper **above** mux, which must pass the original `http.ResponseWriter` through: wrapping it breaks the cloud shell's `w.(http.Flusher)` assertion.

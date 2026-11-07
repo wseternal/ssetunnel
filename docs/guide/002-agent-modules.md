@@ -14,7 +14,7 @@ Consumer (SDK/HTTP)
 │  Server                                                  │
 │  • ModuleCatalog: validates and stores agent catalogs    │
 │  • ModuleStreamHandler: correlates invocation streams    │
-│  • Console API: /console/api/v1/modules/...             │
+│  • Console API: /api/v1/modules/...                      │
 └──────────┬──────────────────────────────────────────────┘
            │  Control stream: snapshot sync (start/chunk/commit)
            │  Data streams: reverse-opened HTTP invocations

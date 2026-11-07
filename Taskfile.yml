@@ -29,10 +29,42 @@ tasks:
   ci:
     desc: Full CI pipeline (build, vet, test)
     cmds:
+      # The committed frontend/console/dist is a build artifact that go:embed
+      # bakes into the binary, so CI has to rebuild it and prove it still
+      # matches src/ — otherwise a stale bundle ships silently.
+      # --frozen-lockfile keeps the rebuild on the exact esbuild/rollup versions
+      # the lockfile pins, so the diff below compares like with like.
+      - task: fe:ci-install
+      - task: fe:ci-build
+      - task: fe:dist-drift
       - task: go:build
       - task: go:vet
       - task: go:test
       - task: fe:test
+
+  fe:ci-install:
+    desc: Install frontend dependencies at the locked versions (CI only)
+    dir: "{{.FRONTEND_DIR}}"
+    cmds:
+      - bun install --frozen-lockfile
+
+  fe:ci-build:
+    desc: Rebuild the embedded bundle and verify no enum miscompile (CI only)
+    dir: "{{.FRONTEND_DIR}}"
+    cmds:
+      - bun run build
+      - task: fe:enum-guard
+
+  fe:dist-drift:
+    desc: Fail if the committed embedded bundle no longer matches src/
+    cmds:
+      - |
+        if ! git diff --quiet -- frontend/console/dist; then
+          echo "ERROR: frontend/console/dist is stale — run 'task fe:build' and commit the result." >&2
+          git diff --stat -- frontend/console/dist >&2
+          exit 1
+        fi
+        echo "dist drift check: OK (bundle matches src/)"
 
   # ── Go ──────────────────────────────────────────────────────────────
 
@@ -187,17 +219,50 @@ tasks:
     dir: "{{.FRONTEND_DIR}}"
     cmds:
       - bun run build
-      # Guard: esbuild at a low build.target mislowers function-local TS enums
-      # (drops the variable), emitting `void 0||(x={})`. In the strict-mode
-      # bundle that throws at runtime — it wedged xterm's write loop and froze
-      # the cloud shell (see docs/rca/001). Keep build.target at es2022+.
+      - task: fe:enum-guard
+
+  fe:enum-guard:
+    desc: Fail if the built bundle contains a miscompiled TS enum (see docs/rca/001)
+    dir: "{{.FRONTEND_DIR}}"
+    cmds:
+      # esbuild at a low build.target mislowers function-local TS enums (drops
+      # the variable), emitting `void 0||(x={})`. In the strict-mode bundle that
+      # throws at runtime — it wedged xterm's write loop and froze the cloud
+      # shell (see docs/rca/001). Keep build.target at es2022+.
       - |
-        if grep -Eq 'void 0\|\|\([A-Za-z_$][A-Za-z0-9_$]*=\{\}\)' dist/index.html; then
-          echo "ERROR: built bundle has a miscompiled TS enum (dropped variable). Keep build.target >= es2022 in vite.config.ts." >&2
-          grep -Eon 'void 0\|\|\([A-Za-z_$][A-Za-z0-9_$]*=\{\}\)' dist/index.html | head -5 >&2
+        # The miscompile shape has LITERAL parentheses. They must stay escaped:
+        # written unescaped they become an ERE group, which then only matches the
+        # paren-less form esbuild never emits — a guard that silently passes.
+        re='void 0\|\|\([A-Za-z_$][A-Za-z0-9_$]*=\{\}\)'
+
+        # Self-test: prove the regex still catches the known-bad shape before
+        # trusting it against the bundle, so it cannot rot unnoticed again.
+        probe=$(mktemp)
+        printf 'x=(void 0||(r={}));\n' > "$probe"
+        if ! grep -Eq "$re" "$probe"; then
+          echo "ERROR: enum guard regex does not match the known miscompile shape 'void 0||(r={})' — the guard itself is broken, not the build." >&2
+          rm -f "$probe"
           exit 1
         fi
-        echo "enum-miscompile guard: OK (0 sites)"
+        rm -f "$probe"
+
+        # Enumerate once into positional parameters: a second find piped to
+        # `grep -q` can SIGPIPE under pipefail and report a healthy build as
+        # "emitted nothing". Asset filenames must not contain whitespace.
+        set -- $(find dist/assets -name '*.js' -print 2>/dev/null)
+        if [ "$#" -eq 0 ]; then
+          echo "ERROR: enum guard found no JS files in dist/assets — the build emitted nothing or build.assetsDir moved." >&2
+          exit 1
+        fi
+
+        # Fail CLOSED on an empty or missing file list rather than reporting a
+        # build that produced nothing as clean.
+        if grep -lE "$re" "$@" | grep -q .; then
+          echo "ERROR: built bundle has a miscompiled TS enum (dropped variable). Keep build.target >= es2022 in vite.config.ts." >&2
+          grep -lE "$re" "$@" | head -5 >&2
+          exit 1
+        fi
+        echo "enum-miscompile guard: OK (self-test passed, $# file(s) scanned, 0 sites)"
 
   fe:dev:
     desc: Run frontend dev server

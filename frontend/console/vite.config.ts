@@ -1,7 +1,6 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import { readFileSync, existsSync } from "fs";
-import { viteSingleFile } from 'vite-plugin-singlefile';
 
 // Dev HTTPS: generate certs with `mkcert localhost` or similar.
 const https = process.env.CI === "true" || process.argv.includes("build") ?
@@ -10,11 +9,16 @@ const https = process.env.CI === "true" || process.argv.includes("build") ?
     ? { key: readFileSync("localhost-key.pem"), cert: readFileSync("localhost.pem") }
     : undefined;
 
+// Base path for the SPA — the single source of truth. Every asset URL and
+// the dev proxy key are derived from this. Change it here and rebuild; nothing
+// else needs updating.
+const base = '/console';
+const apiProxyKey = `${base}/api`;
+
 export default defineConfig({
-  base: '/console/',
-  plugins: [react(), viteSingleFile()],
+  base,
+  plugins: [react()],
   build: {
-    cssCodeSplit: false,
     // esbuild's default build target lowers TypeScript enums inside methods
     // to an IIFE and, together with minify's dead-code pass, drops the enum
     // variable declaration — emitting `void 0||(r={})` with no `var r`. In the
@@ -28,7 +32,19 @@ export default defineConfig({
     port: 3000,
     https,
     proxy: {
-      '/console/api': 'http://localhost:8081',
+      // Derived from base so the proxy key always matches the fetch URLs
+      // App.tsx builds from import.meta.env.BASE_URL.
+      // timeout: 0 disables the default ~120s proxy timeout so long-lived
+      // SSE streams (cloud shell, remote desktop) are not killed during idle.
+      [apiProxyKey]: {
+        target: 'http://localhost:8081',
+        // The server registers routes at root (/api/v1/...), so the dev
+        // proxy must strip the base prefix before forwarding. In production
+        // the reverse proxy (or --console-prefix) does the same stripping.
+        rewrite: (path: string) => path.startsWith(base) ? path.slice(base.length) : path,
+        timeout: 0,
+        proxyTimeout: 0,
+      },
     },
   },
 });

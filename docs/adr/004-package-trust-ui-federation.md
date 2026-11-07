@@ -13,7 +13,9 @@ Modules (ADR-002) ship as packages containing an executable, an OpenAPI spec, an
 1. **Package integrity**: how does the server verify that a module's executable and assets haven't been tampered with?
 2. **UI trust**: the console SPA loads and executes JavaScript from modules. A malicious or compromised module UI could steal admin credentials or corrupt tunnel state.
 
-The tunnel already serves a single-file React SPA (via `vite-plugin-singlefile` + `go:embed`). Module UIs must integrate without breaking this deployment model.
+The tunnel already serves a React SPA (via standard Vite build + `go:embed`). Module UIs must integrate without breaking this deployment model.
+
+> **Amendment (2026-11):** `vite-plugin-singlefile` was removed in PR #89. The SPA now produces standard multi-file output (index.html + content-hashed `assets/`). Those assets are served by a dedicated `/assets/**` handler in `internal/consoleserver` straight from the embedded FS — it exists so hashed files can be cached `immutable`, which `litespaserver`'s `no-store` base headers would otherwise defeat, and it re-applies the security headers that bypass drops. `litespaserver.Config.StaticPaths` is no longer used for them.
 
 ## Decision
 
@@ -46,8 +48,8 @@ The server maintains an in-memory asset store (`moduleui.Store`) with:
 3. Assets are cached via `CacheAsset()` which verifies size and digest match the manifest
 
 **Serving flow**:
-- **Consumer assets** (server-installed UI): served from the trusted store at `/console/api/v1/modules/ui/consumer/{digest}/{path}`. The digest in the URL enables immutable caching (`Cache-Control: public, max-age=31536000, immutable`).
-- **Provider assets** (agent-side UI): proxied through module invocation at `/console/api/v1/modules/ui/provider/{agent-id}/{module-id}/{path}`. Response body bounded by `MaxAssetSize` (8 MiB).
+- **Consumer assets** (server-installed UI): served from the trusted store at `/api/v1/modules/ui/consumer/{digest}/{path}`. The digest in the URL enables immutable caching (`Cache-Control: public, max-age=31536000, immutable`).
+- **Provider assets** (agent-side UI): proxied through module invocation at `/api/v1/modules/ui/provider/{agent-id}/{module-id}/{path}`. Response body bounded by `MaxAssetSize` (8 MiB).
 
 ### Path Traversal Prevention
 
@@ -66,9 +68,9 @@ The frontend SPA adds a "Modules" tab with:
 - Links to module UIs when `has_ui: true`
 
 The modules API endpoints:
-- `GET /console/api/v1/modules?agent=<id>` — list modules with summaries
-- `GET /console/api/v1/modules/<agent-id>/<module-id>` — full detail with OpenAPI
-- `GET /console/api/v1/modules/openapi/<agent-id>/<module-id>` — raw OpenAPI YAML
+- `GET /api/v1/modules?agent=<id>` — list modules with summaries
+- `GET /api/v1/modules/<agent-id>/<module-id>` — full detail with OpenAPI
+- `GET /api/v1/modules/openapi/<agent-id>/<module-id>` — raw OpenAPI YAML
 
 ### Catalog Reassembly
 

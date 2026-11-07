@@ -17,8 +17,8 @@ import (
 // asset operation. Consumer UI assets are served from the local trusted
 // package store.
 type moduleUIRoutes struct {
-	server    *server.Server
-	uiStore   *moduleui.Store
+	server  *server.Server
+	uiStore *moduleui.Store
 }
 
 // newModuleUIRoutes creates the module UI route handlers.
@@ -30,7 +30,7 @@ func newModuleUIRoutes(srv *server.Server, uiStore *moduleui.Store) *moduleUIRou
 }
 
 // handleGetConsumerAsset serves a cached consumer UI asset.
-// GET /console/api/v1/modules/ui/consumer/{package-digest}/{path:.*}
+// GET /api/v1/modules/ui/consumer/{package-digest}/{path:.*}
 //
 // Consumer assets are served from the local trusted package store.
 // Every request verifies the package is still trusted and the asset
@@ -82,12 +82,12 @@ func (m *moduleUIRoutes) handleGetConsumerAsset(w http.ResponseWriter, r *http.R
 	w.Header().Set("Content-Type", contentType)
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", asset.Size))
 	w.Header().Set("X-Asset-Digest", asset.Digest)
-	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	w.Header().Set("Cache-Control", "private, max-age=31536000, immutable")
 	w.Write(asset.Data)
 }
 
 // handleGetProviderAsset proxies a request to a module's declared asset operation.
-// GET /console/api/v1/modules/ui/provider/{agent-id}/{module-id}/{path:.*}
+// GET /api/v1/modules/ui/provider/{agent-id}/{module-id}/{path:.*}
 //
 // Provider assets are fetched by invoking the module's asset operation
 // (declared in OpenAPI). The response is verified against the manifest
@@ -222,7 +222,7 @@ func (m *moduleUIRoutes) handleGetProviderAsset(w http.ResponseWriter, r *http.R
 	w.Header().Set("Content-Type", contentType)
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(data)))
 	w.Header().Set("X-Module-Revision", mod.Revision)
-	w.Header().Set("Cache-Control", "public, max-age=3600") // 1 hour for provider assets
+	w.Header().Set("Cache-Control", "private, max-age=3600") // 1 hour for provider assets
 	// W9 fix: Add restrictive CSP for SVG assets to prevent XSS.
 	if strings.HasSuffix(assetPath, ".svg") {
 		w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'")
@@ -231,7 +231,7 @@ func (m *moduleUIRoutes) handleGetProviderAsset(w http.ResponseWriter, r *http.R
 }
 
 // handleListModuleUI returns the UI descriptors for a module.
-// GET /console/api/v1/modules/ui/{agent-id}/{module-id}
+// GET /api/v1/modules/ui/{agent-id}/{module-id}
 func (m *moduleUIRoutes) handleListModuleUI(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)

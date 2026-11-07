@@ -1,6 +1,6 @@
 # Console API
 
-JSON management API for the admin console. Mounted at `/api/v1/` under the console HTTP server (stripped of `/console` prefix).
+JSON management API for the admin console. Mounted at `/api/v1/` under the console HTTP server (the reverse proxy strips any subpath prefix).
 
 ## Routes
 

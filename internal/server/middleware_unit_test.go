@@ -19,7 +19,7 @@ func TestUserSessionMiddleware_NilStore_InjectsSyntheticAdmin(t *testing.T) {
 
 	// When store is nil (auth disabled), middleware should inject a synthetic admin session
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest("GET", "/console/api/v1/me", nil)
+	req := httptest.NewRequest("GET", "/api/v1/me", nil)
 	UserSessionMiddleware(nil)(handler).ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {

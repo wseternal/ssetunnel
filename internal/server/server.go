@@ -30,34 +30,20 @@ type Server struct {
 	// Reg is the live session registry (exported for tests and the console).
 	Reg *Registry
 
-	handler   *Handler
-	store     *auth.Store
-	metrics   *metrics.MetricsCollector
-	basePath  string // HTTP path prefix for all endpoints (empty = no prefix)
+	handler *Handler
+	store   *auth.Store
+	metrics *metrics.MetricsCollector
 }
 
 // NewServer builds a server given an SSE heartbeat interval.
 func NewServer(heartbeat time.Duration) *Server {
-	return NewServerWithBase(heartbeat, "")
-}
-
-// NewServerWithBase builds a server with an HTTP path prefix for all
-// tunnel endpoints (empty = no prefix).
-func NewServerWithBase(heartbeat time.Duration, basePath string) *Server {
-	return NewServerWithRegistryAndBase(NewRegistry(), heartbeat, basePath)
+	return NewServerWithRegistry(NewRegistry(), heartbeat)
 }
 
 // NewServerWithRegistry builds a server with a given registry and SSE heartbeat interval.
 func NewServerWithRegistry(reg *Registry, heartbeat time.Duration) *Server {
-	return NewServerWithRegistryAndBase(reg, heartbeat, "")
-}
-
-// NewServerWithRegistryAndBase builds a server with a given registry,
-// SSE heartbeat interval, and HTTP path prefix.
-func NewServerWithRegistryAndBase(reg *Registry, heartbeat time.Duration, basePath string) *Server {
-	basePath = strings.TrimRight(basePath, "/")
-	h := NewHandlerWithAuth(reg, heartbeat, nil, basePath)
-	s := &Server{Reg: reg, handler: h, basePath: basePath}
+	h := NewHandlerWithAuth(reg, heartbeat, nil)
+	s := &Server{Reg: reg, handler: h}
 	h.OnSession = s.attach
 	return s
 }
@@ -68,7 +54,7 @@ func NewServerWithRegistryAndBase(reg *Registry, heartbeat time.Duration, basePa
 // to avoid silently dropping state.
 func (s *Server) recreateHandler(store *auth.Store, mc *metrics.MetricsCollector) {
 	prev := s.handler
-	s.handler = NewHandlerWithMetrics(s.Reg, prev.heartbeat, store, mc, s.basePath)
+	s.handler = NewHandlerWithMetrics(s.Reg, prev.heartbeat, store, mc)
 	s.handler.OnSession = s.attach
 	s.handler.OnUpPush = prev.OnUpPush
 	s.handler.shellSessions = prev.shellSessions // preserve persistent shell sessions

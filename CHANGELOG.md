@@ -16,6 +16,40 @@
   - Process supervisor with exponential backoff (500 ms → 30 s cap)
   - Package validation with symlink traversal protection
 
+### Breaking Changes
+
+* **remove --base flag and /console path prefix** — all routes are now
+  root-relative (`/events`, `/api/v1/...` instead of `/console/api/v1/...`).
+  Path prefixing is delegated to the reverse proxy (e.g. Caddy `handle_path`).
+  The flag is removed from `server`, `agent`, `connect` and `probe`. It is still
+  *accepted and ignored* with a deprecation warning, because a package upgrade
+  does not rewrite an installed unit file and rejecting the flag would put
+  existing services into a restart loop; strip it from your units and from
+  `~/.ssetunnel/*.args` at leisure.
+* **internal path plumbing removed** — `transport.Config.BasePath`,
+  `agent.Agent.BasePath` and `probe.Config.BasePath` are gone, `connect.NewClient`
+  drops from 5 to 4 arguments, and the `WithBase` variants of the server
+  constructors (`NewServerWithBase`, `NewServerWithRegistryAndBase`) are removed;
+  use `NewServer` or `NewServerWithRegistry`. These live under `internal/`, so
+  they were never importable from outside the module.
+* **`sdk.NewConsumer(serverURL)` changed semantics, not signature** — the URL must
+  now be the console server (typically `:8081`) with no `/console` prefix. Existing
+  callers get runtime 404s rather than a compile error.
+* **the `/console` → `/console/` redirect is gone** — the console frontend is
+  built with `base: '/console'` (defined in `vite.config.ts`). The server's
+  `--console-prefix` flag (default `/console`) strips the prefix via
+  `http.StripPrefix`, so direct access works without a reverse proxy.
+  Behind a proxy that already strips, pass `--console-prefix=""`.
+
+### Changes
+
+* **console frontend is a standard Vite build** — `vite-plugin-singlefile` is
+  replaced by ordinary multi-file output (`index.html` plus content-hashed
+  `assets/`), committed so `go:embed` can bake it in. Hashed assets are served by
+  a dedicated handler with `Cache-Control: immutable`, ETag validation and Range
+  support instead of the `no-store` the SPA server applied to everything. CI now
+  rebuilds the bundle and fails on any drift against `src/`.
+
 ## [1.13.1](https://github.com/wseternal/ssetunnel/compare/v1.13.0...v1.13.1) (2026-11-01)
 
 

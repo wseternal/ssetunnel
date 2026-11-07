@@ -111,7 +111,7 @@ NeedsRefresh(expiresAt time.Time) → bool   # true when remaining TTL < 7 days;
 RefreshSession(consoleURL, token string) → (newToken string, newExpiresAt time.Time, err)
 ```
 
-`RefreshSession` calls `POST /console/api/v1/refresh-session` with a 15-second HTTP client timeout. Validates non-empty token in response. Validates `consoleURL` scheme: requires HTTPS for non-localhost hosts (SSRF protection), allows HTTP only for localhost/127.0.0.1/::1. Client-side refresh is transparent — integrated in `resolveServerURL`.
+`RefreshSession` calls `POST /api/v1/refresh-session` with a 15-second HTTP client timeout. Validates non-empty token in response. Validates `consoleURL` scheme: requires HTTPS for non-localhost hosts (SSRF protection), allows HTTP only for localhost/127.0.0.1/::1. Client-side refresh is transparent — integrated in `resolveServerURL`.
 
 ## Store: Session Refresh
 

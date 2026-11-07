@@ -27,7 +27,7 @@ func newModuleRoutes(srv *server.Server) *moduleRoutes {
 }
 
 // handleListModules returns all modules for agents accessible to the current user.
-// GET /console/api/v1/modules?agent=<agent-id>
+// GET /api/v1/modules?agent=<agent-id>
 func (m *moduleRoutes) handleListModules(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -81,7 +81,7 @@ func (m *moduleRoutes) handleListModules(w http.ResponseWriter, r *http.Request)
 }
 
 // handleGetModule returns details for a specific module.
-// GET /console/api/v1/modules/<agent-id>/<module-id>
+// GET /api/v1/modules/<agent-id>/<module-id>
 func (m *moduleRoutes) handleGetModule(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -132,7 +132,7 @@ func (m *moduleRoutes) handleGetModule(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleGetOpenAPI returns the OpenAPI YAML for a module.
-// GET /console/api/v1/modules/openapi/<agent-id>/<module-id>
+// GET /api/v1/modules/openapi/<agent-id>/<module-id>
 func (m *moduleRoutes) handleGetOpenAPI(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -173,7 +173,7 @@ func (m *moduleRoutes) handleGetOpenAPI(w http.ResponseWriter, r *http.Request) 
 }
 
 // handleInvoke invokes a module operation.
-// POST /console/api/v1/modules/invoke/<agent-id>/<module-id>/<operation-path...>
+// POST /api/v1/modules/invoke/<agent-id>/<module-id>/<operation-path...>
 func (m *moduleRoutes) handleInvoke(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodOptions {
 		// W4 fix: Do not reflect arbitrary Origin as Access-Control-Allow-Origin.
@@ -285,11 +285,18 @@ func (m *moduleRoutes) handleInvoke(w http.ResponseWriter, r *http.Request) {
 	defer resp.Body.Close()
 
 	// W5 fix: Copy response headers using an allowlist (not blocklist).
+	//
+	// cache-control is deliberately absent. This route returns output from a
+	// user's own agent behind UserSessionMiddleware, the URL carries no user
+	// identity and nothing sets Vary, so honouring a module's
+	// "public, max-age=86400" would let a shared cache answer another user's
+	// invocation from that URL. The router's no-store floor is kept instead —
+	// the module's caching intent is not portable to a proxied, per-user
+	// response, and silently becoming cacheable is the worse outcome.
 	allowedResponseHeaders := map[string]bool{
 		"content-type":        true,
 		"content-length":      true,
 		"content-disposition": true,
-		"cache-control":       true,
 		"etag":                true,
 		"last-modified":       true,
 		"x-request-id":        true,
@@ -298,9 +305,7 @@ func (m *moduleRoutes) handleInvoke(w http.ResponseWriter, r *http.Request) {
 		if !allowedResponseHeaders[strings.ToLower(key)] {
 			continue
 		}
-		for _, v := range values {
-			w.Header().Add(key, v)
-		}
+		CopyProxiedHeader(w.Header(), key, values)
 	}
 	w.Header().Set("X-Correlation-ID", invReq.Header.Get("X-Correlation-ID"))
 	w.WriteHeader(resp.StatusCode)
@@ -365,4 +370,3 @@ func generateCorrelationID() string {
 	rand.Read(b[:])
 	return fmt.Sprintf("corr-%x", b[:])
 }
-
