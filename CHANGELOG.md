@@ -35,10 +35,11 @@
 * **`sdk.NewConsumer(serverURL)` changed semantics, not signature** — the URL must
   now be the console server (typically `:8081`) with no `/console` prefix. Existing
   callers get runtime 404s rather than a compile error.
-* **the `/console` → `/console/` redirect is gone** — the console is served at the
-  proxy root. Deployments that mounted it under `/console` must either move it to
-  the root (the documented layout) or rebuild the frontend with `VITE_BASE` and
-  recompile, since the bundle is baked in by `go:embed`.
+* **the `/console` → `/console/` redirect is gone** — the console frontend is
+  built with `base: '/console'` (defined in `vite.config.ts`). The server's
+  `--console-prefix` flag (default `/console`) strips the prefix via
+  `http.StripPrefix`, so direct access works without a reverse proxy.
+  Behind a proxy that already strips, pass `--console-prefix=""`.
 
 ### Changes
 

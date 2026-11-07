@@ -9,8 +9,14 @@ const https = process.env.CI === "true" || process.argv.includes("build") ?
     ? { key: readFileSync("localhost-key.pem"), cert: readFileSync("localhost.pem") }
     : undefined;
 
+// Base path for the SPA — the single source of truth. Every asset URL and
+// the dev proxy key are derived from this. Change it here and rebuild; nothing
+// else needs updating.
+const base = '/console';
+const apiProxyKey = `${base}/api`;
+
 export default defineConfig({
-  base: process.env.VITE_BASE || '/',
+  base,
   plugins: [react()],
   build: {
     // esbuild's default build target lowers TypeScript enums inside methods
@@ -26,17 +32,19 @@ export default defineConfig({
     port: 3000,
     https,
     proxy: {
-      // Dev-only: matches when base='/' (VITE_BASE unset).
-      // Production deployments use a reverse proxy for path stripping.
+      // Derived from base so the proxy key always matches the fetch URLs
+      // App.tsx builds from import.meta.env.BASE_URL.
       // timeout: 0 disables the default ~120s proxy timeout so long-lived
       // SSE streams (cloud shell, remote desktop) are not killed during idle.
-      '/api': {
+      [apiProxyKey]: {
         target: 'http://localhost:8081',
+        // The server registers routes at root (/api/v1/...), so the dev
+        // proxy must strip the base prefix before forwarding. In production
+        // the reverse proxy (or --console-prefix) does the same stripping.
+        rewrite: (path: string) => path.startsWith(base) ? path.slice(base.length) : path,
         timeout: 0,
         proxyTimeout: 0,
       },
-      // NOTE: If you set VITE_BASE=/console/ during dev, change this key
-      // to '/console/api' so it matches the prefixed fetch URLs.
     },
   },
 });

@@ -49,12 +49,10 @@ tasks:
       - bun install --frozen-lockfile
 
   fe:ci-build:
-    desc: Rebuild the embedded bundle with no deployment prefix (CI only)
+    desc: Rebuild the embedded bundle and verify no enum miscompile (CI only)
     dir: "{{.FRONTEND_DIR}}"
     cmds:
-      # VITE_BASE rewrites every asset URL, so a stray value in the environment
-      # would rebuild the bundle differently from what the commit ships.
-      - env -u VITE_BASE bun run build
+      - bun run build
       - task: fe:enum-guard
 
   fe:dist-drift:

@@ -69,6 +69,7 @@ Shell endpoints are registered **before** the `/api/v1/` prefix catch-all (goril
 ## Rules
 * The console server runs on a separate port (`:8081` by default) from the tunnel HTTP server (`:8080`).
 * It starts whenever `--console-listen` is non-empty — including under `--disable-auth`, where `pool` and `store` are nil and `UserSessionMiddleware` injects a synthetic admin session (see `internal/server/middleware.go`). Pass `--console-listen=""` to keep it off.
+* The caller wraps the returned handler with `http.StripPrefix` using the `--console-prefix` flag (default `/console`). This lets direct access on the console port work without a reverse proxy. Behind a proxy that already strips the prefix, pass `--console-prefix=""`.
 * Shell routes MUST be registered before the API prefix catch-all.
 * CSP is disabled for the SPA (`litespaserver.CSPConfig{Disable: true}`).
 * Anything registered after the SPA catch-all silently serves `index.html`.

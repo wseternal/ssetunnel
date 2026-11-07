@@ -44,20 +44,14 @@ Output goes to `frontend/console/dist/`, which is embedded by `frontend.go`.
 self-tests its own regex, then fails closed if `dist/assets/` holds no JS or
 the bundle contains a miscompiled function-local enum.
 
-### Subpath Deployment (escape hatch, not the default)
+### Base Path
 
-The default build is `base: '/'` and that is what is committed and shipped, so
-the console is served at the reverse-proxy root. Mounting it at a subpath is
-possible but requires a rebuild with `VITE_BASE` **and** a recompile, because
-`go:embed` bakes the bundle into the binary:
-
-```bash
-VITE_BASE=/console/ bun run build
-```
-
-`VITE_BASE` prefixes every asset URL, so the proxy must strip the prefix from
-**ALL** requests (not just `/api`) for `/console/assets/...` to arrive as
-`/assets/...`. Nothing in CI or the Taskfile sets it — prefer root mounting.
+The frontend base path is `/console`, defined as a single constant in
+`vite.config.ts`. This is the only place the base is set — the Taskfile build
+tasks (`fe:build`, `fe:ci-build`) run `bun run build` with no environment
+overrides. The server strips the prefix via `--console-prefix` (default
+`/console`); behind a reverse proxy that already strips, pass
+`--console-prefix=""`.
 
 ## Tabs
 

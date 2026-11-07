@@ -196,9 +196,9 @@ Diagnosis instruments: `window.__shellDbg` (byte-pipeline counters) and `window.
 The `AutoTuner` evaluates agents every 30 s: throughput saturation adjusts batch size (4 KiB–1 MiB), p95 latency adjusts concurrency (1–4), and bandwidth level toggles gzip. Decisions are pushed via SSE `event: tune` control frames. Agents apply batch-size and compress changes live; concurrency changes are deferred to next reconnect. The tuner enforces a 2-minute cooldown between decisions per agent.
 
 ### Base Path Prefix
-All route handlers are defined relative to root (`/`). Subpath prefixing and stripping is delegated entirely to the reverse proxy (e.g., Caddy's `handle_path`). The supported layout puts the **admin console at the proxy root** and the tunnel endpoints under a stripped prefix such as `/sse` — see README "Production (Behind a Reverse Proxy)".
+The frontend base path is `/console`, defined as a single constant in `frontend/console/vite.config.ts`. This is the only place the base is set; the Taskfile build tasks (`fe:build`, `fe:ci-build`) run `bun run build` with no environment overrides. All route handlers inside the console server are defined relative to root (`/`).
 
-The console is served at root because `frontend/console/dist/` is built with Vite `base: '/'` and committed, so asset URLs in `index.html` (`/assets/index-<hash>.js`) are root-absolute. Mounting the console at a subpath therefore needs a rebuild with `VITE_BASE=/console/` **and** a recompile, since the bundle is baked in by `go:embed`. `VITE_BASE` is an escape hatch, not the default deployment shape; nothing in CI or the Taskfile sets it.
+The server's `--console-prefix` flag (default `/console`) wraps the console handler with `http.StripPrefix`, so direct access on the console port works without a reverse proxy. Behind a reverse proxy that already strips the prefix, pass `--console-prefix=""` to disable the server-side stripping and let the proxy handle it.
 
 Three invariants depend on this and are enforced by `internal/consoleserver/console_routes_test.go`:
 * `/assets/**` must be registered before the SPA `PathPrefix("/")` catch-all, and the catch-all must be last — otherwise it serves `index.html` where JS or JSON was expected.

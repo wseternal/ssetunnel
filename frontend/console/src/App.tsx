@@ -71,9 +71,10 @@ import {
 import { theme } from './theme/theme';
 import { parseSSEEvents } from './lib/sse';
 
-// API base URL derived from Vite's base config. In dev mode, base is '/' and
-// the Vite proxy forwards /api/* to the backend. In production, set
-// VITE_BASE=/console/ so that the reverse proxy strips the prefix.
+// API base URL derived from Vite's base config (base: '/console' in
+// vite.config.ts). The reverse proxy strips /console so the backend sees
+// root-relative paths. import.meta.env.BASE_URL is '/console/', so stripping
+// the trailing slash gives '/console' — the prefix every fetch needs.
 const api = import.meta.env.BASE_URL.replace(/\/$/, '');
 
 interface Session {

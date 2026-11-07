@@ -137,6 +137,7 @@ func runServer(ctx context.Context, args []string) error {
 	}
 
 	disableAuth := fs.Bool("disable-auth", false, "Disable authentication enforcement")
+	consolePrefix := fs.String("console-prefix", "/console", "URL prefix to strip on the console port (must match the frontend build base; empty = no stripping)")
 	metricsDir := fs.String("metrics-dir", defaultMetricsDir, "Directory for BadgerDB metrics storage (empty = metrics disabled)")
 	metricsRetention := fs.Duration("metrics-retention", 7*24*time.Hour, "How long to retain metrics data (default: 7 days)")
 	metricsFlush := fs.Duration("metrics-flush", 10*time.Second, "Interval for flushing metrics to disk (default: 10s)")
@@ -263,7 +264,15 @@ func runServer(ctx context.Context, args []string) error {
 	}
 
 	if consoleLn != nil {
-		consoleHandler := consoleserver.NewConsoleHandler(ctx, store, srv.Reg, srv.MetricsCollector(), srv)
+		var consoleHandler http.Handler = consoleserver.NewConsoleHandler(ctx, store, srv.Reg, srv.MetricsCollector(), srv)
+		if *consolePrefix != "" {
+			// The committed frontend dist is built with base: '/console' (defined
+			// in vite.config.ts), so every asset URL and fetch path carries the
+			// prefix.  Strip it before routing so direct access on the console
+			// port works without a reverse proxy.  In production behind a reverse
+			// proxy that already strips the prefix, pass --console-prefix="".
+			consoleHandler = http.StripPrefix(*consolePrefix, consoleHandler)
+		}
 		consoleSrv := &http.Server{
 			Handler:      consoleHandler,
 			ReadTimeout:  15 * time.Second,
@@ -277,7 +286,13 @@ func runServer(ctx context.Context, args []string) error {
 			consoleSrv.Shutdown(context.Background())
 		}()
 		go func() {
-			log.Printf("server: admin console http://localhost%s/", *consoleListen)
+			pfx := *consolePrefix
+			if pfx == "" {
+				pfx = "/"
+			} else if !strings.HasSuffix(pfx, "/") {
+				pfx += "/"
+			}
+			log.Printf("server: admin console http://localhost%s%s", *consoleListen, pfx)
 			if err := consoleSrv.Serve(consoleLn); !errors.Is(err, http.ErrServerClosed) {
 				log.Printf("server: console error: %v", err)
 			}
