@@ -125,8 +125,20 @@ ssetunnel connect stop --name my-ssh               # stop the named connection
 ssetunnel connect status --name my-ssh             # check status
 ```
 
+### Testing Policy
+
+These rules apply to all test work in this project. They are derived from the global testing rules and override any conflicting project convention.
+
+* **No frontend tests.** Do not add or run Vitest, Jest, React Testing Library, or any test that mounts components, renders DOM nodes, inspects JSX, or mocks component props. To validate frontend behavior, ask the user for permission first, then use browser-based e2e tests.
+* **No mocks in backend tests.** Never mock databases, network layers, HTTP servers, or internal classes. Backend verification must either test pure non-I/O logic directly or run as an integration test against a real boundary (`httptest.Server`, TestContainers, real `net.Conn`). If a real boundary does not exist, do not write the test.
+* **Default to zero tests.** Do not create or update test files automatically as part of feature implementation. Tests are added only when:
+  - The user explicitly requests them.
+  - A pure, non-I/O algorithmic function needs edge cases proven (parsers, data transformations, math).
+  - A bug fix needs a reproduction test to prevent regression (test-first for bugs).
+* **No snapshot or tautology tests.** Never write `toMatchSnapshot` tests, tests that assert framework behavior, type interfaces, or basic getters/setters.
+* **Test-first for bugs**: When fixing a bug, write a reproduction test that fails before the fix and passes after. The `TestServeRW_ServerClosesReturns` test was written to prove the SSH ProxyCommand deadlock before the fix. This is the one exception to the default-to-zero rule — regression tests for real bugs are always warranted.
+
 ### Key Conventions
-* **Test-first for bugs**: Always write a reproduction test before fixing. The `TestServeRW_ServerClosesReturns` test was written to prove the SSH ProxyCommand deadlock before the fix.
 * **Bidirectional proxy pattern**: Every hop uses two goroutines with `io.CopyBuffer` + `sync.Pool` 32 KiB buffers. When one direction hits EOF, the corresponding connection/stream must be closed to unblock the other direction.
 * **Fail-fast model**: POST failures, stream deaths, and pipe closures are terminal — sessions die and agents reconnect. No partial recovery.
 * **No goroutine leaks**: Every goroutine hangs off a context owned by its conn/session. `Close()` always tears down cleanly.
