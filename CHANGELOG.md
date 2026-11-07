@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.14.0](https://github.com/wseternal/ssetunnel/compare/v1.13.1...v1.14.0) (2026-11-07)
+
+
+### Features
+
+* agent module registry ([#85](https://github.com/wseternal/ssetunnel/issues/85)) ([316b6cb](https://github.com/wseternal/ssetunnel/commit/316b6cb82ebc16b5852479384abddcc15d672026))
+
 ## [Unreleased]
 
 ### Features
