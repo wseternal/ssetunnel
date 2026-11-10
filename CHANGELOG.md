@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.14.1](https://github.com/wseternal/ssetunnel/compare/v1.14.0...v1.14.1) (2026-11-10)
+
+
+### Bug Fixes
+
+* tweaks on sse and console paths ([#92](https://github.com/wseternal/ssetunnel/issues/92)) ([7bb35e2](https://github.com/wseternal/ssetunnel/commit/7bb35e2fbbb33c767f92834ba3b5c8102d3d3c6c))
+
 ## [1.14.0](https://github.com/wseternal/ssetunnel/compare/v1.13.1...v1.14.0) (2026-11-07)
 
 
