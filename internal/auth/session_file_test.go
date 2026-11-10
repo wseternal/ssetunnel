@@ -28,7 +28,7 @@ func TestSaveAndLoadSession(t *testing.T) {
 		t.Fatalf("SaveSession: %v", err)
 	}
 
-	// Load with matching server
+	// Load with matching server (same hostname)
 	token, server, _, _, err := LoadSession("http://server1:8080")
 	if err != nil {
 		t.Fatalf("LoadSession: %v", err)
@@ -51,7 +51,7 @@ func TestLoadSession_NoMatch(t *testing.T) {
 		t.Fatalf("SaveSession: %v", err)
 	}
 
-	// Load with non-matching server
+	// Load with different hostname (not just different port)
 	token, server, _, _, err := LoadSession("http://other:8080")
 	if err != nil {
 		t.Fatalf("LoadSession: %v", err)
@@ -82,6 +82,7 @@ func TestLoadSession_Default(t *testing.T) {
 	if token != "token1" {
 		t.Errorf("token = %q, want %q", token, "token1")
 	}
+	// resolvedServer should be the stored ServerURL, not the hostname key
 	if server != "http://server1:8080" {
 		t.Errorf("server = %q, want %q", server, "http://server1:8080")
 	}
@@ -91,7 +92,7 @@ func TestSaveSession_MultipleServers(t *testing.T) {
 	cleanup := testSessionDir(t)
 	defer cleanup()
 
-	// Save sessions for two servers
+	// Save sessions for two different hosts
 	if err := SaveSession("http://server1:8080", "token1", "user1", "admin", "", time.Time{}); err != nil {
 		t.Fatalf("SaveSession server1: %v", err)
 	}
@@ -110,7 +111,7 @@ func TestSaveSession_MultipleServers(t *testing.T) {
 		t.Errorf("server2: token=%q server=%q", token2, srv2)
 	}
 
-	// List servers
+	// List servers (keys are hostnames)
 	servers, err := SessionServers()
 	if err != nil {
 		t.Fatalf("SessionServers: %v", err)
@@ -163,14 +164,18 @@ func TestSaveSession_Overwrite(t *testing.T) {
 		t.Fatalf("SaveSession: %v", err)
 	}
 
-	// Overwrite same server
-	if err := SaveSession("http://server:8080", "token2", "user1", "admin", "", time.Time{}); err != nil {
+	// Overwrite same host with different path/port
+	if err := SaveSession("https://server/console", "token2", "user1", "admin", "", time.Time{}); err != nil {
 		t.Fatalf("SaveSession overwrite: %v", err)
 	}
 
-	token, _, _, _, _ := LoadSession("http://server:8080")
+	token, server, _, _, _ := LoadSession("http://server:8080")
 	if token != "token2" {
 		t.Errorf("token = %q, want %q after overwrite", token, "token2")
+	}
+	// ServerURL should be the latest saved URL
+	if server != "https://server/console" {
+		t.Errorf("server = %q, want %q", server, "https://server/console")
 	}
 }
 
@@ -228,9 +233,9 @@ func TestUpdateSessionToken_PreservesMetadata(t *testing.T) {
 		t.Fatalf("SaveSession: %v", err)
 	}
 
-	// Update only token and expiry.
+	// Update using a different path on the same host — should find the session
 	newExp := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
-	if err := UpdateSessionToken("http://server:8080", "new-tok", newExp); err != nil {
+	if err := UpdateSessionToken("https://server/sse", "new-tok", newExp); err != nil {
 		t.Fatalf("UpdateSessionToken: %v", err)
 	}
 
@@ -269,5 +274,37 @@ func TestUpdateSessionToken_NoSession(t *testing.T) {
 	err := UpdateSessionToken("http://nonexistent:8080", "tok", time.Now())
 	if err == nil {
 		t.Fatal("expected error for non-existent session")
+	}
+}
+
+func TestSessionKey_HostOnly(t *testing.T) {
+	cleanup := testSessionDir(t)
+	defer cleanup()
+
+	// Save with tunnel URL
+	if err := SaveSession("https://example.com/sse", "tok1", "user", "admin", "https://example.com/console", time.Time{}); err != nil {
+		t.Fatalf("SaveSession: %v", err)
+	}
+
+	// Load with console URL (different path, same host) — should find it
+	token, server, _, _, err := LoadSession("https://example.com/console")
+	if err != nil {
+		t.Fatalf("LoadSession: %v", err)
+	}
+	if token != "tok1" {
+		t.Errorf("token = %q, want %q", token, "tok1")
+	}
+	// ServerURL should be the originally saved URL
+	if server != "https://example.com/sse" {
+		t.Errorf("server = %q, want %q", server, "https://example.com/sse")
+	}
+
+	// Load with a different port on the same host — should still find it
+	token2, _, _, _, err := LoadSession("http://example.com:8080")
+	if err != nil {
+		t.Fatalf("LoadSession different port: %v", err)
+	}
+	if token2 != "tok1" {
+		t.Errorf("token from different port = %q, want %q", token2, "tok1")
 	}
 }
