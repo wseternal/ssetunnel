@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -73,7 +74,38 @@ func loadSessionFile() (sessionFile, error) {
 	if sf.Sessions == nil {
 		sf.Sessions = make(map[string]SessionEntry)
 	}
+	// Migrate legacy full-URL keys to hostname keys. Pre-hostname-normalization
+	// session files store entries keyed by the full server URL (e.g.
+	// "http://server:8080"). Re-key them on load so upgraded users don't
+	// silently lose their sessions.
+	if migrated := migrateSessionKeys(&sf); migrated {
+		_ = saveSessionFile(sf)
+		log.Printf("auth: migrated session keys from URL format to hostname format")
+	}
 	return sf, nil
+}
+
+// migrateSessionKeys re-keys any entry whose key differs from sessionKey(key)
+// (i.e. legacy full-URL keys). Populates ServerURL from the old key when empty.
+// Returns true if any migration occurred.
+func migrateSessionKeys(sf *sessionFile) bool {
+	migrated := false
+	for key, entry := range sf.Sessions {
+		hk := sessionKey(key)
+		if hk == key {
+			continue
+		}
+		if entry.ServerURL == "" {
+			entry.ServerURL = key
+		}
+		// Only migrate if the target key doesn't already exist (avoid clobbering).
+		if _, exists := sf.Sessions[hk]; !exists {
+			sf.Sessions[hk] = entry
+		}
+		delete(sf.Sessions, key)
+		migrated = true
+	}
+	return migrated
 }
 
 // sessionKey extracts the hostname from a URL for session map keying.
@@ -81,6 +113,14 @@ func loadSessionFile() (sessionFile, error) {
 // port, or scheme used to reach it (e.g. /console vs /sse behind a proxy).
 // Falls back to the raw URL if parsing fails.
 func sessionKey(rawURL string) string {
+	if rawURL == "" {
+		return ""
+	}
+	// Handle bare host:port (no scheme) — url.Parse treats the first
+	// segment as the scheme, yielding an empty hostname.
+	if !strings.Contains(rawURL, "://") {
+		rawURL = "http://" + rawURL
+	}
 	u, err := url.Parse(rawURL)
 	if err != nil || u.Hostname() == "" {
 		return rawURL
@@ -110,6 +150,9 @@ func SaveSession(serverURL, token, username, role, consoleURL string, expiresAt 
 	if err != nil {
 		return fmt.Errorf("load session file: %w", err)
 	}
+	// Strip userinfo (passwords) from URLs before persisting.
+	serverURL = stripURLUserinfo(serverURL)
+	consoleURL = stripURLUserinfo(consoleURL)
 	entry := SessionEntry{
 		Token:      token,
 		Username:   username,
@@ -183,11 +226,16 @@ func UpdateSessionToken(serverURL, newToken string, expiresAt time.Time) error {
 	key := sessionKey(serverURL)
 	entry, ok := sf.Sessions[key]
 	if !ok {
-		return fmt.Errorf("no session for %s", serverURL)
+		return fmt.Errorf("no session for %q (key=%q)", serverURL, key)
 	}
 	entry.Token = newToken
 	if !expiresAt.IsZero() {
 		entry.ExpiresAt = expiresAt.Format(time.RFC3339)
+	}
+	// Keep ServerURL current if the caller provides a different URL,
+	// so subsequent agents get the latest tunnel endpoint.
+	if serverURL != entry.ServerURL {
+		entry.ServerURL = serverURL
 	}
 	sf.Sessions[key] = entry
 	return saveSessionFile(sf)
@@ -200,9 +248,27 @@ func SessionServers() ([]string, error) {
 		return nil, err
 	}
 	servers := make([]string, 0, len(sf.Sessions))
-	for srv := range sf.Sessions {
+	for key, entry := range sf.Sessions {
+		srv := entry.ServerURL
+		if srv == "" {
+			srv = key // legacy fallback: key is hostname only
+		}
 		servers = append(servers, srv)
 	}
 	sort.Strings(servers)
 	return servers, nil
+}
+
+// stripURLUserinfo removes userinfo (user:password) from a URL to prevent
+// plaintext credentials from being persisted to the session file.
+func stripURLUserinfo(rawURL string) string {
+	if rawURL == "" {
+		return ""
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil || u.User == nil {
+		return rawURL
+	}
+	u.User = nil
+	return u.String()
 }

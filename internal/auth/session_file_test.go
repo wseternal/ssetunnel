@@ -246,8 +246,9 @@ func TestUpdateSessionToken_PreservesMetadata(t *testing.T) {
 	if token != "new-tok" {
 		t.Errorf("token = %q, want %q", token, "new-tok")
 	}
-	if server != "http://server:8080" {
-		t.Errorf("server = %q", server)
+	// ServerURL should be updated to the caller's URL
+	if server != "https://server/sse" {
+		t.Errorf("server = %q, want %q (updated by UpdateSessionToken)", server, "https://server/sse")
 	}
 	if consoleURL != "http://console:8081" {
 		t.Errorf("consoleURL = %q, want %q (should be preserved)", consoleURL, "http://console:8081")
@@ -306,5 +307,108 @@ func TestSessionKey_HostOnly(t *testing.T) {
 	}
 	if token2 != "tok1" {
 		t.Errorf("token from different port = %q, want %q", token2, "tok1")
+	}
+}
+
+func TestSessionKey_EdgeCases(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"https://example.com/sse", "example.com"},
+		{"http://example.com:8080", "example.com"},
+		{"example.com:8080", "example.com"},          // no scheme
+		{"http://[::1]:8080", "::1"},                 // IPv6
+		{"", ""},                                    // empty
+		{"not-a-url", "not-a-url"},                  // no scheme, no colon — falls through as raw
+	}
+	for _, tt := range tests {
+		got := sessionKey(tt.input)
+		if got != tt.want {
+			t.Errorf("sessionKey(%q) = %q, want %q", tt.input, got, tt.want)
+		}
+	}
+}
+
+func TestLoadSession_LegacyURLKeys(t *testing.T) {
+	cleanup := testSessionDir(t)
+	defer cleanup()
+
+	// Write a session file with old-style full-URL keys (as the prior version would)
+	dir, _ := sessionDir()
+	path := filepath.Join(dir, "session")
+	oldJSON := `{
+		"sessions": {
+			"http://server1:8080": {
+				"token": "old-token",
+				"username": "alice",
+				"role": "admin"
+			}
+		}
+	}`
+	os.WriteFile(path, []byte(oldJSON), 0600)
+
+	// LoadSession should find the entry via hostname keying after migration
+	token, server, _, _, err := LoadSession("http://server1:8080")
+	if err != nil {
+		t.Fatalf("LoadSession: %v", err)
+	}
+	if token != "old-token" {
+		t.Errorf("token = %q, want %q", token, "old-token")
+	}
+	// ServerURL should be populated from the old key
+	if server != "http://server1:8080" {
+		t.Errorf("server = %q, want %q", server, "http://server1:8080")
+	}
+}
+
+func TestSaveSession_StripsUserinfo(t *testing.T) {
+	cleanup := testSessionDir(t)
+	defer cleanup()
+
+	// Save with a URL containing credentials
+	if err := SaveSession("http://admin:secret@server:8080", "tok", "user", "admin", "http://admin:secret@server:8081", time.Time{}); err != nil {
+		t.Fatalf("SaveSession: %v", err)
+	}
+
+	// Read raw file and verify no password
+	path, _ := SessionFilePath()
+	data, _ := os.ReadFile(path)
+	if strings.Contains(string(data), "secret") {
+		t.Errorf("session file contains password: %s", data)
+	}
+
+	// Load and verify URL is usable without credentials
+	_, server, consoleURL, _, err := LoadSession("http://server:8080")
+	if err != nil {
+		t.Fatalf("LoadSession: %v", err)
+	}
+	if strings.Contains(server, "admin") || strings.Contains(server, "secret") {
+		t.Errorf("server URL contains credentials: %q", server)
+	}
+	if strings.Contains(consoleURL, "admin") || strings.Contains(consoleURL, "secret") {
+		t.Errorf("consoleURL contains credentials: %q", consoleURL)
+	}
+}
+
+func TestSessionServers_ReturnsFullURLs(t *testing.T) {
+	cleanup := testSessionDir(t)
+	defer cleanup()
+
+	SaveSession("http://server1:8080", "tok1", "user1", "admin", "", time.Time{})
+	SaveSession("https://server2.com/sse", "tok2", "user2", "viewer", "", time.Time{})
+
+	servers, err := SessionServers()
+	if err != nil {
+		t.Fatalf("SessionServers: %v", err)
+	}
+	if len(servers) != 2 {
+		t.Fatalf("SessionServers: got %d, want 2", len(servers))
+	}
+	// Should return full URLs, not hostnames
+	for _, srv := range servers {
+		if !strings.Contains(srv, "://") {
+			t.Errorf("SessionServers returned hostname %q, want full URL", srv)
+		}
 	}
 }
