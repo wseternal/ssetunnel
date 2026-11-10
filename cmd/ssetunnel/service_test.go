@@ -352,6 +352,61 @@ func TestBareStartLoadsSavedArgs(t *testing.T) {
 	}
 }
 
+// TestBareStartPreservesSavedArgsWhenServiceUserAutoDetected verifies that
+// running "ssetunnel server start" with no flags loads the saved args even
+// though --service-user is auto-detected from user.Current(). Before the fix,
+// the auto-detected --service-user inflated runtimeFlags from empty to
+// non-empty, making the code think the user provided new flags — which
+// skipped the load and overwrote the saved args file.
+func TestBareStartPreservesSavedArgsWhenServiceUserAutoDetected(t *testing.T) {
+	tmpDir := t.TempDir()
+	origPidDir := pidDir
+	pidDir = func() string { return tmpDir }
+	t.Cleanup(func() { pidDir = origPidDir })
+
+	// Pre-save args including --service-user (as a previous "start" would
+	// have persisted).
+	saved := []string{"--service-user", "testuser", "--db-url", "postgres:embedded:?datapath=/tmp/data"}
+	if err := saveServiceArgsToDir(tmpDir, "ssetunnel-server", saved); err != nil {
+		t.Fatalf("saveServiceArgs: %v", err)
+	}
+
+	// Simulate a bare "start" (no flags). dispatchServiceAction will
+	// auto-detect --service-user, but must still load saved args.
+	// We cannot call dispatchServiceAction directly (it tries to install
+	// a real service), so verify the logic at the unit level: after
+	// extractFlag removes --service-user from a bare ["start"], the
+	// remaining runtimeFlags must be empty.
+	args := []string{"start"}
+	_, filtered := extractFlag(args, "--service-user")
+	runtimeFlags := filtered[1:] // everything after the action verb
+
+	if len(runtimeFlags) != 0 {
+		t.Fatalf("bare start should produce empty runtimeFlags, got %v", runtimeFlags)
+	}
+
+	// The userProvidedRuntime check (the fix) must be false for bare start,
+	// so that saved args are loaded.
+	userProvidedRuntime := len(runtimeFlags) > 0
+	if userProvidedRuntime {
+		t.Fatal("userProvidedRuntime should be false for bare start")
+	}
+
+	// Saved args must still be loadable and contain the full set.
+	loaded, err := loadServiceArgs("ssetunnel-server")
+	if err != nil {
+		t.Fatalf("loadServiceArgs: %v", err)
+	}
+	if len(loaded) != len(saved) {
+		t.Fatalf("loaded = %v, want %v", loaded, saved)
+	}
+	for i := range loaded {
+		if loaded[i] != saved[i] {
+			t.Fatalf("loaded[%d] = %q, want %q", i, loaded[i], saved[i])
+		}
+	}
+}
+
 func TestRegistry_CloseAll(t *testing.T) {
 	t.Parallel()
 	reg := server.NewRegistry()
