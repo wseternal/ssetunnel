@@ -142,6 +142,12 @@ func dispatchServiceAction(subcommand string, args []string) (handled bool, err 
 	// --service-user which was already extracted above.
 	runtimeFlags := filteredArgs[1:]
 
+	// Capture whether the user actually provided runtime flags on the
+	// command line, before --service-user auto-detection (line below)
+	// inflates the slice. An auto-detected service user is not a "new
+	// flag" — a bare "start" with no flags should still load saved args.
+	userProvidedRuntime := len(runtimeFlags) > 0
+
 	// --service-user affects the service definition (UserName), not the
 	// runtime. Include it in the persisted flags so a subsequent bare
 	// "start" can reconstruct the full configuration.
@@ -170,7 +176,7 @@ func dispatchServiceAction(subcommand string, args []string) (handled bool, err 
 	if connectName != "" {
 		svcName = "ssetunnel-connect-" + connectName
 	}
-	if action == "start" && len(runtimeFlags) == 0 {
+	if action == "start" && !userProvidedRuntime {
 		if saved, loadErr := loadServiceArgs(svcName); loadErr == nil && len(saved) > 0 {
 			runtimeFlags = saved
 			fmt.Println("Using saved service args: " + strings.Join(saved, " "))
@@ -227,7 +233,7 @@ func dispatchServiceAction(subcommand string, args []string) (handled bool, err 
 		// /sse" and re-writing it on every start. It is stripped here rather
 		// than where runtimeFlags are read because buildRunFn hands that same
 		// slice to runServer, and the deprecation warning has to fire there.
-		if len(runtimeFlags) > 0 {
+		if userProvidedRuntime {
 			if prev, _ := loadServiceArgs(svcConfig.Name); len(prev) > 0 {
 				fmt.Println("NOTE: new flags replace previously saved flags.")
 			}
