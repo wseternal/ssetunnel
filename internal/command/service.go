@@ -25,9 +25,6 @@ var ServiceActions = map[string]bool{
 	"uninstall": true,
 }
 
-// serviceActions is a package-level alias for ServiceActions.
-var serviceActions = ServiceActions
-
 // serviceProgram implements service.Interface, wrapping either runServer
 // or runAgent as a managed OS service.  The run function is launched via
 // a conc.WaitGroup for panic-safe structured concurrency.
@@ -90,7 +87,7 @@ func (p *serviceProgram) doStop() error {
 // handled=true.  If args is empty or args[0] is not a verb, it returns
 // handled=false and the caller falls through to the legacy direct-run path.
 func DispatchServiceAction(subcommand string, args []string) (handled bool, err error) {
-	if len(args) == 0 || !serviceActions[args[0]] {
+	if len(args) == 0 || !ServiceActions[args[0]] {
 		return false, nil
 	}
 	action := args[0]

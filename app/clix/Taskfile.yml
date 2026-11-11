@@ -1,0 +1,16 @@
+version: '3'
+
+tasks:
+  build:frontend:
+    dir: ../../frontend/client
+    cmds:
+      - bun run build
+
+  generate:bindings:
+    cmds:
+      - GOWORK=off wails3 generate bindings -clean=true
+
+  dev:frontend:
+    dir: ../../frontend/client
+    cmds:
+      - bun run dev --port 3001

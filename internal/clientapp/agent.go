@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sync"
 
 	"github.com/wseternal/ssetunnel/internal/agent"
 	"github.com/wseternal/ssetunnel/internal/auth"
@@ -47,37 +48,53 @@ func RunAgent(ctx context.Context, cfg AgentConfig) error {
 	}
 
 	// Build request modifier for session-based auth.
+	// A mutex guards the token string so the refresh callback and
+	// the agent's HTTP sender goroutines never read/write it concurrently.
 	var reqMod func(*http.Request)
-	var tokenPtr *string
+	var tokenMu sync.RWMutex
+	tokenVal := sess.Token
 	if sess.Token != "" {
-		tokenPtr = &sess.Token
 		reqMod = func(req *http.Request) {
-			req.Header.Set("Authorization", "Bearer "+*tokenPtr)
+			tokenMu.RLock()
+			t := tokenVal
+			tokenMu.RUnlock()
+			req.Header.Set("Authorization", "Bearer "+t)
 		}
 	}
 
 	// Build mid-lifecycle token refresh callback.
 	var refreshFn func() (string, error)
-	if tokenPtr != nil && sess.ConsoleURL != "" {
+	if sess.Token != "" && sess.ConsoleURL != "" {
 		serverKey := sess.URL
 		cURL := sess.ConsoleURL
 		refreshFn = func() (string, error) {
 			_, _, _, expiresAt, loadErr := auth.LoadSession(serverKey)
 			if loadErr != nil {
 				log.Printf("agent: warning: cannot read session file: %v", loadErr)
-				return *tokenPtr, nil
+				tokenMu.RLock()
+				t := tokenVal
+				tokenMu.RUnlock()
+				return t, nil
 			}
 			if !auth.NeedsRefresh(expiresAt) {
-				return *tokenPtr, nil
+				tokenMu.RLock()
+				t := tokenVal
+				tokenMu.RUnlock()
+				return t, nil
 			}
-			newTok, newExp, err := auth.RefreshSession(cURL, *tokenPtr)
+			tokenMu.RLock()
+			currentTok := tokenVal
+			tokenMu.RUnlock()
+			newTok, newExp, err := auth.RefreshSession(cURL, currentTok)
 			if err != nil {
 				return "", err
 			}
 			if saveErr := auth.UpdateSessionToken(serverKey, newTok, newExp); saveErr != nil {
 				log.Printf("agent: warning: failed to save refreshed session: %v", saveErr)
 			}
-			*tokenPtr = newTok
+			tokenMu.Lock()
+			tokenVal = newTok
+			tokenMu.Unlock()
 			return newTok, nil
 		}
 	}

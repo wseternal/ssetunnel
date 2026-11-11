@@ -40,9 +40,8 @@ type ConnectInstance struct {
 // Close cancels the connect session and waits for cleanup.
 func (ci *ConnectInstance) Close() error {
 	ci.cancel()
-	if ci.listener != nil {
-		ci.listener.Close()
-	}
+	// Listener is closed by ServeListener when the context is cancelled;
+	// closing it here would race with ServeListener's own cleanup.
 	<-ci.done
 	ci.mu.Lock()
 	defer ci.mu.Unlock()
@@ -120,6 +119,7 @@ func StartNamedConnect(ctx context.Context, name string, cfg ConnectConfig) (*Co
 		defer close(inst.done)
 		sess, sessErr := ResolveSession(cfg.ServerURL, "connect")
 		if sessErr != nil {
+			ln.Close()
 			inst.mu.Lock()
 			inst.err = sessErr
 			inst.mu.Unlock()

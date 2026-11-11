@@ -241,6 +241,48 @@ func UpdateSessionToken(serverURL, newToken string, expiresAt time.Time) error {
 	return saveSessionFile(sf)
 }
 
+// LoadSessionEntry reads the full session entry for the given server URL.
+// Returns nil when no matching entry exists.
+func LoadSessionEntry(serverURL string) (*SessionEntry, error) {
+	sf, err := loadSessionFile()
+	if err != nil {
+		return nil, err
+	}
+	if serverURL != "" {
+		key := sessionKey(serverURL)
+		if entry, ok := sf.Sessions[key]; ok {
+			return &entry, nil
+		}
+		return nil, nil
+	}
+	// No server specified — return first entry (sorted for determinism).
+	keys := make([]string, 0, len(sf.Sessions))
+	for srv := range sf.Sessions {
+		keys = append(keys, srv)
+	}
+	sort.Strings(keys)
+	if len(keys) > 0 {
+		entry := sf.Sessions[keys[0]]
+		return &entry, nil
+	}
+	return nil, nil
+}
+
+// DeleteSession removes the session entry for the given server URL.
+// If serverURL is empty, deletes all entries (full logout).
+func DeleteSession(serverURL string) error {
+	sf, err := loadSessionFile()
+	if err != nil {
+		return err
+	}
+	if serverURL != "" {
+		delete(sf.Sessions, sessionKey(serverURL))
+	} else {
+		sf.Sessions = make(map[string]SessionEntry)
+	}
+	return saveSessionFile(sf)
+}
+
 // SessionServers returns the list of server URLs with stored sessions.
 func SessionServers() ([]string, error) {
 	sf, err := loadSessionFile()

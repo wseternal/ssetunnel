@@ -26,6 +26,8 @@ type SessionInfo struct {
 	Token      string
 	ConsoleURL string
 	ExpiresAt  time.Time
+	Username   string
+	Role       string
 }
 
 // ResolveSession resolves the server URL and session token.
@@ -89,11 +91,20 @@ func ResolveSession(serverURL, prefix string) (*SessionInfo, error) {
 		}
 	}
 
+	// Load username and role from the session entry.
+	var username, role string
+	if entry, entryErr := auth.LoadSessionEntry(serverURL); entryErr == nil && entry != nil {
+		username = entry.Username
+		role = entry.Role
+	}
+
 	return &SessionInfo{
 		URL:        url,
 		Token:      token,
 		ConsoleURL: consoleURL,
 		ExpiresAt:  expiresAt,
+		Username:   username,
+		Role:       role,
 	}, nil
 }
 

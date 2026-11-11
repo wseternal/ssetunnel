@@ -64,6 +64,7 @@ commands:
             service actions: run, start, stop, restart, status, uninstall
   probe     measure a server's POST path (body cap, throttling)
   module    manage agent modules (install, start, stop, restart, status, remove, list)
+  ui        serve the client UI on a secured loopback URL
   version   print the build version and git revision
 `
 
@@ -269,6 +270,9 @@ func RunServer(ctx context.Context, args []string) error {
 		// Force-close all active agent sessions before draining HTTP.
 		srv.CloseShellSessions()
 		srv.Reg.CloseAll()
+		if pool != nil {
+			pool.Close()
+		}
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		httpSrv.Shutdown(shutdownCtx)
@@ -343,105 +347,6 @@ func RunConnect(ctx context.Context, args []string) error {
 		Local:     *local,
 		BatchSize: *batchSize,
 	})
-}
-
-const (
-	minBatchSize = 1024
-	maxBatchSize = 1 << 20
-	minConc      = 1
-	maxConc      = 4
-)
-
-// resolveServerURL resolves the server URL and session token.
-// If serverFlag is set, uses it and loads the matching token.
-// If serverFlag is empty, loads the first saved session.
-// Proactively refreshes the token if it is near expiration.
-// Returns error if no server URL can be resolved.
-func ResolveServerURL(serverFlag, prefix string) (url, token, consoleURL string, err error) {
-	// Trim trailing slash for consistent URL handling.
-	serverFlag = strings.TrimRight(serverFlag, "/")
-	token, resolvedServer, consoleURL, expiresAt, sessErr := auth.LoadSession(serverFlag)
-
-	url = serverFlag
-	if url == "" {
-		if sessErr != nil {
-			return "", "", "", fmt.Errorf("--server is required (failed to load saved session: %w); run `ssetunnel login` first", sessErr)
-		}
-		if resolvedServer != "" {
-			url = resolvedServer
-			log.Printf("%s: using saved session for %s", prefix, url)
-		} else {
-			return "", "", "", fmt.Errorf("--server is required (no saved session found; run `ssetunnel login` first)")
-		}
-	} else {
-		if sessErr != nil {
-			log.Printf("%s: warning: failed to load session for %s: %v (proceeding without saved token)", prefix, url, sessErr)
-		} else if token != "" {
-			log.Printf("%s: using saved session for %s", prefix, url)
-		}
-	}
-
-	// Warn about old-format sessions that lack refresh metadata.
-	if token != "" && consoleURL == "" && expiresAt.IsZero() {
-		log.Printf("%s: session lacks refresh metadata (old format); token may expire without warning — re-run `ssetunnel login` to upgrade", prefix)
-	}
-
-	// Proactive token refresh when approaching expiration.
-	if token != "" && consoleURL != "" && auth.NeedsRefresh(expiresAt) {
-		remaining := time.Until(expiresAt)
-		if remaining < 0 {
-			log.Printf("%s: session expired, attempting refresh...", prefix)
-		} else {
-			log.Printf("%s: session expires in %s, refreshing...", prefix, remaining.Round(time.Hour))
-		}
-		newToken, newExpiresAt, refreshErr := auth.RefreshSession(consoleURL, token)
-		if refreshErr != nil {
-			// Another process may have refreshed already — re-read from disk.
-			if tok2, _, _, exp2, loadErr := auth.LoadSession(serverFlag); loadErr == nil && tok2 != "" && tok2 != token && !auth.NeedsRefresh(exp2) {
-				token = tok2
-				log.Printf("%s: token was refreshed by another process", prefix)
-			} else if remaining < 0 {
-				return "", "", "", fmt.Errorf("session expired and refresh failed: %w; run `ssetunnel login` to re-authenticate", refreshErr)
-			} else {
-				log.Printf("%s: warning: token refresh failed: %v (continuing with current token)", prefix, refreshErr)
-			}
-		} else {
-			log.Printf("%s: session token refreshed (expires %s)", prefix, newExpiresAt.Format("2006-01-02"))
-			// Update only token + expiry, preserving username/role/consoleURL.
-			if saveErr := auth.UpdateSessionToken(url, newToken, newExpiresAt); saveErr != nil {
-				log.Printf("%s: warning: failed to save refreshed session: %v", prefix, saveErr)
-			}
-			token = newToken
-		}
-	}
-
-	return url, token, consoleURL, nil
-}
-
-// DeriveTunnelURL maps a console URL on the default port 8081 to the tunnel
-// URL on 8080. Returns false when the port swap is not the whole mapping.
-func DeriveTunnelURL(consoleURL string) (string, bool) {
-	return clientapp.DeriveTunnelURL(consoleURL)
-}
-
-func ClampAgentFlags(batchSize, concurrency int) (int, int) {
-	if batchSize < minBatchSize {
-		log.Printf("agent: --batch-size %d below minimum, clamped to %d", batchSize, minBatchSize)
-		batchSize = minBatchSize
-	}
-	if batchSize > maxBatchSize {
-		log.Printf("agent: --batch-size %d above maximum, clamped to %d", batchSize, maxBatchSize)
-		batchSize = maxBatchSize
-	}
-	if concurrency < minConc {
-		log.Printf("agent: --concurrency %d below minimum, clamped to %d", concurrency, minConc)
-		concurrency = minConc
-	}
-	if concurrency > maxConc {
-		log.Printf("agent: --concurrency %d above maximum, clamped to %d", concurrency, maxConc)
-		concurrency = maxConc
-	}
-	return batchSize, concurrency
 }
 
 // IsEmbeddedPostgres reports whether dbURL refers to an embedded or
@@ -532,6 +437,6 @@ func RunLogin(_ context.Context, args []string) error {
 	}
 
 	fmt.Printf("Login successful! Session saved for %s (role: %s) at %s\n", result.Username, result.Role, result.TunnelURL)
-	fmt.Println("You can now run 'ssetunnel agent' or 'ssetunnel connect' without --server.")
+	fmt.Println("You can now run 'agent' or 'connect' without --server.")
 	return nil
 }

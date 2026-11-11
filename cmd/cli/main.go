@@ -63,6 +63,8 @@ func main() {
 	case "version":
 		fmt.Println(command.BuildVersion())
 		return
+	case "ui":
+		err = command.RunUI(ctx, os.Args[2:])
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command %q\n%s", os.Args[1], command.CLIUsage)
 		os.Exit(2)

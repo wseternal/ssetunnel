@@ -432,8 +432,8 @@ func TestRegistry_CloseAll(t *testing.T) {
 
 func TestUninstallIsServiceAction(t *testing.T) {
 	t.Parallel()
-	if !serviceActions["uninstall"] {
-		t.Fatal("\"uninstall\" not in serviceActions map")
+	if !ServiceActions["uninstall"] {
+		t.Fatal("\"uninstall\" not in ServiceActions map")
 	}
 }
 
