@@ -37,6 +37,11 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libx11-dev libxtst-dev libpng-dev
 
+      - name: Build frontends
+        run: |
+          cd frontend/console && bun install --frozen-lockfile && bun run build && cd ../..
+          cd frontend/client && bun install --frozen-lockfile && bun run build && cd ../..
+
       - name: Build release binaries
         shell: bash
         env:
@@ -62,7 +67,7 @@ jobs:
           merge-multiple: true
 
       - name: Generate checksums
-        run: cd dist && sha256sum ssetunnel-* > checksums.txt
+        run: cd dist && sha256sum ssetunnel-* server-* cli-* > checksums.txt
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
