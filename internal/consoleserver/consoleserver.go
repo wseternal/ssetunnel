@@ -14,7 +14,7 @@ import (
 
 	"github.com/gorilla/mux"
 	"github.com/visdomtech/orcacommon/litespaserver"
-	"github.com/wseternal/ssetunnel/frontend"
+	"github.com/wseternal/ssetunnel/frontend/console"
 	"github.com/wseternal/ssetunnel/internal/auth"
 	"github.com/wseternal/ssetunnel/internal/consoleapi"
 	"github.com/wseternal/ssetunnel/internal/metrics"
@@ -150,7 +150,7 @@ func serveConsoleAsset(w http.ResponseWriter, req *http.Request) {
 		http.NotFound(w, req)
 		return
 	}
-	info, err := fs.Stat(frontend.ConsoleWebRootFs, name)
+	info, err := fs.Stat(console.ConsoleWebRootFs, name)
 	if err != nil {
 		// err.Error() embeds the request path verbatim, so it must be quoted:
 		// an unescaped newline or escape sequence in the URL would otherwise
@@ -193,7 +193,7 @@ func serveConsoleAsset(w http.ResponseWriter, req *http.Request) {
 	// embed.FS reports a zero ModTime, which leaves ServeFileFS unable to emit
 	// Last-Modified and makes 304 impossible without an explicit ETag.
 	w.Header().Set("ETag", strconv.Quote(path.Base(name)))
-	http.ServeFileFS(w, req, frontend.ConsoleWebRootFs, name)
+	http.ServeFileFS(w, req, console.ConsoleWebRootFs, name)
 }
 
 // NewConsoleHandler builds an HTTP handler combining the JSON management API
@@ -274,7 +274,7 @@ func NewConsoleHandler(ctx context.Context, store *auth.Store, reg *server.Regis
 	// registered before this line, otherwise they will silently serve
 	// index.html.
 	spaCfg := litespaserver.Config{
-		EmbeddedContent: frontend.ConsoleWebRootFs,
+		EmbeddedContent: console.ConsoleWebRootFs,
 		// StaticPaths is deliberately unset: /assets/** is served by the
 		// dedicated handler above so hashed files can be cached immutably, and
 		// litespaserver would force no-store on them.
@@ -294,7 +294,7 @@ func NewConsoleHandler(ctx context.Context, store *auth.Store, reg *server.Regis
 	// asset and an API call answered with HTML — both come from the embedded
 	// bundle's build-time base disagreeing with the prefix the reverse proxy
 	// actually strips. This is the line to compare against the proxy config.
-	if _, err := fs.Stat(frontend.ConsoleWebRootFs, "index.html"); err != nil {
+	if _, err := fs.Stat(console.ConsoleWebRootFs, "index.html"); err != nil {
 		// Without index.html litespaserver disables embedded mode and answers a
 		// 200 error page instead of the SPA, so the console is silently dead
 		// until someone reads this. It cannot happen from a normal build —

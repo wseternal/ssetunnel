@@ -15,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/wseternal/ssetunnel/frontend"
+	"github.com/wseternal/ssetunnel/frontend/console"
 	"github.com/wseternal/ssetunnel/internal/consoleserver"
 	"github.com/wseternal/ssetunnel/internal/server"
 )
@@ -25,7 +25,7 @@ import (
 func firstAssetJS(t *testing.T) string {
 	t.Helper()
 	var found string
-	err := fs.WalkDir(frontend.ConsoleWebRootFs, "assets", func(p string, d fs.DirEntry, err error) error {
+	err := fs.WalkDir(console.ConsoleWebRootFs, "assets", func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}

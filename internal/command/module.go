@@ -1,4 +1,4 @@
-package main
+package command
 
 import (
 	"flag"
@@ -11,7 +11,8 @@ import (
 	"github.com/wseternal/ssetunnel/internal/agentmod"
 )
 
-const moduleUsage = `usage: ssetunnel module <subcommand> [flags]
+// ModuleUsage is the help text for the module subcommand.
+const ModuleUsage = `usage: ssetunnel module <subcommand> [flags]
 
 subcommands:
   install    install a module package
@@ -23,8 +24,8 @@ subcommands:
   list       list all installed modules
 `
 
-// agentDataDir returns the default agent data directory.
-func agentDataDir() (string, error) {
+// AgentDataDir returns the default agent data directory.
+func AgentDataDir() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("get home directory: %w", err)
@@ -34,16 +35,16 @@ func agentDataDir() (string, error) {
 
 // getRegistry creates or loads the module registry from the default data directory.
 func getRegistry() (*agentmod.Registry, error) {
-	dataDir, err := agentDataDir()
+	dataDir, err := AgentDataDir()
 	if err != nil {
 		return nil, err
 	}
 	return agentmod.NewRegistry(dataDir)
 }
 
-func runModule(args []string) error {
+func RunModule(args []string) error {
 	if len(args) == 0 {
-		fmt.Fprint(os.Stderr, moduleUsage)
+		fmt.Fprint(os.Stderr, ModuleUsage)
 		return fmt.Errorf("no subcommand specified")
 	}
 
@@ -66,7 +67,7 @@ func runModule(args []string) error {
 	case "list":
 		return moduleList(subargs)
 	default:
-		fmt.Fprintf(os.Stderr, "unknown module subcommand %q\n%s", subcmd, moduleUsage)
+		fmt.Fprintf(os.Stderr, "unknown module subcommand %q\n%s", subcmd, ModuleUsage)
 		return fmt.Errorf("unknown subcommand: %s", subcmd)
 	}
 }

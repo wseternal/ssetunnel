@@ -1,4 +1,4 @@
-package main
+package command
 
 import (
 	"context"
@@ -55,7 +55,7 @@ func TestRunServer_AddressAlreadyBound(t *testing.T) {
 				}
 			}
 
-			err = runServer(ctx, args)
+			err = RunServer(ctx, args)
 			if err == nil {
 				t.Fatal("expected error when address is already bound, got nil")
 			}
@@ -87,9 +87,9 @@ func TestClampAgentFlags(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			gotBatch, gotConc := clampAgentFlags(tt.batchSize, tt.concurrency)
+			gotBatch, gotConc := ClampAgentFlags(tt.batchSize, tt.concurrency)
 			if gotBatch != tt.wantBatchSize || gotConc != tt.wantConcurrency {
-				t.Fatalf("clampAgentFlags(%d, %d) = (%d, %d), want (%d, %d)",
+				t.Fatalf("ClampAgentFlags(%d, %d) = (%d, %d), want (%d, %d)",
 					tt.batchSize, tt.concurrency, gotBatch, gotConc, tt.wantBatchSize, tt.wantConcurrency)
 			}
 		})
@@ -135,12 +135,12 @@ func TestDeriveTunnelURL(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got, derived := deriveTunnelURL(tt.input)
+			got, derived := DeriveTunnelURL(tt.input)
 			if got != tt.expect {
-				t.Errorf("deriveTunnelURL(%q) = %q, want %q", tt.input, got, tt.expect)
+				t.Errorf("DeriveTunnelURL(%q) = %q, want %q", tt.input, got, tt.expect)
 			}
 			if derived != tt.expectFound {
-				t.Errorf("deriveTunnelURL(%q) derived = %v, want %v", tt.input, derived, tt.expectFound)
+				t.Errorf("DeriveTunnelURL(%q) derived = %v, want %v", tt.input, derived, tt.expectFound)
 			}
 		})
 	}
@@ -161,8 +161,8 @@ func TestIsEmbeddedPostgres(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.dbURL, func(t *testing.T) {
 			t.Parallel()
-			if got := isEmbeddedPostgres(tt.dbURL); got != tt.want {
-				t.Errorf("isEmbeddedPostgres(%q) = %v, want %v", tt.dbURL, got, tt.want)
+			if got := IsEmbeddedPostgres(tt.dbURL); got != tt.want {
+				t.Errorf("IsEmbeddedPostgres(%q) = %v, want %v", tt.dbURL, got, tt.want)
 			}
 		})
 	}
@@ -180,7 +180,7 @@ func TestResolveServerURL_NoFlag_NoSession(t *testing.T) {
 	cleanup := testHomeDir(t)
 	defer cleanup()
 
-	_, _, _, err := resolveServerURL("", "test")
+	_, _, _, err := ResolveServerURL("", "test")
 	if err == nil {
 		t.Fatal("expected error when no flag and no session, got nil")
 	}
@@ -197,9 +197,9 @@ func TestResolveServerURL_NoFlag_WithSession(t *testing.T) {
 		t.Fatalf("SaveSession: %v", err)
 	}
 
-	url, token, _, err := resolveServerURL("", "test")
+	url, token, _, err := ResolveServerURL("", "test")
 	if err != nil {
-		t.Fatalf("resolveServerURL: %v", err)
+		t.Fatalf("ResolveServerURL: %v", err)
 	}
 	if url != "http://saved:8080" {
 		t.Errorf("url = %q, want %q", url, "http://saved:8080")
@@ -241,9 +241,9 @@ func TestResolveServerURL_RefreshSuccess(t *testing.T) {
 		t.Fatalf("SaveSession: %v", err)
 	}
 
-	url, token, _, err := resolveServerURL("", "test")
+	url, token, _, err := ResolveServerURL("", "test")
 	if err != nil {
-		t.Fatalf("resolveServerURL: %v", err)
+		t.Fatalf("ResolveServerURL: %v", err)
 	}
 	if url != "http://tunnel:8080" {
 		t.Errorf("url = %q, want %q", url, "http://tunnel:8080")
@@ -272,7 +272,7 @@ func TestResolveServerURL_RefreshExpiredFails(t *testing.T) {
 		t.Fatalf("SaveSession: %v", err)
 	}
 
-	_, _, _, err := resolveServerURL("", "test")
+	_, _, _, err := ResolveServerURL("", "test")
 	if err == nil {
 		t.Fatal("expected error for expired session with failed refresh, got nil")
 	}
@@ -292,9 +292,9 @@ func TestResolveServerURL_Flag_WithSession(t *testing.T) {
 		t.Fatalf("SaveSession: %v", err)
 	}
 
-	url, token, _, err := resolveServerURL("http://flag:8080", "test")
+	url, token, _, err := ResolveServerURL("http://flag:8080", "test")
 	if err != nil {
-		t.Fatalf("resolveServerURL: %v", err)
+		t.Fatalf("ResolveServerURL: %v", err)
 	}
 	if url != "http://flag:8080" {
 		t.Errorf("url = %q, want %q", url, "http://flag:8080")
@@ -308,9 +308,9 @@ func TestResolveServerURL_Flag_NoSession(t *testing.T) {
 	cleanup := testHomeDir(t)
 	defer cleanup()
 
-	url, token, _, err := resolveServerURL("http://explicit:8080", "test")
+	url, token, _, err := ResolveServerURL("http://explicit:8080", "test")
 	if err != nil {
-		t.Fatalf("resolveServerURL: %v", err)
+		t.Fatalf("ResolveServerURL: %v", err)
 	}
 	if url != "http://explicit:8080" {
 		t.Errorf("url = %q, want %q", url, "http://explicit:8080")
@@ -328,9 +328,9 @@ func TestResolveServerURL_TrailingSlash(t *testing.T) {
 		t.Fatalf("SaveSession: %v", err)
 	}
 
-	url, token, _, err := resolveServerURL("http://host:8080/", "test")
+	url, token, _, err := ResolveServerURL("http://host:8080/", "test")
 	if err != nil {
-		t.Fatalf("resolveServerURL: %v", err)
+		t.Fatalf("ResolveServerURL: %v", err)
 	}
 	if url != "http://host:8080" {
 		t.Errorf("url = %q, want %q (trailing slash not trimmed)", url, "http://host:8080")
