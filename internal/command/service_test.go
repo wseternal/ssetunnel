@@ -25,7 +25,7 @@ func TestDispatchServiceAction_NonActionVerb(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			handled, err := DispatchServiceAction("server", tt.args)
+			handled, err := DispatchServiceAction("server", tt.args, nil)
 			if handled {
 				t.Fatalf("DispatchServiceAction(%q) = handled=true, want false", tt.args)
 			}
@@ -506,7 +506,7 @@ func TestStripFlag(t *testing.T) {
 
 func TestConnectServiceRequiresName(t *testing.T) {
 	t.Parallel()
-	handled, err := DispatchServiceAction("connect", []string{"start", "--agent", "mybox", "--local", "127.0.0.1:2222"})
+	handled, err := DispatchServiceAction("connect", []string{"start", "--agent", "mybox", "--local", "127.0.0.1:2222"}, nil)
 	if !handled {
 		t.Fatal("expected handled=true for connect start")
 	}
@@ -520,7 +520,7 @@ func TestConnectServiceRequiresName(t *testing.T) {
 
 func TestConnectServiceRejectsStdio(t *testing.T) {
 	t.Parallel()
-	handled, err := DispatchServiceAction("connect", []string{"start", "--name", "test-stdio", "--local", "-"})
+	handled, err := DispatchServiceAction("connect", []string{"start", "--name", "test-stdio", "--local", "-"}, nil)
 	if !handled {
 		t.Fatal("expected handled=true")
 	}
@@ -534,7 +534,7 @@ func TestConnectServiceRejectsStdio(t *testing.T) {
 
 func TestConnectServiceRejectsReload(t *testing.T) {
 	t.Parallel()
-	handled, err := DispatchServiceAction("connect", []string{"reload", "--name", "test-reload"})
+	handled, err := DispatchServiceAction("connect", []string{"reload", "--name", "test-reload"}, nil)
 	if !handled {
 		t.Fatal("expected handled=true")
 	}
@@ -560,22 +560,10 @@ func TestBuildServiceArgsConnect(t *testing.T) {
 	}
 }
 
-func TestBuildRunFnIncludesConnect(t *testing.T) {
-	t.Parallel()
-	fn := BuildRunFn("connect", []string{"--agent", "devbox", "--local", "127.0.0.1:2222"})
-	if fn == nil {
-		t.Fatal("BuildRunFn(connect) returned nil")
-	}
-	// Verify it's not the unsupported-subcommand error function by
-	// checking it doesn't return the "unsupported" error message.
-	// We can't actually call it (needs a real server), but we verify
-	// the function was constructed for connect.
-}
-
 func TestConnectServiceNameRequiresValue(t *testing.T) {
 	t.Parallel()
 	// --name flag present but with no value (end of args)
-	handled, err := DispatchServiceAction("connect", []string{"start", "--name"})
+	handled, err := DispatchServiceAction("connect", []string{"start", "--name"}, nil)
 	if !handled {
 		t.Fatal("expected handled=true")
 	}

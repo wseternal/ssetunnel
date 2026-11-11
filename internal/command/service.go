@@ -82,11 +82,21 @@ func (p *serviceProgram) doStop() error {
 	}
 }
 
+// RunFnBuilder constructs a run closure for the given subcommand and
+// runtime flags. Each binary provides its own builder to wire the
+// appropriate run functions (server, agent, connect, etc.).
+type RunFnBuilder func(subcommand string, args []string) func(context.Context) error
+
 // DispatchServiceAction checks whether args[0] is a service action verb.
 // If so, it builds a service.Service, executes the action, and returns
 // handled=true.  If args is empty or args[0] is not a verb, it returns
 // handled=false and the caller falls through to the legacy direct-run path.
-func DispatchServiceAction(subcommand string, args []string) (handled bool, err error) {
+// The runFnBuilder constructs the run function for the given subcommand;
+// pass nil to use a default that returns an "unsupported subcommand" error.
+func DispatchServiceAction(subcommand string, args []string, runFnBuilder RunFnBuilder) (handled bool, err error) {
+	if runFnBuilder == nil {
+		runFnBuilder = defaultRunFnBuilder
+	}
 	if len(args) == 0 || !ServiceActions[args[0]] {
 		return false, nil
 	}
@@ -198,7 +208,7 @@ func DispatchServiceAction(subcommand string, args []string) (handled bool, err 
 
 	prg := &serviceProgram{
 		name:  svcConfig.Name,
-		runFn: BuildRunFn(subcommand, runtimeFlags),
+		runFn: runFnBuilder(subcommand, runtimeFlags),
 	}
 
 	svc, err := service.New(prg, svcConfig)
@@ -294,25 +304,6 @@ func DispatchServiceAction(subcommand string, args []string) (handled bool, err 
 	return false, nil
 }
 
-// buildRunFn returns a closure that calls runServer or runAgent with the
-// action verb already stripped from args.  --service-user is filtered out
-// because it is a service-installer flag, not a runtime flag.
-func BuildRunFn(subcommand string, args []string) func(context.Context) error {
-	filtered := StripFlag(args, "--service-user")
-	switch subcommand {
-	case "server":
-		return func(ctx context.Context) error { return RunServer(ctx, filtered) }
-	case "agent":
-		return func(ctx context.Context) error { return RunAgent(ctx, filtered) }
-	case "connect":
-		return func(ctx context.Context) error { return RunConnect(ctx, filtered) }
-	default:
-		return func(context.Context) error {
-			return fmt.Errorf("unsupported subcommand for service: %s", subcommand)
-		}
-	}
-}
-
 // buildServiceArgs constructs the Arguments slice for service.Config.
 // The OS service manager invokes: binary <Arguments...>.
 // We replace the action verb with "run" and preserve all remaining flags.
@@ -328,7 +319,19 @@ func BuildServiceArgs(subcommand string, args []string) []string {
 	return StripRetiredBase(StripFlag(out, "--service-user"))
 }
 
-// stripRetiredBase removes every spelling of the retired --base flag from a
+// defaultRunFnBuilder returns a function that reports the subcommand as
+// unsupported. Binaries pass their own builder (e.g. clicommand.BuildRunFn
+// for client subcommands, or a combined builder for the legacy binary).
+func defaultRunFnBuilder(subcommand string, _ []string) func(context.Context) error {
+	return func(context.Context) error {
+		return fmt.Errorf("unsupported subcommand for service: %s", subcommand)
+	}
+}
+
+// Ensure defaultRunFnBuilder satisfies the RunFnBuilder type.
+var _ RunFnBuilder = defaultRunFnBuilder
+
+// StripRetiredBase removes every spelling of the retired --base flag from a
 // persisted or supplied argument list. extractFlag is not used here because it
 // only recognises the long form and, when --base is the last argument, leaves it
 // in place — which would make the installed unit fail with "flag needs an

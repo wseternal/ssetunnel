@@ -26,7 +26,7 @@ func init() {
 func main() {
 	log.SetPrefix("server: ")
 	if len(os.Args) > 1 && command.ServiceActions[os.Args[1]] {
-		if handled, err := command.DispatchServiceAction("server", os.Args[1:]); handled {
+		if handled, err := command.DispatchServiceAction("server", os.Args[1:], serverRunFnBuilder); handled {
 			if err != nil {
 				log.Fatal(err)
 			}
@@ -38,4 +38,12 @@ func main() {
 	if err := command.RunServer(ctx, os.Args[1:]); err != nil {
 		log.Fatal(err)
 	}
+}
+
+// serverRunFnBuilder builds the run function for the server service.
+// It strips --service-user (a service-installer flag, not a runtime flag)
+// before passing args to RunServer.
+func serverRunFnBuilder(_ string, args []string) func(context.Context) error {
+	filtered := command.StripFlag(args, "--service-user")
+	return func(ctx context.Context) error { return command.RunServer(ctx, filtered) }
 }

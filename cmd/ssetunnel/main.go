@@ -13,6 +13,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/wseternal/ssetunnel/internal/clicommand"
 	"github.com/wseternal/ssetunnel/internal/command"
 )
 
@@ -43,7 +44,7 @@ func main() {
 	switch os.Args[1] {
 	case "server":
 		if len(os.Args) > 2 && command.ServiceActions[os.Args[2]] {
-			if handled, err := command.DispatchServiceAction("server", os.Args[2:]); handled {
+			if handled, err := command.DispatchServiceAction("server", os.Args[2:], buildRunFn); handled {
 				if err != nil {
 					log.Fatal(err)
 				}
@@ -53,30 +54,32 @@ func main() {
 		err = command.RunServer(ctx, os.Args[2:])
 	case "agent":
 		if len(os.Args) > 2 && command.ServiceActions[os.Args[2]] {
-			if handled, err := command.DispatchServiceAction("agent", os.Args[2:]); handled {
+			if handled, err := command.DispatchServiceAction("agent", os.Args[2:], buildRunFn); handled {
 				if err != nil {
 					log.Fatal(err)
 				}
 				return
 			}
 		}
-		err = command.RunAgent(ctx, os.Args[2:])
+		err = clicommand.RunAgent(ctx, os.Args[2:])
 	case "connect":
 		if len(os.Args) > 2 && command.ServiceActions[os.Args[2]] {
-			if handled, err := command.DispatchServiceAction("connect", os.Args[2:]); handled {
+			if handled, err := command.DispatchServiceAction("connect", os.Args[2:], buildRunFn); handled {
 				if err != nil {
 					log.Fatal(err)
 				}
 				return
 			}
 		}
-		err = command.RunConnect(ctx, os.Args[2:])
+		err = clicommand.RunConnect(ctx, os.Args[2:])
 	case "login":
-		err = command.RunLogin(ctx, os.Args[2:])
+		err = clicommand.RunLogin(ctx, os.Args[2:])
 	case "probe":
-		err = command.RunProbe(ctx, os.Args[2:])
+		err = clicommand.RunProbe(ctx, os.Args[2:])
 	case "module":
-		err = command.RunModule(os.Args[2:])
+		err = clicommand.RunModule(os.Args[2:])
+	case "ui":
+		err = clicommand.RunUI(ctx, os.Args[2:])
 	case "version":
 		fmt.Println(command.BuildVersion())
 		return
@@ -86,5 +89,17 @@ func main() {
 	}
 	if err != nil {
 		log.Fatal(err)
+	}
+}
+
+// buildRunFn dispatches to the appropriate run function for service management.
+// It handles both server and client subcommands for the legacy ssetunnel binary.
+func buildRunFn(subcommand string, args []string) func(context.Context) error {
+	switch subcommand {
+	case "server":
+		filtered := command.StripFlag(args, "--service-user")
+		return func(ctx context.Context) error { return command.RunServer(ctx, filtered) }
+	default:
+		return clicommand.BuildRunFn(subcommand, args)
 	}
 }

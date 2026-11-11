@@ -1,9 +1,11 @@
-// Package command implements the server and client command workflows shared
-// by the cmd/server, cmd/cli, and cmd/ssetunnel entry points.
+// Package command implements the server-side command workflow and shared
+// infrastructure (service management, version, flag helpers) used by the
+// cmd/server, cmd/cli, and cmd/ssetunnel entry points. Client-side commands
+// (agent, connect, login, probe, module, ui) live in internal/clicommand
+// to avoid transitively importing client packages into cmd/server.
 package command
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"flag"
@@ -19,10 +21,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	orcapostgres "github.com/visdomtech/orcacommon/postgres"
 	"github.com/wseternal/ssetunnel/internal/auth"
-	"github.com/wseternal/ssetunnel/internal/clientapp"
 	"github.com/wseternal/ssetunnel/internal/consoleserver"
 	"github.com/wseternal/ssetunnel/internal/metrics"
-	"github.com/wseternal/ssetunnel/internal/probe"
 	"github.com/wseternal/ssetunnel/internal/server"
 	"github.com/wseternal/ssetunnel/migrations"
 )
@@ -40,6 +40,7 @@ commands:
   login     authenticate and store a session for agent/connect
   probe     measure a server's POST path (body cap, throttling)
   module    manage agent modules (install, start, stop, restart, status, remove, list)
+  ui        serve the client UI on a secured loopback URL
   version   print the build version and git revision
 `
 
@@ -68,17 +69,17 @@ commands:
   version   print the build version and git revision
 `
 
-// acceptDeprecatedBaseFlag keeps --base parseable after route prefixing moved
+// AcceptDeprecatedBaseFlag keeps --base parseable after route prefixing moved
 // to the reverse proxy. A package upgrade does not rewrite an installed unit
 // file, so a service started with --base keeps passing it on every restart;
 // rejecting the flag would abort the daemon into a restart loop that a bare
 // `start` then re-poisons from the saved args file. The value is read back only
 // so the caller can say it no longer does anything.
-func acceptDeprecatedBaseFlag(fs *flag.FlagSet) *string {
+func AcceptDeprecatedBaseFlag(fs *flag.FlagSet) *string {
 	return fs.String("base", "", "DEPRECATED: ignored — path prefixing is delegated to the reverse proxy")
 }
 
-func warnDeprecatedBase(prefix, base string) {
+func WarnDeprecatedBase(prefix, base string) {
 	if base == "" {
 		return
 	}
@@ -105,12 +106,12 @@ func RunServer(ctx context.Context, args []string) error {
 	tunerInterval := fs.Duration("tuner-interval", 30*time.Second, "Interval for auto-tuner evaluation (default: 30s)")
 	// Accept --totp-secret for backward compatibility (silently ignored).
 	_ = fs.String("totp-secret", "", "DEPRECATED: per-user TOTP is now used; this flag is ignored")
-	base := acceptDeprecatedBaseFlag(fs)
+	base := AcceptDeprecatedBaseFlag(fs)
 
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	warnDeprecatedBase("server", *base)
+	WarnDeprecatedBase("server", *base)
 
 	// Deprecation warning for removed global TOTP secret.
 	if os.Getenv("SSETUNNEL_TOTP_SECRET") != "" {
@@ -118,7 +119,7 @@ func RunServer(ctx context.Context, args []string) error {
 	}
 
 	// SIGHUP: trigger configuration reload (placeholder).
-	installSIGHUPHandler("server", "SIGHUP received, reloading configuration...")
+	InstallSIGHUPHandler("server", "SIGHUP received, reloading configuration...")
 	// TODO: re-read config files, refresh auth pepper, etc.
 
 	srv := server.NewServer(*heartbeat)
@@ -286,157 +287,10 @@ func RunServer(ctx context.Context, args []string) error {
 	return nil
 }
 
-func RunAgent(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("agent", flag.ContinueOnError)
-	serverURL := fs.String("server", "", "tunnel server URL (default: from saved session)")
-	target := fs.String("target", "", "TCP address to forward streams to (empty = dynamic target mode)")
-	agentID := fs.String("id", "", "agent identifier for routing (e.g. mydevbox)")
-	batchSize := fs.Int("batch-size", 262144, "upstream batch ceiling in bytes (1024..1048576)")
-	concurrency := fs.Int("concurrency", 1, "upstream POST sender depth (1..4)")
-	compress := fs.Bool("compress", false, "negotiate gzip-per-batch upstream encoding")
-	noAutoTune := fs.Bool("no-auto-tune", false, "disable server auto-tuning (keep static CLI flags)")
-	verbose := fs.Bool("verbose", false, "enable detailed shell/control tracing logs")
-	base := acceptDeprecatedBaseFlag(fs)
-
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	warnDeprecatedBase("agent", *base)
-
-	// SIGHUP: trigger configuration reload (placeholder; agent has no
-	// runtime-reloadable config today — logs only).
-	installSIGHUPHandler("agent", "SIGHUP received (no reloadable config)")
-
-	dataDir, dirErr := AgentDataDir()
-	if dirErr != nil {
-		return dirErr
-	}
-
-	return clientapp.RunAgent(ctx, clientapp.AgentConfig{
-		ServerURL:   *serverURL,
-		Target:      *target,
-		AgentID:     *agentID,
-		BatchSize:   *batchSize,
-		Concurrency: *concurrency,
-		Compress:    *compress,
-		NoAutoTune:  *noAutoTune,
-		Verbose:     *verbose,
-		Version:     BuildVersion(),
-		DataDir:     dataDir,
-	})
-}
-
-func RunConnect(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("connect", flag.ContinueOnError)
-	server := fs.String("server", "", "tunnel server URL (default: from saved session)")
-	agentID := fs.String("agent", "", "agent identifier to connect to (e.g. mydevbox)")
-	target := fs.String("target", "", "target address on the agent machine (e.g. 127.0.0.1:22)")
-	local := fs.String("local", "", "local listen TCP address (e.g. 127.0.0.1:3306) or '-' for Stdio mode")
-	batchSize := fs.Int("batch-size", 0, "upstream batch ceiling in bytes (0 = 256 KiB default; 1024..1048576)")
-	base := acceptDeprecatedBaseFlag(fs)
-
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	warnDeprecatedBase("connect", *base)
-
-	return clientapp.RunConnect(ctx, clientapp.ConnectConfig{
-		ServerURL: *server,
-		AgentID:   *agentID,
-		Target:    *target,
-		Local:     *local,
-		BatchSize: *batchSize,
-	})
-}
-
 // IsEmbeddedPostgres reports whether dbURL refers to an embedded or
 // testcontainer-managed PostgreSQL instance (as opposed to an external
 // connection string like postgres://...).
 func IsEmbeddedPostgres(dbURL string) bool {
 	return strings.HasPrefix(dbURL, "postgres:tc:") ||
 		strings.HasPrefix(dbURL, "postgres:embedded:")
-}
-
-func RunProbe(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("probe", flag.ContinueOnError)
-	serverURL := fs.String("server", "", "tunnel server URL, e.g. http://tunnel.example.com")
-	base := acceptDeprecatedBaseFlag(fs)
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	warnDeprecatedBase("probe", *base)
-	if *serverURL == "" {
-		return errors.New("--server is required")
-	}
-	rep, err := probe.Run(ctx, probe.Config{URL: *serverURL})
-	if err != nil {
-		return err
-	}
-	fmt.Print(rep.String())
-	return nil
-}
-
-func RunLogin(_ context.Context, args []string) error {
-	fs := flag.NewFlagSet("login", flag.ContinueOnError)
-	serverURL := fs.String("server", "http://127.0.0.1:8081", "tunnel server URL (console port)")
-	tunnelServer := fs.String("tunnel-server", "", "tunnel server URL to save in session (default: --server with port 8081→8080)")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-
-	// Trim trailing slash to avoid double-slash in API paths.
-	*serverURL = strings.TrimRight(*serverURL, "/")
-
-	reader := bufio.NewReader(os.Stdin)
-
-	fmt.Print("Username: ")
-	username, _ := reader.ReadString('\n')
-	username = strings.TrimSpace(username)
-	if username == "" {
-		return errors.New("username is required")
-	}
-
-	fmt.Print("Password: ")
-	password, _ := reader.ReadString('\n')
-	password = strings.TrimSpace(password)
-	if password == "" {
-		return errors.New("password is required")
-	}
-
-	// Check if TOTP is required for this user.
-	var totpCode string
-	totpRequired, _ := clientapp.CheckTOTPRequired(*serverURL, username)
-	if totpRequired {
-		fmt.Print("TOTP or Recovery Code: ")
-		totpCode, _ = reader.ReadString('\n')
-		totpCode = strings.TrimSpace(totpCode)
-	} else {
-		// Non-200 status or unavailable endpoint: still allow login attempt.
-		fmt.Print("TOTP or Recovery Code (press Enter to skip): ")
-		totpCode, _ = reader.ReadString('\n')
-		totpCode = strings.TrimSpace(totpCode)
-	}
-
-	result, err := clientapp.Login(clientapp.LoginParams{
-		ConsoleURL: *serverURL,
-		TunnelURL:  *tunnelServer,
-		Username:   username,
-		Password:   password,
-		TOTPCode:   totpCode,
-	})
-	if err != nil {
-		return err
-	}
-
-	// Warn when the tunnel URL could not be derived from the console URL.
-	if *tunnelServer == "" {
-		if _, derived := clientapp.DeriveTunnelURL(*serverURL); !derived {
-			fmt.Printf("Warning: the tunnel URL could not be derived from %s, so the session stores it as %s.\n", *serverURL, result.TunnelURL)
-			fmt.Printf("If the tunnel sits behind a prefix or a different port, re-run with --tunnel-server (agents will otherwise dial %s/events).\n", result.TunnelURL)
-		}
-	}
-
-	fmt.Printf("Login successful! Session saved for %s (role: %s) at %s\n", result.Username, result.Role, result.TunnelURL)
-	fmt.Println("You can now run 'agent' or 'connect' without --server.")
-	return nil
 }

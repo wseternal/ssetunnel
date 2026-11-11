@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/wseternal/ssetunnel/internal/clicommand"
 	"github.com/wseternal/ssetunnel/internal/command"
 )
 
@@ -22,6 +23,7 @@ var GitSHA = ""
 func init() {
 	command.Version = Version
 	command.GitSHA = GitSHA
+	clicommand.BinaryName = "cli"
 }
 
 func main() {
@@ -35,36 +37,36 @@ func main() {
 	var err error
 	switch os.Args[1] {
 	case "login":
-		err = command.RunLogin(ctx, os.Args[2:])
+		err = clicommand.RunLogin(ctx, os.Args[2:])
 	case "agent":
 		if len(os.Args) > 2 && command.ServiceActions[os.Args[2]] {
-			if handled, err := command.DispatchServiceAction("agent", os.Args[2:]); handled {
+			if handled, err := command.DispatchServiceAction("agent", os.Args[2:], clicommand.BuildRunFn); handled {
 				if err != nil {
 					log.Fatal(err)
 				}
 				return
 			}
 		}
-		err = command.RunAgent(ctx, os.Args[2:])
+		err = clicommand.RunAgent(ctx, os.Args[2:])
 	case "connect":
 		if len(os.Args) > 2 && command.ServiceActions[os.Args[2]] {
-			if handled, err := command.DispatchServiceAction("connect", os.Args[2:]); handled {
+			if handled, err := command.DispatchServiceAction("connect", os.Args[2:], clicommand.BuildRunFn); handled {
 				if err != nil {
 					log.Fatal(err)
 				}
 				return
 			}
 		}
-		err = command.RunConnect(ctx, os.Args[2:])
+		err = clicommand.RunConnect(ctx, os.Args[2:])
 	case "probe":
-		err = command.RunProbe(ctx, os.Args[2:])
+		err = clicommand.RunProbe(ctx, os.Args[2:])
 	case "module":
-		err = command.RunModule(os.Args[2:])
+		err = clicommand.RunModule(os.Args[2:])
 	case "version":
 		fmt.Println(command.BuildVersion())
 		return
 	case "ui":
-		err = command.RunUI(ctx, os.Args[2:])
+		err = clicommand.RunUI(ctx, os.Args[2:])
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command %q\n%s", os.Args[1], command.CLIUsage)
 		os.Exit(2)

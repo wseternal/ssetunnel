@@ -47,3 +47,7 @@ go.work.sum
 
 # Development planning artifacts
 tasks/
+
+# Dev-cycle pipeline artifacts
+*-progress.md
+*-deferred-findings.md
