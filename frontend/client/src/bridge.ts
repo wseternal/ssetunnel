@@ -9,7 +9,7 @@
 // `cli ui` is running) to start a new tab session.
 
 import type {
-  Bridge, SessionDTO, AgentStatus, AgentConfig,
+  Bridge, SessionDTO, SavedSession, AgentStatus, AgentConfig,
   ConnectStatus, ConnectConfig
 } from './types';
 
@@ -67,6 +67,14 @@ export const httpBridge: Bridge = {
       return await apiFetch<SessionDTO>('/session');
     } catch {
       return null;
+    }
+  },
+
+  async listSessions(): Promise<SavedSession[]> {
+    try {
+      return await apiFetch<SavedSession[]>('/sessions');
+    } catch {
+      return [];
     }
   },
 

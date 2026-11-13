@@ -9,6 +9,12 @@ export interface SessionDTO {
   expires_at: string;
 }
 
+export interface SavedSession {
+  server_url: string;
+  console_url: string;
+  username?: string;
+}
+
 export interface AgentStatus {
   running: boolean;
   server_url: string;
@@ -32,6 +38,7 @@ export interface Bridge {
   login(server: string, tunnelServer: string, username: string, password: string, totpCode: string): Promise<SessionDTO>;
   checkTOTPRequired(server: string, username: string): Promise<boolean>;
   getSession(): Promise<SessionDTO | null>;
+  listSessions(): Promise<SavedSession[]>;
   logout(): Promise<void>;
 
   getAgentStatus(): Promise<AgentStatus | null>;

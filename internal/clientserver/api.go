@@ -24,6 +24,7 @@ func (s *Server) registerAPIRoutes(r *mux.Router) {
 	r.HandleFunc("/login", s.handleLogin).Methods("POST")
 	r.HandleFunc("/totp-check", s.handleTOTPCheck).Methods("POST")
 	r.HandleFunc("/session", s.handleGetSession).Methods("GET")
+	r.HandleFunc("/sessions", s.handleListSessions).Methods("GET")
 	r.HandleFunc("/logout", s.handleLogout).Methods("POST")
 	r.HandleFunc("/agent/status", s.handleAgentStatus).Methods("GET")
 	r.HandleFunc("/agent/start", s.handleAgentStart).Methods("POST")
@@ -133,19 +134,47 @@ func (s *Server) handleGetSession(w http.ResponseWriter, _ *http.Request) {
 	})
 }
 
+// GET /api/sessions
+func (s *Server) handleListSessions(w http.ResponseWriter, _ *http.Request) {
+	entries, err := auth.ListAllSessions()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to read sessions")
+		return
+	}
+	type sessionInfo struct {
+		ServerURL  string `json:"server_url"`
+		ConsoleURL string `json:"console_url"`
+		Username   string `json:"username,omitempty"`
+	}
+	sessions := make([]sessionInfo, 0, len(entries))
+	for _, e := range entries {
+		sessions = append(sessions, sessionInfo{
+			ServerURL:  e.ServerURL,
+			ConsoleURL: e.ConsoleURL,
+			Username:   e.Username,
+		})
+	}
+	writeJSON(w, http.StatusOK, sessions)
+}
+
 // POST /api/logout
 func (s *Server) handleLogout(w http.ResponseWriter, _ *http.Request) {
-	if err := auth.DeleteSession(""); err != nil {
-		log.Printf("api: logout failed to clear session: %v", err)
-		writeError(w, http.StatusInternalServerError, "failed to clear session")
-		return
+	// Resolve the current session first so we only delete this one entry,
+	// preserving other saved sessions for the login page dropdown.
+	sess, err := clientapp.ResolveSession("", "ui")
+	if err == nil && sess.URL != "" {
+		if err := auth.DeleteSession(sess.URL); err != nil {
+			log.Printf("api: logout failed to clear session: %v", err)
+			writeError(w, http.StatusInternalServerError, "failed to clear session")
+			return
+		}
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
 // GET /api/agent/status
 func (s *Server) handleAgentStatus(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"running": false})
+	writeJSON(w, http.StatusOK, s.agent.status())
 }
 
 // agentStartRequest is the JSON request for starting an agent.
@@ -176,7 +205,7 @@ func (s *Server) handleAgentStart(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	_ = clientapp.AgentConfig{
+	cfg := clientapp.AgentConfig{
 		ServerURL:   req.ServerURL,
 		Target:      req.Target,
 		AgentID:     req.AgentID,
@@ -186,13 +215,19 @@ func (s *Server) handleAgentStart(w http.ResponseWriter, r *http.Request) {
 		NoAutoTune:  req.NoAutoTune,
 		Verbose:     req.Verbose,
 	}
-	// TODO: integrate with UI-owned agent runtime from Task 7 plan.
-	writeError(w, http.StatusNotImplemented, "agent runtime not yet integrated")
+	if err := s.agent.start(s.serverCtx, cfg); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // POST /api/agent/stop
 func (s *Server) handleAgentStop(w http.ResponseWriter, _ *http.Request) {
-	// TODO: integrate with UI-owned agent runtime.
+	if err := s.agent.stop(); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -202,13 +237,26 @@ func (s *Server) handleAgentRestart(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	// TODO: integrate with UI-owned agent runtime.
-	writeError(w, http.StatusNotImplemented, "agent runtime not yet integrated")
+	cfg := clientapp.AgentConfig{
+		ServerURL:   req.ServerURL,
+		Target:      req.Target,
+		AgentID:     req.AgentID,
+		BatchSize:   req.BatchSize,
+		Concurrency: req.Concurrency,
+		Compress:    req.Compress,
+		NoAutoTune:  req.NoAutoTune,
+		Verbose:     req.Verbose,
+	}
+	if err := s.agent.start(s.serverCtx, cfg); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // GET /api/connect/list
 func (s *Server) handleConnectList(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, []any{})
+	writeJSON(w, http.StatusOK, s.connects.list())
 }
 
 // POST /api/connect/start
@@ -217,33 +265,67 @@ func (s *Server) handleConnectStart(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	// TODO: integrate with StartNamedConnect from Task 8.
-	writeError(w, http.StatusNotImplemented, "connect runtime not yet integrated")
+	cfg := clientapp.ConnectConfig{
+		ServerURL: req.ServerURL,
+		AgentID:   req.AgentID,
+		Target:    req.Target,
+		Local:     req.Local,
+		BatchSize: req.BatchSize,
+	}
+	if err := s.connects.start(req.Name, cfg); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // POST /api/connect/stop/{name}
 func (s *Server) handleConnectStop(w http.ResponseWriter, r *http.Request) {
-	_ = mux.Vars(r)["name"]
-	// TODO: integrate with named connect instance management.
+	name := mux.Vars(r)["name"]
+	if err := s.connects.stop(name); err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
 // POST /api/connect/restart/{name}
 func (s *Server) handleConnectRestart(w http.ResponseWriter, r *http.Request) {
-	vars := mux.Vars(r)
-	_ = vars["name"]
+	name := mux.Vars(r)["name"]
 	var req connectStartRequest
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	// TODO: integrate with named connect instance management.
-	writeError(w, http.StatusNotImplemented, "connect runtime not yet integrated")
+	// Stop the existing instance first.
+	_ = s.connects.stop(name)
+	cfg := clientapp.ConnectConfig{
+		ServerURL: req.ServerURL,
+		AgentID:   req.AgentID,
+		Target:    req.Target,
+		Local:     req.Local,
+		BatchSize: req.BatchSize,
+	}
+	if err := s.connects.start(name, cfg); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// pollingPaths are GET endpoints the frontend polls on a timer.
+// Logging them would flood the terminal with repetitive lines.
+var pollingPaths = map[string]bool{
+	"/api/agent/status": true,
+	"/api/connect/list": true,
 }
 
 // requestLogging logs API requests for audit and debugging.
+// Polling GET endpoints are silenced to keep the terminal output clean.
 func requestLogging(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		log.Printf("api: %s %s", r.Method, r.URL.Path)
+		if r.Method != http.MethodGet || !pollingPaths[r.URL.Path] {
+			log.Printf("api: %s %s", r.Method, r.URL.Path)
+		}
 		next.ServeHTTP(w, r)
 	})
 }

@@ -4,7 +4,6 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"log"
 
 	"github.com/wseternal/ssetunnel/internal/clientserver"
 )
@@ -26,7 +25,6 @@ func RunUI(ctx context.Context, args []string) error {
 	}
 
 	url := srv.URL()
-	log.Printf("ui: listening on %s", srv.Addr())
 
 	if !*noOpen {
 		fmt.Printf("Opening %s in your browser.\n", url)

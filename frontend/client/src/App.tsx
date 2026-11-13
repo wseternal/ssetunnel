@@ -1,9 +1,12 @@
 import { useState, useEffect, useCallback, type ReactNode } from 'react';
-import { ThemeProvider, createTheme, CssBaseline, Box, AppBar, Toolbar, Typography, Button, Tab, Tabs, Alert, Snackbar } from '@mui/material';
+import {
+  ThemeProvider, createTheme, CssBaseline, Box, AppBar, Toolbar, Typography,
+  Button, Tab, Tabs, Alert, Snackbar, Dialog, DialogTitle, DialogContent, Chip,
+} from '@mui/material';
 import { httpBridge } from './bridge';
 import { wailsBridge } from './wails';
 import type { Bridge, SessionDTO } from './types';
-import LoginPage from './LoginPage';
+import LoginForm from './LoginForm';
 import AgentPage from './AgentPage';
 import ConnectPage from './ConnectPage';
 
@@ -34,9 +37,10 @@ function TabPanel({ children, value, index }: TabPanelProps) {
 export default function App() {
   const bridge = resolveBridge();
   const [session, setSession] = useState<SessionDTO | null>(null);
-  const [loading, setLoading] = useState(true);
   const [tab, setTab] = useState(0);
   const [error, setError] = useState('');
+  const [loginError, setLoginError] = useState('');
+  const [loginOpen, setLoginOpen] = useState(false);
 
   const refreshSession = useCallback(async () => {
     try {
@@ -44,8 +48,6 @@ export default function App() {
       setSession(s);
     } catch {
       setSession(null);
-    } finally {
-      setLoading(false);
     }
   }, [bridge]);
 
@@ -53,11 +55,12 @@ export default function App() {
 
   const handleLogin = async (server: string, tunnelServer: string, username: string, password: string, totpCode: string) => {
     try {
-      const result = await bridge.login(server, tunnelServer, username, password, totpCode);
-      setSession(result);
-      setError('');
+      await bridge.login(server, tunnelServer, username, password, totpCode);
+      await refreshSession();
+      setLoginError('');
+      setLoginOpen(false);
     } catch (e: any) {
-      setError(e.message || 'Login failed');
+      setLoginError(e.message || 'Login failed');
     }
   };
 
@@ -67,19 +70,6 @@ export default function App() {
     } catch { /* ignore */ }
     setSession(null);
   };
-
-  if (loading) {
-    return <ThemeProvider theme={theme}><CssBaseline /><Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100vh' }}><Typography>Loading...</Typography></Box></ThemeProvider>;
-  }
-
-  if (!session) {
-    return (
-      <ThemeProvider theme={theme}>
-        <CssBaseline />
-        <LoginPage onLogin={handleLogin} bridge={bridge} error={error} />
-      </ThemeProvider>
-    );
-  }
 
   return (
     <ThemeProvider theme={theme}>
@@ -92,10 +82,16 @@ export default function App() {
               <Tab label="Agent" />
               <Tab label="Connect" />
             </Tabs>
-            <Typography variant="body2" sx={{ color: 'text.secondary', mr: 2 }}>
-              {session.username} ({session.role})
-            </Typography>
-            <Button color="inherit" onClick={handleLogout} sx={{ color: 'text.secondary' }}>Logout</Button>
+            {session ? (
+              <>
+                <Chip label={`${session.username}`} size="small" variant="outlined" sx={{ mr: 1 }} />
+                <Button color="inherit" onClick={handleLogout} sx={{ color: 'text.secondary' }} size="small">Logout</Button>
+              </>
+            ) : (
+              <Button variant="outlined" size="small" onClick={() => { setLoginError(''); setLoginOpen(true); }}>
+                Login
+              </Button>
+            )}
           </Toolbar>
         </AppBar>
 
@@ -106,6 +102,13 @@ export default function App() {
           <ConnectPage bridge={bridge} />
         </TabPanel>
       </Box>
+
+      <Dialog open={loginOpen} onClose={() => setLoginOpen(false)} maxWidth="xs" fullWidth>
+        <DialogTitle>Login to Server</DialogTitle>
+        <DialogContent>
+          <LoginForm onLogin={handleLogin} bridge={bridge} error={loginError} />
+        </DialogContent>
+      </Dialog>
 
       <Snackbar open={!!error} autoHideDuration={6000} onClose={() => setError('')} anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}>
         <Alert severity="error" onClose={() => setError('')}>{error}</Alert>

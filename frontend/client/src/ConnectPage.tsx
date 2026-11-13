@@ -5,7 +5,8 @@ import {
   TableHead, TableRow, TableCell, TableBody,
 } from '@mui/material';
 import DeleteIcon from '@mui/icons-material/Delete';
-import type { Bridge, ConnectStatus, ConnectConfig } from './types';
+import type { Bridge, ConnectStatus, ConnectConfig, SavedSession } from './types';
+import ServerURLField from './ServerURLField';
 
 interface ConnectPageProps {
   bridge: Bridge;
@@ -26,6 +27,11 @@ export default function ConnectPage({ bridge }: ConnectPageProps) {
   const [loading, setLoading] = useState(true);
   const [action, setAction] = useState('');
   const [error, setError] = useState('');
+  const [savedSessions, setSavedSessions] = useState<SavedSession[]>([]);
+
+  useEffect(() => {
+    bridge.listSessions().then(setSavedSessions).catch(() => {});
+  }, [bridge]);
 
   const refresh = useCallback(async () => {
     try {
@@ -153,9 +159,10 @@ export default function ConnectPage({ bridge }: ConnectPageProps) {
               helperText="e.g. 127.0.0.1:22"
               sx={{ width: 200 }}
             />
-            <TextField
-              label="Server URL" value={config.server_url}
-              onChange={e => setConfig({ ...config, server_url: e.target.value })}
+            <ServerURLField
+              value={config.server_url}
+              onChange={url => setConfig({ ...config, server_url: url })}
+              savedSessions={savedSessions}
               helperText="Empty = saved session"
               sx={{ flex: 1 }}
             />

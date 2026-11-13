@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/gorilla/mux"
+	"github.com/visdomtech/orcacommon/litespaserver"
 	"github.com/wseternal/ssetunnel/frontend"
 )
 
@@ -32,10 +33,13 @@ type Config struct {
 
 // Server is the secured local HTTP server for the browser client.
 type Server struct {
-	listener net.Listener
-	secret   string
-	baseURL  string
-	handler  http.Handler
+	listener  net.Listener
+	secret    string
+	baseURL   string
+	handler   http.Handler
+	agent     *agentRuntime
+	connects  *connectRegistry
+	serverCtx context.Context // lives as long as the server
 }
 
 // New creates a new browser server bound to the configured loopback address.
@@ -61,11 +65,15 @@ func New(cfg Config) (*Server, error) {
 	}
 
 	s := &Server{
-		listener: ln,
-		secret:   secret,
-		baseURL:  fmt.Sprintf("http://%s/#%s", ln.Addr().String(), secret),
+		listener:  ln,
+		secret:    secret,
+		baseURL:   fmt.Sprintf("http://%s/#%s", ln.Addr().String(), secret),
+		agent:     &agentRuntime{},
+		serverCtx: context.Background(),
 	}
-	s.handler = s.buildHandler()
+	// Build handler with a cancellable context so the agent/connect
+	// runtimes are torn down when Serve exits.
+	s.handler = s.buildHandler(context.Background())
 	return s, nil
 }
 
@@ -81,6 +89,13 @@ func (s *Server) URL() string {
 
 // Serve starts the HTTP server and blocks until the context is cancelled.
 func (s *Server) Serve(ctx context.Context) error {
+	// Store the server context so API handlers can start agents/connects
+	// whose lifetime is tied to the server.
+	s.serverCtx = ctx
+	// Initialize the connect registry with the server context so all
+	// named connect sessions are cancelled when the server shuts down.
+	s.connects = newConnectRegistry(ctx)
+
 	srv := &http.Server{
 		Handler:           s.handler,
 		ReadHeaderTimeout: 10 * time.Second,
@@ -91,6 +106,9 @@ func (s *Server) Serve(ctx context.Context) error {
 
 	go func() {
 		<-ctx.Done()
+		// Stop all agent/connect runtimes before HTTP shutdown.
+		s.agent.stop()
+		s.connects.stopAll()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		srv.Shutdown(shutdownCtx)
@@ -104,7 +122,7 @@ func (s *Server) Serve(ctx context.Context) error {
 }
 
 // buildHandler creates the mux router with security middleware and routes.
-func (s *Server) buildHandler() http.Handler {
+func (s *Server) buildHandler(ctx context.Context) http.Handler {
 	r := mux.NewRouter()
 
 	// API routes (require launch secret).
@@ -116,39 +134,25 @@ func (s *Server) buildHandler() http.Handler {
 	// Explicit 404 for unmatched API paths.
 	api.PathPrefix("/").HandlerFunc(notFound)
 
-	// Static assets from embedded client bundle.
-	clientFS := frontend.ClientWebRootFs
-	r.PathPrefix("/assets/").Handler(spaHeaders(http.StripPrefix("/assets/", http.FileServer(http.FS(clientFS)))))
+	// SPA catch-all — uses litespaserver with embedded client bundle,
+	// matching the console server pattern. StaticPaths lets it serve
+	// hashed assets from /assets/** directly from the embedded FS.
+	spaCfg := litespaserver.Config{
+		EmbeddedContent: frontend.ClientWebRootFs,
+		StaticPaths:     []string{"/assets/**"},
+		CDNVersion:      "embedded",
+		CSP: litespaserver.CSPConfig{
+			Disable: true,
+		},
+	}
+	spaServer := litespaserver.NewServer(ctx, nil, spaCfg)
+	r.PathPrefix("/").HandlerFunc(spaServer.ServeRoot).Methods("GET", "HEAD")
 
-	// SPA fallback — serves index.html for unmatched paths.
-	r.PathPrefix("/").Handler(spaHeaders(spaFallbackHandler(clientFS)))
+	if _, err := fs.Stat(frontend.ClientWebRootFs, "index.html"); err != nil {
+		log.Printf("ui: ERROR embedded client/dist has no index.html (%v); the SPA will not load", err)
+	}
 
 	return r
-}
-
-// spaFallbackHandler serves the SPA index.html for any unmatched GET/HEAD request.
-func spaFallbackHandler(fsys fs.FS) http.Handler {
-	fileServer := http.FileServer(http.FS(fsys))
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet && r.Method != http.MethodHead {
-			http.NotFound(w, r)
-			return
-		}
-		// Try to serve the requested file directly.
-		if f, err := fsys.Open(strings.TrimPrefix(r.URL.Path, "/")); err == nil {
-			f.Close()
-			fileServer.ServeHTTP(w, r)
-			return
-		}
-		// Fallback to index.html for SPA routing.
-		data, err := fs.ReadFile(fsys, "index.html")
-		if err != nil {
-			http.NotFound(w, r)
-			return
-		}
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Write(data)
-	})
 }
 
 // allowedOriginHosts is the set of hostnames accepted for the Origin header.
@@ -204,17 +208,6 @@ func securityHeaders(next http.Handler) http.Handler {
 	})
 }
 
-// spaHeaders wraps a handler with no-cache and security headers for the SPA.
-func spaHeaders(h http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("X-Content-Type-Options", "nosniff")
-		w.Header().Set("X-Frame-Options", "DENY")
-		w.Header().Set("Referrer-Policy", "no-referrer")
-		w.Header().Set("Cache-Control", "no-store")
-		h.ServeHTTP(w, r)
-	})
-}
-
 // notFound writes a 404 response with security headers.
 func notFound(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("X-Content-Type-Options", "nosniff")
@@ -222,8 +215,3 @@ func notFound(w http.ResponseWriter, _ *http.Request) {
 	http.NotFound(w, nil)
 }
 
-// indexExists checks whether the embedded client bundle has an index.html.
-func indexExists() bool {
-	_, err := fs.Stat(frontend.ClientWebRootFs, "index.html")
-	return err == nil
-}

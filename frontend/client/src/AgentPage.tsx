@@ -3,7 +3,8 @@ import {
   Box, Card, CardContent, TextField, Button, Typography, Switch,
   FormControlLabel, Alert, Chip, Stack, CircularProgress,
 } from '@mui/material';
-import type { Bridge, AgentStatus, AgentConfig } from './types';
+import type { Bridge, AgentStatus, AgentConfig, SavedSession } from './types';
+import ServerURLField from './ServerURLField';
 
 interface AgentPageProps {
   bridge: Bridge;
@@ -26,6 +27,11 @@ export default function AgentPage({ bridge }: AgentPageProps) {
   const [loading, setLoading] = useState(true);
   const [action, setAction] = useState('');
   const [error, setError] = useState('');
+  const [savedSessions, setSavedSessions] = useState<SavedSession[]>([]);
+
+  useEffect(() => {
+    bridge.listSessions().then(setSavedSessions).catch(() => {});
+  }, [bridge]);
 
   const refresh = useCallback(async () => {
     try {
@@ -115,9 +121,10 @@ export default function AgentPage({ bridge }: AgentPageProps) {
       <Card sx={{ mb: 2 }}>
         <CardContent>
           <Typography variant="subtitle1" sx={{ mb: 2, fontWeight: 600 }}>Configuration</Typography>
-          <TextField
-            fullWidth label="Server URL" value={config.server_url}
-            onChange={e => setConfig({ ...config, server_url: e.target.value })}
+          <ServerURLField
+            value={config.server_url}
+            onChange={url => setConfig({ ...config, server_url: url })}
+            savedSessions={savedSessions}
             helperText="Leave empty to use saved session"
             sx={{ mb: 2 }}
           />
@@ -166,7 +173,7 @@ export default function AgentPage({ bridge }: AgentPageProps) {
 
       <Stack direction="row" spacing={2}>
         {!running ? (
-          <Button variant="contained" onClick={handleStart} disabled={!!action}>
+          <Button variant="contained" onClick={handleStart} disabled={!!action || !config.server_url || !config.agent_id}>
             {action === 'start' ? 'Starting...' : 'Start'}
           </Button>
         ) : (

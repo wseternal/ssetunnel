@@ -1,8 +1,9 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 
-// Base path for the client SPA. Independent from the admin console at /console.
-const base = '/client';
+// Base path for the client SPA. The cli-ui server serves at root,
+// so assets must reference /assets/... (not /client/assets/...).
+const base = '/';
 
 export default defineConfig({
   base,

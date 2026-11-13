@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"path"
 	"strings"
 	"time"
 
@@ -38,8 +39,10 @@ type LoginParams struct {
 
 // Login authenticates against the server console API and saves the session.
 func Login(p LoginParams) (*LoginResult, error) {
-	consoleURL := strings.TrimRight(p.ConsoleURL, "/")
-	consoleBase := consoleURL + "/api/v1"
+	consoleBase, err := consoleAPIBase(p.ConsoleURL)
+	if err != nil {
+		return nil, fmt.Errorf("invalid console URL: %w", err)
+	}
 
 	reqBody, _ := json.Marshal(map[string]string{
 		"username":  p.Username,
@@ -76,7 +79,7 @@ func Login(p LoginParams) (*LoginResult, error) {
 	tunnelURL := p.TunnelURL
 	if tunnelURL == "" {
 		var derived bool
-		tunnelURL, derived = DeriveTunnelURL(consoleURL)
+		tunnelURL, derived = DeriveTunnelURL(p.ConsoleURL)
 		if !derived {
 			// The tunnel URL could not be derived from the console URL.
 			// The caller decides whether to warn the user.
@@ -84,7 +87,7 @@ func Login(p LoginParams) (*LoginResult, error) {
 	}
 	tunnelURL = strings.TrimRight(tunnelURL, "/")
 
-	if err := auth.SaveSession(tunnelURL, result.Token, result.Username, result.Role, consoleURL, expiresAt); err != nil {
+	if err := auth.SaveSession(tunnelURL, result.Token, result.Username, result.Role, p.ConsoleURL, expiresAt); err != nil {
 		return nil, fmt.Errorf("failed to save session: %w", err)
 	}
 
@@ -98,8 +101,10 @@ func Login(p LoginParams) (*LoginResult, error) {
 
 // CheckTOTPRequired checks whether the server requires TOTP for the given user.
 func CheckTOTPRequired(consoleURL, username string) (bool, error) {
-	consoleURL = strings.TrimRight(consoleURL, "/")
-	consoleBase := consoleURL + "/api/v1"
+	consoleBase, err := consoleAPIBase(consoleURL)
+	if err != nil {
+		return false, fmt.Errorf("invalid console URL: %w", err)
+	}
 
 	checkBody, _ := json.Marshal(map[string]string{"username": username})
 	resp, err := http.Post(consoleBase+"/user-login-check", "application/json", strings.NewReader(string(checkBody)))
@@ -119,6 +124,18 @@ func CheckTOTPRequired(consoleURL, username string) (bool, error) {
 		return false, nil
 	}
 	return check.TOTPRequired, nil
+}
+
+// consoleAPIBase builds the /api/v1 base URL from a console URL,
+// preserving any path prefix (e.g. /console when behind a reverse proxy).
+func consoleAPIBase(consoleURL string) (string, error) {
+	consoleURL = strings.TrimRight(consoleURL, "/")
+	u, err := url.Parse(consoleURL)
+	if err != nil {
+		return "", err
+	}
+	u.Path = path.Join(u.Path, "/api/v1")
+	return u.String(), nil
 }
 
 // DeriveTunnelURL maps a console URL on the default port 8081 to the tunnel
