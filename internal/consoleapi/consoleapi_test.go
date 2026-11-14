@@ -346,17 +346,40 @@ func TestNonAdminSessionFiltering(t *testing.T) {
 	reg := server.NewRegistry()
 	router := consoleapi.NewRouter(store, reg)
 
-	// Create admin user + session.
-	adminHash, _ := auth.HashPassword("adminpass123")
-	adminUser, _ := store.CreateUser(ctx, "nonadmin_test_admin", adminHash, "admin", true, true)
-	adminToken, _ := auth.GenerateToken()
-	_, _ = store.CreateUserSession(ctx, adminUser.ID, adminToken, 24*time.Hour)
+	// Create admin user + session (unique names to avoid collisions
+	// in the shared testcontainer database).
+	adminHash, err := auth.HashPassword("adminpass123")
+	if err != nil {
+		t.Fatalf("hash admin password: %v", err)
+	}
+	adminUser, err := store.CreateUser(ctx, sanitizeUsername(t.Name())+"_admin", adminHash, "admin", true, true)
+	if err != nil {
+		t.Fatalf("create admin user: %v", err)
+	}
+	adminToken, err := auth.GenerateToken()
+	if err != nil {
+		t.Fatalf("generate admin token: %v", err)
+	}
+	if _, err := store.CreateUserSession(ctx, adminUser.ID, adminToken, 24*time.Hour); err != nil {
+		t.Fatalf("create admin session: %v", err)
+	}
 
 	// Create regular user + session.
-	userHash, _ := auth.HashPassword("userpass12345")
-	regUser, _ := store.CreateUser(ctx, "nonadmin_test_user", userHash, "user", true, true)
-	userToken, _ := auth.GenerateToken()
-	_, _ = store.CreateUserSession(ctx, regUser.ID, userToken, 24*time.Hour)
+	userHash, err := auth.HashPassword("userpass12345")
+	if err != nil {
+		t.Fatalf("hash user password: %v", err)
+	}
+	regUser, err := store.CreateUser(ctx, sanitizeUsername(t.Name())+"_user", userHash, "user", true, true)
+	if err != nil {
+		t.Fatalf("create regular user: %v", err)
+	}
+	userToken, err := auth.GenerateToken()
+	if err != nil {
+		t.Fatalf("generate user token: %v", err)
+	}
+	if _, err := store.CreateUserSession(ctx, regUser.ID, userToken, 24*time.Hour); err != nil {
+		t.Fatalf("create user session: %v", err)
+	}
 
 	// Create sessions in the registry with different user attributions.
 	adminSess := server.NewSession("sess-admin-1")
@@ -403,7 +426,10 @@ func TestNonAdminSessionFiltering(t *testing.T) {
 	}
 
 	// Regular user can also list agents (read-only, all configs).
-	_, _ = store.CreateAgentConfig(ctx, "test-agent", "test", []string{"*"})
+	agentID := sanitizeUsername(t.Name()) + "_agent"
+	if _, err := store.CreateAgentConfig(ctx, agentID, "test", []string{"*"}); err != nil {
+		t.Logf("create agent config (may exist from prior run): %v", err)
+	}
 
 	req = httptest.NewRequest("GET", "/api/v1/agents", nil)
 	req.Header.Set("Authorization", "Bearer "+userToken)

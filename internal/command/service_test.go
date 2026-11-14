@@ -1,4 +1,4 @@
-package main
+package command
 
 import (
 	"context"
@@ -25,9 +25,9 @@ func TestDispatchServiceAction_NonActionVerb(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			handled, err := dispatchServiceAction("server", tt.args)
+			handled, err := DispatchServiceAction("server", tt.args, nil)
 			if handled {
-				t.Fatalf("dispatchServiceAction(%q) = handled=true, want false", tt.args)
+				t.Fatalf("DispatchServiceAction(%q) = handled=true, want false", tt.args)
 			}
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
@@ -54,7 +54,7 @@ func TestExtractFlag(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			gotValue, gotRest := extractFlag(tt.args, tt.key)
+			gotValue, gotRest := ExtractFlag(tt.args, tt.key)
 			if gotValue != tt.wantValue {
 				t.Errorf("value = %q, want %q", gotValue, tt.wantValue)
 			}
@@ -136,13 +136,13 @@ func TestBuildServiceArgs(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got := buildServiceArgs(tt.subcommand, tt.args)
+			got := BuildServiceArgs(tt.subcommand, tt.args)
 			if len(got) != len(tt.want) {
-				t.Fatalf("buildServiceArgs = %v, want %v", got, tt.want)
+				t.Fatalf("BuildServiceArgs = %v, want %v", got, tt.want)
 			}
 			for i := range got {
 				if got[i] != tt.want[i] {
-					t.Fatalf("buildServiceArgs[%d] = %q, want %q", i, got[i], tt.want[i])
+					t.Fatalf("BuildServiceArgs[%d] = %q, want %q", i, got[i], tt.want[i])
 				}
 			}
 		})
@@ -264,8 +264,8 @@ func TestServiceUserPersistedInSavedArgs(t *testing.T) {
 		t.Fatalf("loadServiceArgs: %v", err)
 	}
 
-	// extractFlag should recover --service-user from the loaded args.
-	svcUser, remaining := extractFlag(got, "--service-user")
+	// ExtractFlag should recover --service-user from the loaded args.
+	svcUser, remaining := ExtractFlag(got, "--service-user")
 	if svcUser != "svcuser" {
 		t.Errorf("extracted --service-user = %q, want %q", svcUser, "svcuser")
 	}
@@ -303,7 +303,7 @@ func TestRetiredBaseNotPersistedInSavedArgs(t *testing.T) {
 		}
 	}
 	// The same slice must still reach runServer unstripped for the warning.
-	if v, _ := extractFlag(runtimeFlags, "--base"); v != "/sse" {
+	if v, _ := ExtractFlag(runtimeFlags, "--base"); v != "/sse" {
 		t.Errorf("--base no longer visible to the deprecation warning: got %q", v)
 	}
 }
@@ -316,14 +316,14 @@ func TestBareStartLoadsSavedArgs(t *testing.T) {
 	pidDir = func() string { return tmpDir }
 	t.Cleanup(func() { pidDir = origPidDir })
 
-	// Pre-save args for "ssetunnel-server" (the name dispatchServiceAction
+	// Pre-save args for "ssetunnel-server" (the name DispatchServiceAction
 	// builds for subcommand="server").
 	want := []string{"--heartbeat", "20s", "--listen", ":9090"}
 	if err := saveServiceArgsToDir(tmpDir, "ssetunnel-server", want); err != nil {
 		t.Fatalf("saveServiceArgs: %v", err)
 	}
 
-	// Verify that loadServiceArgs (the function dispatchServiceAction
+	// Verify that loadServiceArgs (the function DispatchServiceAction
 	// calls on bare start) loads the saved flags correctly.
 	got, err := loadServiceArgs("ssetunnel-server")
 	if err != nil {
@@ -338,16 +338,16 @@ func TestBareStartLoadsSavedArgs(t *testing.T) {
 		}
 	}
 
-	// Verify that the loaded flags produce the correct buildServiceArgs
+	// Verify that the loaded flags produce the correct BuildServiceArgs
 	// output when used as runtimeFlags in a bare start.
-	svcArgs := buildServiceArgs("server", append([]string{"start"}, got...))
+	svcArgs := BuildServiceArgs("server", append([]string{"start"}, got...))
 	wantSvc := []string{"server", "run", "--heartbeat", "20s", "--listen", ":9090"}
 	if len(svcArgs) != len(wantSvc) {
-		t.Fatalf("buildServiceArgs = %v, want %v", svcArgs, wantSvc)
+		t.Fatalf("BuildServiceArgs = %v, want %v", svcArgs, wantSvc)
 	}
 	for i := range svcArgs {
 		if svcArgs[i] != wantSvc[i] {
-			t.Fatalf("buildServiceArgs[%d] = %q, want %q", i, svcArgs[i], wantSvc[i])
+			t.Fatalf("BuildServiceArgs[%d] = %q, want %q", i, svcArgs[i], wantSvc[i])
 		}
 	}
 }
@@ -371,14 +371,14 @@ func TestBareStartPreservesSavedArgsWhenServiceUserAutoDetected(t *testing.T) {
 		t.Fatalf("saveServiceArgs: %v", err)
 	}
 
-	// Simulate a bare "start" (no flags). dispatchServiceAction will
+	// Simulate a bare "start" (no flags). DispatchServiceAction will
 	// auto-detect --service-user, but must still load saved args.
-	// We cannot call dispatchServiceAction directly (it tries to install
+	// We cannot call DispatchServiceAction directly (it tries to install
 	// a real service), so verify the logic at the unit level: after
-	// extractFlag removes --service-user from a bare ["start"], the
+	// ExtractFlag removes --service-user from a bare ["start"], the
 	// remaining runtimeFlags must be empty.
 	args := []string{"start"}
-	_, filtered := extractFlag(args, "--service-user")
+	_, filtered := ExtractFlag(args, "--service-user")
 	runtimeFlags := filtered[1:] // everything after the action verb
 
 	if len(runtimeFlags) != 0 {
@@ -432,8 +432,8 @@ func TestRegistry_CloseAll(t *testing.T) {
 
 func TestUninstallIsServiceAction(t *testing.T) {
 	t.Parallel()
-	if !serviceActions["uninstall"] {
-		t.Fatal("\"uninstall\" not in serviceActions map")
+	if !ServiceActions["uninstall"] {
+		t.Fatal("\"uninstall\" not in ServiceActions map")
 	}
 }
 
@@ -491,13 +491,13 @@ func TestStripFlag(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got := stripFlag(tt.args, tt.key)
+			got := StripFlag(tt.args, tt.key)
 			if len(got) != len(tt.want) {
-				t.Fatalf("stripFlag = %v, want %v", got, tt.want)
+				t.Fatalf("StripFlag = %v, want %v", got, tt.want)
 			}
 			for i := range got {
 				if got[i] != tt.want[i] {
-					t.Fatalf("stripFlag[%d] = %q, want %q", i, got[i], tt.want[i])
+					t.Fatalf("StripFlag[%d] = %q, want %q", i, got[i], tt.want[i])
 				}
 			}
 		})
@@ -506,7 +506,7 @@ func TestStripFlag(t *testing.T) {
 
 func TestConnectServiceRequiresName(t *testing.T) {
 	t.Parallel()
-	handled, err := dispatchServiceAction("connect", []string{"start", "--agent", "mybox", "--local", "127.0.0.1:2222"})
+	handled, err := DispatchServiceAction("connect", []string{"start", "--agent", "mybox", "--local", "127.0.0.1:2222"}, nil)
 	if !handled {
 		t.Fatal("expected handled=true for connect start")
 	}
@@ -520,7 +520,7 @@ func TestConnectServiceRequiresName(t *testing.T) {
 
 func TestConnectServiceRejectsStdio(t *testing.T) {
 	t.Parallel()
-	handled, err := dispatchServiceAction("connect", []string{"start", "--name", "test-stdio", "--local", "-"})
+	handled, err := DispatchServiceAction("connect", []string{"start", "--name", "test-stdio", "--local", "-"}, nil)
 	if !handled {
 		t.Fatal("expected handled=true")
 	}
@@ -534,7 +534,7 @@ func TestConnectServiceRejectsStdio(t *testing.T) {
 
 func TestConnectServiceRejectsReload(t *testing.T) {
 	t.Parallel()
-	handled, err := dispatchServiceAction("connect", []string{"reload", "--name", "test-reload"})
+	handled, err := DispatchServiceAction("connect", []string{"reload", "--name", "test-reload"}, nil)
 	if !handled {
 		t.Fatal("expected handled=true")
 	}
@@ -548,34 +548,22 @@ func TestConnectServiceRejectsReload(t *testing.T) {
 
 func TestBuildServiceArgsConnect(t *testing.T) {
 	t.Parallel()
-	got := buildServiceArgs("connect", []string{"start", "--name", "myssh", "--agent", "devbox", "--local", "127.0.0.1:2222"})
+	got := BuildServiceArgs("connect", []string{"start", "--name", "myssh", "--agent", "devbox", "--local", "127.0.0.1:2222"})
 	want := []string{"connect", "run", "--name", "myssh", "--agent", "devbox", "--local", "127.0.0.1:2222"}
 	if len(got) != len(want) {
-		t.Fatalf("buildServiceArgs = %v, want %v", got, want)
+		t.Fatalf("BuildServiceArgs = %v, want %v", got, want)
 	}
 	for i := range got {
 		if got[i] != want[i] {
-			t.Fatalf("buildServiceArgs[%d] = %q, want %q", i, got[i], want[i])
+			t.Fatalf("BuildServiceArgs[%d] = %q, want %q", i, got[i], want[i])
 		}
 	}
-}
-
-func TestBuildRunFnIncludesConnect(t *testing.T) {
-	t.Parallel()
-	fn := buildRunFn("connect", []string{"--agent", "devbox", "--local", "127.0.0.1:2222"})
-	if fn == nil {
-		t.Fatal("buildRunFn(connect) returned nil")
-	}
-	// Verify it's not the unsupported-subcommand error function by
-	// checking it doesn't return the "unsupported" error message.
-	// We can't actually call it (needs a real server), but we verify
-	// the function was constructed for connect.
 }
 
 func TestConnectServiceNameRequiresValue(t *testing.T) {
 	t.Parallel()
 	// --name flag present but with no value (end of args)
-	handled, err := dispatchServiceAction("connect", []string{"start", "--name"})
+	handled, err := DispatchServiceAction("connect", []string{"start", "--name"}, nil)
 	if !handled {
 		t.Fatal("expected handled=true")
 	}

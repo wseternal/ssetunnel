@@ -1,4 +1,4 @@
-package main
+package command
 
 import (
 	"context"
@@ -18,8 +18,8 @@ import (
 	"github.com/sourcegraph/conc/panics"
 )
 
-// serviceActions is the set of verbs recognised by dispatchServiceAction.
-var serviceActions = map[string]bool{
+// ServiceActions is the set of verbs recognised by DispatchServiceAction.
+var ServiceActions = map[string]bool{
 	"run": true, "start": true, "stop": true,
 	"restart": true, "status": true, "reload": true,
 	"uninstall": true,
@@ -82,12 +82,22 @@ func (p *serviceProgram) doStop() error {
 	}
 }
 
-// dispatchServiceAction checks whether args[0] is a service action verb.
+// RunFnBuilder constructs a run closure for the given subcommand and
+// runtime flags. Each binary provides its own builder to wire the
+// appropriate run functions (server, agent, connect, etc.).
+type RunFnBuilder func(subcommand string, args []string) func(context.Context) error
+
+// DispatchServiceAction checks whether args[0] is a service action verb.
 // If so, it builds a service.Service, executes the action, and returns
 // handled=true.  If args is empty or args[0] is not a verb, it returns
 // handled=false and the caller falls through to the legacy direct-run path.
-func dispatchServiceAction(subcommand string, args []string) (handled bool, err error) {
-	if len(args) == 0 || !serviceActions[args[0]] {
+// The runFnBuilder constructs the run function for the given subcommand;
+// pass nil to use a default that returns an "unsupported subcommand" error.
+func DispatchServiceAction(subcommand string, args []string, runFnBuilder RunFnBuilder) (handled bool, err error) {
+	if runFnBuilder == nil {
+		runFnBuilder = defaultRunFnBuilder
+	}
+	if len(args) == 0 || !ServiceActions[args[0]] {
 		return false, nil
 	}
 	action := args[0]
@@ -99,7 +109,7 @@ func dispatchServiceAction(subcommand string, args []string) (handled bool, err 
 
 	// Extract --service-user before passing args to buildServiceArgs.
 	// This flag is consumed by the service installer, not the runtime.
-	serviceUser, filteredArgs := extractFlag(args, "--service-user")
+	serviceUser, filteredArgs := ExtractFlag(args, "--service-user")
 
 	// Default service user: use the current OS user when not root.
 	// Running the daemon as root causes embedded postgres to fail
@@ -131,7 +141,7 @@ func dispatchServiceAction(subcommand string, args []string) (handled bool, err 
 	var connectName string
 	if subcommand == "connect" {
 		var nameArgs []string
-		connectName, nameArgs = extractFlag(filteredArgs, "--name")
+		connectName, nameArgs = ExtractFlag(filteredArgs, "--name")
 		if connectName == "" {
 			return true, fmt.Errorf("--name is required for connect service commands (e.g. --name my-ssh)")
 		}
@@ -158,13 +168,13 @@ func dispatchServiceAction(subcommand string, args []string) (handled bool, err 
 	// For connect services, strip --name from runtime flags (it is a
 	// service-layer flag, not a runtime flag for runConnect).
 	if subcommand == "connect" {
-		runtimeFlags = stripFlag(runtimeFlags, "--name")
+		runtimeFlags = StripFlag(runtimeFlags, "--name")
 	}
 
 	// Reject stdio mode (--local -) for connect daemon services:
 	// a background service cannot use stdin/stdout pipes.
 	if subcommand == "connect" {
-		if localVal, _ := extractFlag(runtimeFlags, "--local"); localVal == "-" {
+		if localVal, _ := ExtractFlag(runtimeFlags, "--local"); localVal == "-" {
 			return true, fmt.Errorf("stdio mode (--local -) is not supported for service commands; use a local TCP address instead")
 		}
 	}
@@ -187,7 +197,7 @@ func dispatchServiceAction(subcommand string, args []string) (handled bool, err 
 		Name:        svcName,
 		DisplayName: "ssetunnel " + subcommand,
 		Description: "ssetunnel " + subcommand + " daemon",
-		Arguments:   buildServiceArgs(subcommand, append([]string{action}, runtimeFlags...)),
+		Arguments:   BuildServiceArgs(subcommand, append([]string{action}, runtimeFlags...)),
 		Option:      service.KeyValue{},
 	}
 	if userService {
@@ -198,7 +208,7 @@ func dispatchServiceAction(subcommand string, args []string) (handled bool, err 
 
 	prg := &serviceProgram{
 		name:  svcConfig.Name,
-		runFn: buildRunFn(subcommand, runtimeFlags),
+		runFn: runFnBuilder(subcommand, runtimeFlags),
 	}
 
 	svc, err := service.New(prg, svcConfig)
@@ -294,25 +304,6 @@ func dispatchServiceAction(subcommand string, args []string) (handled bool, err 
 	return false, nil
 }
 
-// buildRunFn returns a closure that calls runServer or runAgent with the
-// action verb already stripped from args.  --service-user is filtered out
-// because it is a service-installer flag, not a runtime flag.
-func buildRunFn(subcommand string, args []string) func(context.Context) error {
-	filtered := stripFlag(args, "--service-user")
-	switch subcommand {
-	case "server":
-		return func(ctx context.Context) error { return runServer(ctx, filtered) }
-	case "agent":
-		return func(ctx context.Context) error { return runAgent(ctx, filtered) }
-	case "connect":
-		return func(ctx context.Context) error { return runConnect(ctx, filtered) }
-	default:
-		return func(context.Context) error {
-			return fmt.Errorf("unsupported subcommand for service: %s", subcommand)
-		}
-	}
-}
-
 // buildServiceArgs constructs the Arguments slice for service.Config.
 // The OS service manager invokes: binary <Arguments...>.
 // We replace the action verb with "run" and preserve all remaining flags.
@@ -320,20 +311,32 @@ func buildRunFn(subcommand string, args []string) func(context.Context) error {
 // (service.Config.UserName) and is not a runtime flag the daemon recognises.
 // --base is stripped: route prefixing is the reverse proxy's job now, so a
 // re-install must not carry the retired flag forward into the unit file.
-func buildServiceArgs(subcommand string, args []string) []string {
+func BuildServiceArgs(subcommand string, args []string) []string {
 	out := []string{subcommand, "run"}
 	if len(args) > 1 {
 		out = append(out, args[1:]...)
 	}
-	return stripRetiredBase(stripFlag(out, "--service-user"))
+	return StripRetiredBase(StripFlag(out, "--service-user"))
 }
 
-// stripRetiredBase removes every spelling of the retired --base flag from a
+// defaultRunFnBuilder returns a function that reports the subcommand as
+// unsupported. Binaries pass their own builder (e.g. clicommand.BuildRunFn
+// for client subcommands, or a combined builder for the legacy binary).
+func defaultRunFnBuilder(subcommand string, _ []string) func(context.Context) error {
+	return func(context.Context) error {
+		return fmt.Errorf("unsupported subcommand for service: %s", subcommand)
+	}
+}
+
+// Ensure defaultRunFnBuilder satisfies the RunFnBuilder type.
+var _ RunFnBuilder = defaultRunFnBuilder
+
+// StripRetiredBase removes every spelling of the retired --base flag from a
 // persisted or supplied argument list. extractFlag is not used here because it
 // only recognises the long form and, when --base is the last argument, leaves it
 // in place — which would make the installed unit fail with "flag needs an
 // argument: -base" and restart-loop exactly the way removing the flag did.
-func stripRetiredBase(args []string) []string {
+func StripRetiredBase(args []string) []string {
 	out := make([]string, 0, len(args))
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
@@ -435,7 +438,7 @@ func saveServiceArgsToDir(dir, name string, args []string) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	args = stripRetiredBase(args)
+	args = StripRetiredBase(args)
 	return os.WriteFile(filepath.Join(dir, name+".args"), []byte(strings.Join(args, "\n")), 0o600)
 }
 
@@ -464,7 +467,7 @@ func loadServiceArgsFromDir(dir, name string) ([]string, error) {
 // extractFlag removes a --key value pair from args and returns the value
 // and the remaining args. It supports both --key value and --key=value
 // forms. If the flag is not present, it returns ("", originalArgs).
-func extractFlag(args []string, key string) (value string, remaining []string) {
+func ExtractFlag(args []string, key string) (value string, remaining []string) {
 	remaining = make([]string, 0, len(args))
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
@@ -490,7 +493,7 @@ func extractFlag(args []string, key string) (value string, remaining []string) {
 // stripFlag removes all occurrences of a --key (and its value) from args.
 // It is a convenience wrapper around extractFlag for cases where the value
 // is not needed (e.g. filtering installer-only flags from runtime args).
-func stripFlag(args []string, key string) []string {
-	_, remaining := extractFlag(args, key)
+func StripFlag(args []string, key string) []string {
+	_, remaining := ExtractFlag(args, key)
 	return remaining
 }

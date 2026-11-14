@@ -2,8 +2,12 @@ version: "3"
 
 vars:
   BIN: ssetunnel
+  SERVER_BIN: server
+  CLI_BIN: cli
   BUILD_DIR: build
   FRONTEND_DIR: frontend/console
+  CLIENT_DIR: frontend/client
+  CLIX_DIR: app/clix
   GIT_SHA:
     sh: git rev-parse --short HEAD 2>/dev/null || echo unknown
   VERSION:
@@ -29,18 +33,17 @@ tasks:
   ci:
     desc: Full CI pipeline (build, vet, test)
     cmds:
-      # The committed frontend/console/dist is a build artifact that go:embed
-      # bakes into the binary, so CI has to rebuild it and prove it still
-      # matches src/ — otherwise a stale bundle ships silently.
-      # --frozen-lockfile keeps the rebuild on the exact esbuild/rollup versions
-      # the lockfile pins, so the diff below compares like with like.
       - task: fe:ci-install
       - task: fe:ci-build
       - task: fe:dist-drift
+      - task: client:ci-install
+      - task: client:ci-build
+      - task: client:dist-drift
       - task: go:build
+      - task: go:build:server
+      - task: go:build:cli
       - task: go:vet
       - task: go:test
-      - task: fe:test
 
   fe:ci-install:
     desc: Install frontend dependencies at the locked versions (CI only)
@@ -69,10 +72,29 @@ tasks:
   # ── Go ──────────────────────────────────────────────────────────────
 
   go:build:
-    desc: Build Go CLI binary
+    desc: Build all Go binaries (ssetunnel, server, cli)
+    cmds:
+      - task: go:build:legacy
+      - task: go:build:server
+      - task: go:build:cli
+
+  go:build:legacy:
+    desc: Build the legacy compatibility binary
     cmds:
       - mkdir -p {{.BUILD_DIR}}
       - go build -ldflags "{{.LDFLAGS}}" -o {{.BUILD_DIR}}/{{.BIN}} ./cmd/ssetunnel
+
+  go:build:server:
+    desc: Build the server binary
+    cmds:
+      - mkdir -p {{.BUILD_DIR}}
+      - go build -ldflags "{{.LDFLAGS}}" -o {{.BUILD_DIR}}/{{.SERVER_BIN}} ./cmd/server
+
+  go:build:cli:
+    desc: Build the CLI binary
+    cmds:
+      - mkdir -p {{.BUILD_DIR}}
+      - go build -ldflags "{{.LDFLAGS}}" -o {{.BUILD_DIR}}/{{.CLI_BIN}} ./cmd/cli
 
   go:test:
     desc: Run Go tests with race detector
@@ -101,15 +123,27 @@ tasks:
       - go mod tidy
 
   go:run:
-    desc: Run Go CLI (pass CLI_ARGS="..." for arguments)
+    desc: Run legacy binary (pass CLI_ARGS="..." for arguments)
     cmds:
       - go run -ldflags "{{.LDFLAGS}}" ./cmd/ssetunnel {{.CLI_ARGS}}
 
+  go:run:server:
+    desc: Run server binary (pass CLI_ARGS="..." for arguments)
+    cmds:
+      - go run -ldflags "{{.LDFLAGS}}" ./cmd/server {{.CLI_ARGS}}
+
+  go:run:cli:
+    desc: Run CLI binary (pass CLI_ARGS="..." for arguments)
+    cmds:
+      - go run -ldflags "{{.LDFLAGS}}" ./cmd/cli {{.CLI_ARGS}}
+
   go:release:
-    desc: Build native release binary for current platform
+    desc: Build native release binaries for all products
     cmds:
       - mkdir -p {{.DIST}}
       - go build -trimpath -ldflags "{{.RELEASE_LDFLAGS}}" -o {{.DIST}}/{{.BIN}}-{{OS}}-{{ARCH}} ./cmd/ssetunnel
+      - go build -trimpath -ldflags "{{.RELEASE_LDFLAGS}}" -o {{.DIST}}/{{.SERVER_BIN}}-{{OS}}-{{ARCH}} ./cmd/server
+      - go build -trimpath -ldflags "{{.RELEASE_LDFLAGS}}" -o {{.DIST}}/{{.CLI_BIN}}-{{OS}}-{{ARCH}} ./cmd/cli
 
   go:release:signed:
     desc: Build and codesign release binary for current platform
@@ -126,10 +160,12 @@ tasks:
       - mv 'dist/SSE Tunnel.app' /Applications/
 
   go:release-linux:
-    desc: cross compile for linux amd64 binary with purego
+    desc: Cross compile for linux amd64 with purego
     cmds:
       - mkdir -p {{.DIST}}
       - CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -tags purego -trimpath -ldflags "{{.RELEASE_LDFLAGS}}" -o {{.DIST}}/{{.BIN}}-linux-amd64 ./cmd/ssetunnel
+      - CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -tags purego -trimpath -ldflags "{{.RELEASE_LDFLAGS}}" -o {{.DIST}}/{{.SERVER_BIN}}-linux-amd64 ./cmd/server
+      - CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -tags purego -trimpath -ldflags "{{.RELEASE_LDFLAGS}}" -o {{.DIST}}/{{.CLI_BIN}}-linux-amd64 ./cmd/cli
 
   go:clean:
     desc: Clean Go build artifacts
@@ -279,5 +315,54 @@ tasks:
   fe:clean:
     desc: Clean frontend build output
     dir: "{{.FRONTEND_DIR}}"
+    cmds:
+      - rm -rf dist
+
+  # ── Client Frontend ──────────────────────────────────────────────
+
+  client:install:
+    desc: Install client frontend dependencies
+    dir: "{{.CLIENT_DIR}}"
+    cmds:
+      - bun install
+
+  client:build:
+    desc: Build client frontend SPA
+    dir: "{{.CLIENT_DIR}}"
+    cmds:
+      - bun run build
+
+  client:ci-install:
+    desc: Install client dependencies at locked versions (CI only)
+    dir: "{{.CLIENT_DIR}}"
+    cmds:
+      - bun install --frozen-lockfile
+
+  client:ci-build:
+    desc: Rebuild the client embedded bundle (CI only)
+    dir: "{{.CLIENT_DIR}}"
+    cmds:
+      - bun run build
+
+  client:dist-drift:
+    desc: Fail if the committed client bundle no longer matches src/
+    cmds:
+      - |
+        if ! git diff --quiet -- frontend/client/dist; then
+          echo "ERROR: frontend/client/dist is stale — run 'task client:build' and commit the result." >&2
+          git diff --stat -- frontend/client/dist >&2
+          exit 1
+        fi
+        echo "client dist drift check: OK (bundle matches src/)"
+
+  client:dev:
+    desc: Run client frontend dev server
+    dir: "{{.CLIENT_DIR}}"
+    cmds:
+      - bun run dev
+
+  client:clean:
+    desc: Clean client frontend build output
+    dir: "{{.CLIENT_DIR}}"
     cmds:
       - rm -rf dist

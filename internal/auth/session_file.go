@@ -241,6 +241,68 @@ func UpdateSessionToken(serverURL, newToken string, expiresAt time.Time) error {
 	return saveSessionFile(sf)
 }
 
+// LoadSessionEntry reads the full session entry for the given server URL.
+// Returns nil when no matching entry exists.
+func LoadSessionEntry(serverURL string) (*SessionEntry, error) {
+	sf, err := loadSessionFile()
+	if err != nil {
+		return nil, err
+	}
+	if serverURL != "" {
+		key := sessionKey(serverURL)
+		if entry, ok := sf.Sessions[key]; ok {
+			return &entry, nil
+		}
+		return nil, nil
+	}
+	// No server specified — return first entry (sorted for determinism).
+	keys := make([]string, 0, len(sf.Sessions))
+	for srv := range sf.Sessions {
+		keys = append(keys, srv)
+	}
+	sort.Strings(keys)
+	if len(keys) > 0 {
+		entry := sf.Sessions[keys[0]]
+		return &entry, nil
+	}
+	return nil, nil
+}
+
+// DeleteSession removes the session entry for the given server URL.
+// If serverURL is empty, deletes all entries (full logout).
+func DeleteSession(serverURL string) error {
+	sf, err := loadSessionFile()
+	if err != nil {
+		return err
+	}
+	if serverURL != "" {
+		delete(sf.Sessions, sessionKey(serverURL))
+	} else {
+		sf.Sessions = make(map[string]SessionEntry)
+	}
+	return saveSessionFile(sf)
+}
+
+// ClearSessionToken clears the token and expiry for the session entry
+// matching the given server URL, but preserves the server metadata
+// (server URL, console URL, username) so the entry remains available
+// for server selection UIs. Returns nil when no matching entry exists.
+func ClearSessionToken(serverURL string) error {
+	sf, err := loadSessionFile()
+	if err != nil {
+		return err
+	}
+	key := sessionKey(serverURL)
+	entry, ok := sf.Sessions[key]
+	if !ok {
+		return nil
+	}
+	entry.Token = ""
+	entry.ExpiresAt = ""
+	sf.Sessions[key] = entry
+	return saveSessionFile(sf)
+}
+
 // SessionServers returns the list of server URLs with stored sessions.
 func SessionServers() ([]string, error) {
 	sf, err := loadSessionFile()
@@ -257,6 +319,27 @@ func SessionServers() ([]string, error) {
 	}
 	sort.Strings(servers)
 	return servers, nil
+}
+
+// ListAllSessions returns all session entries from the session file.
+// Each entry's ServerURL is populated, falling back to the map key for
+// legacy sessions.
+func ListAllSessions() ([]SessionEntry, error) {
+	sf, err := loadSessionFile()
+	if err != nil {
+		return nil, err
+	}
+	entries := make([]SessionEntry, 0, len(sf.Sessions))
+	for key, entry := range sf.Sessions {
+		if entry.ServerURL == "" {
+			entry.ServerURL = key
+		}
+		entries = append(entries, entry)
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].ServerURL < entries[j].ServerURL
+	})
+	return entries, nil
 }
 
 // stripURLUserinfo removes userinfo (user:password) from a URL to prevent

@@ -1,6 +1,6 @@
 //go:build windows
 
-package main
+package command
 
 import "syscall"
 
@@ -8,5 +8,5 @@ import "syscall"
 // exist.  sendReload guards against this with a runtime.GOOS check.
 func syscallSIGHUP() syscall.Signal { return 0 }
 
-// installSIGHUPHandler is a no-op on Windows where SIGHUP is not available.
-func installSIGHUPHandler(_, _ string) {}
+// InstallSIGHUPHandler is a no-op on Windows where SIGHUP is not available.
+func InstallSIGHUPHandler(_, _ string) {}

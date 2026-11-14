@@ -19,7 +19,7 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: "1.2"
+          bun-version: "latest"
       - name: Install Task
         uses: arduino/setup-task@v2
         with:
@@ -27,5 +27,9 @@ jobs:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y libx11-dev libxtst-dev libpng-dev
+      - name: Build frontends
+        run: |
+          cd frontend/console && bun install --frozen-lockfile && bun run build && cd ../..
+          cd frontend/client && bun install --frozen-lockfile && bun run build && cd ../..
       - name: CI
         run: task ci

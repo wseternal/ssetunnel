@@ -1,4 +1,4 @@
-package main
+package clicommand
 
 import (
 	"flag"
@@ -11,7 +11,14 @@ import (
 	"github.com/wseternal/ssetunnel/internal/agentmod"
 )
 
-const moduleUsage = `usage: ssetunnel module <subcommand> [flags]
+// BinaryName is the CLI binary name used in help text and usage messages.
+// It defaults to "ssetunnel" and is overridden by cmd/cli to "cli".
+var BinaryName = "ssetunnel"
+
+// moduleUsage returns the help text for the module subcommand,
+// using the current BinaryName.
+func moduleUsage() string {
+	return fmt.Sprintf(`usage: %s module <subcommand> [flags]
 
 subcommands:
   install    install a module package
@@ -21,29 +28,22 @@ subcommands:
   status     show module status
   remove     remove an installed module
   list       list all installed modules
-`
-
-// agentDataDir returns the default agent data directory.
-func agentDataDir() (string, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("get home directory: %w", err)
-	}
-	return filepath.Join(home, ".ssetunnel", "agent"), nil
+`, BinaryName)
 }
 
 // getRegistry creates or loads the module registry from the default data directory.
 func getRegistry() (*agentmod.Registry, error) {
-	dataDir, err := agentDataDir()
+	dataDir, err := AgentDataDir()
 	if err != nil {
 		return nil, err
 	}
 	return agentmod.NewRegistry(dataDir)
 }
 
-func runModule(args []string) error {
+// RunModule manages agent module lifecycle (install, start, stop, etc.).
+func RunModule(args []string) error {
 	if len(args) == 0 {
-		fmt.Fprint(os.Stderr, moduleUsage)
+		fmt.Fprint(os.Stderr, moduleUsage())
 		return fmt.Errorf("no subcommand specified")
 	}
 
@@ -66,7 +66,7 @@ func runModule(args []string) error {
 	case "list":
 		return moduleList(subargs)
 	default:
-		fmt.Fprintf(os.Stderr, "unknown module subcommand %q\n%s", subcmd, moduleUsage)
+		fmt.Fprintf(os.Stderr, "unknown module subcommand %q\n%s", subcmd, moduleUsage())
 		return fmt.Errorf("unknown subcommand: %s", subcmd)
 	}
 }
@@ -85,7 +85,7 @@ func moduleInstall(args []string) error {
 		return fmt.Errorf("--openapi is required")
 	}
 	if fs.NArg() < 3 {
-		return fmt.Errorf("usage: ssetunnel module install <module-id> <service-name> <version> --executable <path> --openapi <path>")
+		return fmt.Errorf("usage: %s module install <module-id> <service-name> <version> --executable <path> --openapi <path>", BinaryName)
 	}
 
 	moduleID := fs.Arg(0)
@@ -136,13 +136,13 @@ func moduleInstall(args []string) error {
 	}
 
 	fmt.Printf("Installed module %s v%s\n", moduleID, version)
-	fmt.Println("Note: Use 'ssetunnel module start' to enable the module.")
+	fmt.Printf("Note: Use '%s module start' to enable the module.\n", BinaryName)
 	return nil
 }
 
 func moduleStart(args []string) error {
 	if len(args) < 1 {
-		return fmt.Errorf("usage: ssetunnel module start <module-id>")
+		return fmt.Errorf("usage: %s module start <module-id>", BinaryName)
 	}
 	moduleID := args[0]
 
@@ -162,7 +162,7 @@ func moduleStart(args []string) error {
 
 func moduleStop(args []string) error {
 	if len(args) < 1 {
-		return fmt.Errorf("usage: ssetunnel module stop <module-id>")
+		return fmt.Errorf("usage: %s module stop <module-id>", BinaryName)
 	}
 	moduleID := args[0]
 
@@ -181,7 +181,7 @@ func moduleStop(args []string) error {
 
 func moduleRestart(args []string) error {
 	if len(args) < 1 {
-		return fmt.Errorf("usage: ssetunnel module restart <module-id>")
+		return fmt.Errorf("usage: %s module restart <module-id>", BinaryName)
 	}
 	moduleID := args[0]
 
@@ -241,7 +241,7 @@ func moduleStatus(args []string) error {
 
 func moduleRemove(args []string) error {
 	if len(args) < 1 {
-		return fmt.Errorf("usage: ssetunnel module remove <module-id>")
+		return fmt.Errorf("usage: %s module remove <module-id>", BinaryName)
 	}
 	moduleID := args[0]
 
