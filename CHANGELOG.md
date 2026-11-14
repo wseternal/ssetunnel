@@ -39,6 +39,11 @@
 
 ### Breaking Changes
 
+* **login console URL validation** — `login` (all surfaces) now applies the
+  same SSRF rule as session refresh: plain `http://` console URLs are
+  accepted only for loopback hosts (`localhost`, `127.0.0.1`, `::1`).
+  LAN dev setups like `http://192.168.1.5:8081` must use HTTPS or a
+  loopback port-forward.
 * **remove --base flag and /console path prefix** — all routes are now
   root-relative (`/events`, `/api/v1/...` instead of `/console/api/v1/...`).
   Path prefixing is delegated to the reverse proxy (e.g. Caddy `handle_path`).

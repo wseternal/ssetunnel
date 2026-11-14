@@ -25,3 +25,9 @@ Secured local HTTP server behind `cli ui`. Serves the embedded client SPA (`fron
 * Route order: `/api` subrouter (auth) → `/assets/` → bare `/assets` 404 → SPA catch-all last.
 * The launch secret comes from `URL()`'s fragment; there is no secret override knob.
 * Regression tests (`runtime_test.go`, `server_test.go`) use the real `Serve` boundary and an httptest tunnel stub; the test HOME must be short (macOS unix-socket path limit).
+
+## Known Limitations (deferred)
+
+* `ServeListener` does not WaitGroup-drain active proxy goroutines before returning; on restart, old forwarded sessions overlap the new generation briefly until the transport close unwinds their copies (no permanent leak).
+* `ResolveSession` reads the session file 2–3× per call (load + entry + refresh re-read); cold path, small file — a single-read refactor would churn `auth.LoadSession`'s signature across all consumers.
+* The 20 s teardown cap can be exceeded by `Supervisor.Stop` with several enabled modules (serial 5 s/module); the stop then reports a timeout but state stays consistent and a retry succeeds.

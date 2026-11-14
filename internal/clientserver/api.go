@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/gorilla/mux"
@@ -20,7 +21,6 @@ var errBodyTooLarge = errors.New("request body too large")
 
 // registerAPIRoutes registers the thin API routes that delegate to clientapp.
 func (s *Server) registerAPIRoutes(r *mux.Router) {
-	r.Use(requestLogging)
 	r.HandleFunc("/login", s.handleLogin).Methods("POST")
 	r.HandleFunc("/totp-check", s.handleTOTPCheck).Methods("POST")
 	r.HandleFunc("/session", s.handleGetSession).Methods("GET")
@@ -103,6 +103,9 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case errors.Is(err, clientapp.ErrInvalidCredentials):
 			writeError(w, http.StatusUnauthorized, "login failed: invalid credentials or TOTP code")
+		case errors.Is(err, clientapp.ErrInvalidConsoleURL):
+			// Locally generated validation message — safe to echo.
+			writeError(w, http.StatusBadRequest, err.Error())
 		case errors.Is(err, clientapp.ErrConsoleUnavailable):
 			writeError(w, http.StatusBadGateway, "login failed: console unreachable or rejected the request")
 		default:
@@ -173,16 +176,27 @@ func (s *Server) handleListSessions(w http.ResponseWriter, _ *http.Request) {
 func (s *Server) handleLogout(w http.ResponseWriter, _ *http.Request) {
 	// The UI owns these runtimes (ADR-005): logout tears them down so no
 	// tunnel keeps running on a deleted credential until silent expiry.
-	if err := s.agent.stop(); err != nil {
-		log.Printf("api: logout: agent teardown: %v", err)
-	}
-	s.connects.stopAll()
+	// Parallel and bounded like Serve's shutdown, so the handler stays
+	// inside the server WriteTimeout and the browser's abort budget.
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		if err := s.agent.stop(); err != nil {
+			log.Printf("api: logout: agent teardown: %v", err)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		s.connects.stopAll()
+	}()
+	wg.Wait()
 
-	// Resolve the current session first so we only delete this one entry,
-	// preserving other saved sessions for the login page dropdown.
-	sess, err := clientapp.ResolveSession("", "ui")
-	if err == nil && sess.URL != "" {
-		if err := auth.DeleteSession(sess.URL); err != nil {
+	// Delete only this entry, preserving other saved sessions for the login
+	// dropdown. LoadSession (not ResolveSession) so logout never blocks on a
+	// token-refresh round-trip.
+	if _, resolvedServer, _, _, err := auth.LoadSession(""); err == nil && resolvedServer != "" {
+		if err := auth.DeleteSession(resolvedServer); err != nil {
 			log.Printf("api: logout failed to clear session: %v", err)
 			writeError(w, http.StatusInternalServerError, "failed to clear session")
 			return
@@ -281,12 +295,10 @@ func (s *Server) handleConnectStart(w http.ResponseWriter, r *http.Request) {
 // POST /api/connect/stop/{name}
 func (s *Server) handleConnectStop(w http.ResponseWriter, r *http.Request) {
 	name := mux.Vars(r)["name"]
+	// stop returns only errNotFound or nil: a session's terminal run error
+	// is logged, not surfaced — tearing down an errored session succeeded.
 	if err := s.connects.stop(name); err != nil {
-		if errors.Is(err, errNotFound) {
-			writeError(w, http.StatusNotFound, err.Error())
-		} else {
-			writeError(w, http.StatusInternalServerError, err.Error())
-		}
+		writeError(w, http.StatusNotFound, err.Error())
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

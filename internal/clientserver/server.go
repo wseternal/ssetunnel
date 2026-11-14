@@ -74,6 +74,7 @@ func New(cfg Config) (*Server, error) {
 		secret:    secret,
 		baseURL:   fmt.Sprintf("http://%s/#%s", ln.Addr().String(), secret),
 		agent:     &agentRuntime{},
+		connects:  newConnectRegistry(context.Background()),
 		serverCtx: context.Background(),
 		version:   cfg.Version,
 	}
@@ -193,13 +194,18 @@ func (s *Server) buildHandler() http.Handler {
 
 	r := mux.NewRouter()
 
-	// API routes (require launch secret).
+	// API routes (require launch secret). requestLogging is registered
+	// first (outermost) so rejected requests — bad secrets, rebinding
+	// attempts — are logged too, not just authenticated ones.
 	api := r.PathPrefix("/api").Subrouter()
+	api.Use(requestLogging)
 	api.Use(s.authMiddleware)
 	s.registerAPIRoutes(api)
 
-	// Explicit 404 for unmatched API paths.
+	// Explicit 404 for unmatched API paths, including exact /api (the
+	// subrouter matcher does not catch it; the SPA catch-all would).
 	api.PathPrefix("/").HandlerFunc(notFound)
+	r.Path("/api").HandlerFunc(notFound)
 
 	// Hashed assets: immutable, served directly from the embedded FS.
 	r.PathPrefix("/assets/").HandlerFunc(s.serveAsset).Methods("GET", "HEAD")
@@ -222,10 +228,13 @@ var allowedOriginHosts = map[string]bool{
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Exact Host check — reject DNS rebinding. SplitHostPort handles
-		// the bracketed IPv6 form ("[::1]:port"); a bare host passes through.
+		// the bracketed IPv6 form ("[::1]:port"); a bare host passes
+		// through with brackets stripped ("[::1]" without a port).
 		host := r.Host
 		if h, _, err := net.SplitHostPort(host); err == nil {
 			host = h
+		} else {
+			host = strings.Trim(host, "[]")
 		}
 		if host != "127.0.0.1" && host != "localhost" && host != "::1" {
 			http.Error(w, "forbidden host", http.StatusForbidden)

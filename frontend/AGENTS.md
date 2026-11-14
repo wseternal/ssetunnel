@@ -27,9 +27,11 @@ frontend/
 │   ├── dist/           # Built assets (committed for go:embed)
 │   ├── src/
 │   │   ├── App.tsx          # Tabs + login dialog + bridge selection
+│   │   ├── main.tsx         # Entry point
 │   │   ├── AgentPage.tsx    # Agent config + lifecycle
 │   │   ├── ConnectPage.tsx  # Named connect instances
 │   │   ├── LoginForm.tsx    # Server dropdowns + TOTP check
+│   │   ├── ServerURLField.tsx # Saved-session URL autocomplete
 │   │   ├── bridge.ts        # HTTP bridge (launch-secret auth)
 │   │   ├── wails.ts         # Wails adapter (null until bindings exist)
 │   │   └── types.ts         # Transport-neutral Bridge contract + DTOs

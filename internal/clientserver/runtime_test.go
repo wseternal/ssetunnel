@@ -16,11 +16,20 @@ import (
 	"github.com/wseternal/ssetunnel/internal/clientserver"
 )
 
-// startUIServer boots a real clientserver against a tunnel stub that holds
-// /events open so a started agent stays alive. Returns the base URL, the
-// launch secret, a channel signalling an active agent connection, and a
-// cleanup function.
-func startUIServer(t *testing.T) (base, secret string, agentConnected chan struct{}, cleanup func()) {
+// uiFixture is a real clientserver against a tunnel stub that holds /events
+// open so a started agent stays alive. connected/disconnected signal the
+// agent's SSE attachment lifecycle; serveDone closes after Serve returns.
+type uiFixture struct {
+	base         string
+	secret       string
+	connected    chan struct{}
+	disconnected chan struct{}
+	stop         context.CancelFunc
+	serveDone    chan struct{}
+	cleanup      func()
+}
+
+func startUIServer(t *testing.T) uiFixture {
 	t.Helper()
 	// Short HOME: the agent's module IPC unix socket path must stay under
 	// macOS's 104-byte sun_path limit, which t.TempDir()'s test-name path
@@ -32,7 +41,8 @@ func startUIServer(t *testing.T) (base, secret string, agentConnected chan struc
 	t.Cleanup(func() { os.RemoveAll(home) })
 	t.Setenv("HOME", home)
 
-	agentConnected = make(chan struct{}, 16)
+	connected := make(chan struct{}, 16)
+	disconnected := make(chan struct{}, 16)
 	tunnel := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/events" {
 			w.Header().Set("Content-Type", "text/event-stream")
@@ -41,10 +51,14 @@ func startUIServer(t *testing.T) (base, secret string, agentConnected chan struc
 				f.Flush()
 			}
 			select {
-			case agentConnected <- struct{}{}:
+			case connected <- struct{}{}:
 			default:
 			}
 			<-r.Context().Done()
+			select {
+			case disconnected <- struct{}{}:
+			default:
+			}
 			return
 		}
 		http.NotFound(w, r)
@@ -63,17 +77,25 @@ func startUIServer(t *testing.T) (base, secret string, agentConnected chan struc
 	if idx < 0 {
 		t.Fatalf("server URL has no secret fragment: %s", url)
 	}
-	base = strings.TrimRight(url[:idx], "/")
-	secret = url[idx+1:]
+	f := uiFixture{
+		base:         strings.TrimRight(url[:idx], "/"),
+		secret:       url[idx+1:],
+		connected:    connected,
+		disconnected: disconnected,
+		serveDone:    make(chan struct{}),
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	serveDone := make(chan error, 1)
-	go func() { serveDone <- srv.Serve(ctx) }()
+	f.stop = cancel
+	go func() {
+		srv.Serve(ctx)
+		close(f.serveDone)
+	}()
 
 	// Wait until the API answers.
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		resp, err := http.Get(base + "/api/agent/status")
+		resp, err := http.Get(f.base + "/api/agent/status")
 		if err == nil {
 			resp.Body.Close()
 			break
@@ -84,16 +106,16 @@ func startUIServer(t *testing.T) (base, secret string, agentConnected chan struc
 		time.Sleep(10 * time.Millisecond)
 	}
 
-	cleanup = func() {
+	f.cleanup = func() {
 		cancel()
 		select {
-		case <-serveDone:
+		case <-f.serveDone:
 		case <-time.After(15 * time.Second):
 			t.Error("Serve did not return within 15s of context cancel")
 		}
 		tunnel.Close()
 	}
-	return base, secret, agentConnected, cleanup
+	return f
 }
 
 func apiCall(t *testing.T, client *http.Client, method, url, secret string, body any) int {
@@ -156,48 +178,50 @@ var agentCfg = map[string]any{
 // the wait for the old goroutine, which needed that mutex to exit — the
 // restart request, every later status poll, and shutdown all hung forever.
 func TestAgentRestartWhileRunning(t *testing.T) {
-	base, secret, connected, cleanup := startUIServer(t)
-	defer cleanup()
+	f := startUIServer(t)
+	defer f.cleanup()
 
 	client := &http.Client{Timeout: 5 * time.Second}
 
-	if code := apiCall(t, client, "POST", base+"/api/agent/start", secret, agentCfg); code != http.StatusNoContent {
+	if code := apiCall(t, client, "POST", f.base+"/api/agent/start", f.secret, agentCfg); code != http.StatusNoContent {
 		t.Fatalf("start: got %d, want 204", code)
 	}
 	select {
-	case <-connected:
+	case <-f.connected:
 	case <-time.After(5 * time.Second):
 		t.Fatal("agent never connected to the tunnel stub")
 	}
-	waitRunning(t, client, base, secret, true)
+	waitRunning(t, client, f.base, f.secret, true)
 
 	// Restart with a live agent: must return promptly (pre-fix: deadlock).
-	if code := apiCall(t, client, "POST", base+"/api/agent/restart", secret, agentCfg); code != http.StatusNoContent {
+	if code := apiCall(t, client, "POST", f.base+"/api/agent/restart", f.secret, agentCfg); code != http.StatusNoContent {
 		t.Fatalf("restart: got %d, want 204", code)
 	}
 	// Status must still answer after the restart.
-	waitRunning(t, client, base, secret, true)
+	waitRunning(t, client, f.base, f.secret, true)
 
-	if code := apiCall(t, client, "POST", base+"/api/agent/stop", secret, nil); code != http.StatusNoContent {
+	if code := apiCall(t, client, "POST", f.base+"/api/agent/stop", f.secret, nil); code != http.StatusNoContent {
 		t.Fatalf("stop: got %d, want 204", code)
 	}
-	waitRunning(t, client, base, secret, false)
+	waitRunning(t, client, f.base, f.secret, false)
 }
 
-// TestAgentConcurrentStopStart pins C2: a stop racing a start must not nil
-// the replacement run's cancel handle (which left an unstoppable ghost agent
-// and a status that reported stopped).
+// TestAgentConcurrentStopStart pins C2: after concurrent stop/start the
+// lifecycle must remain controllable — a stop reaches a stable stopped
+// state and a later start works again. (opMu serializes the transitions;
+// the generation guard in stop is defense-in-depth, so this test pins
+// controllability, not the raw race window.)
 func TestAgentConcurrentStopStart(t *testing.T) {
-	base, secret, connected, cleanup := startUIServer(t)
-	defer cleanup()
+	f := startUIServer(t)
+	defer f.cleanup()
 
 	client := &http.Client{Timeout: 5 * time.Second}
 
-	if code := apiCall(t, client, "POST", base+"/api/agent/start", secret, agentCfg); code != http.StatusNoContent {
+	if code := apiCall(t, client, "POST", f.base+"/api/agent/start", f.secret, agentCfg); code != http.StatusNoContent {
 		t.Fatalf("start: got %d, want 204", code)
 	}
 	select {
-	case <-connected:
+	case <-f.connected:
 	case <-time.After(5 * time.Second):
 		t.Fatal("agent never connected to the tunnel stub")
 	}
@@ -205,69 +229,97 @@ func TestAgentConcurrentStopStart(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		apiCall(t, client, "POST", base+"/api/agent/stop", secret, nil)
+		// t.Errorf (not Fatalf) here: FailNow must run on the test goroutine.
+		req, err := http.NewRequest("POST", f.base+"/api/agent/stop", nil)
+		if err != nil {
+			t.Errorf("concurrent stop request: %v", err)
+			return
+		}
+		req.Header.Set("Authorization", "Bearer "+f.secret)
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Errorf("concurrent stop: %v", err)
+			return
+		}
+		resp.Body.Close()
 	}()
-	apiCall(t, client, "POST", base+"/api/agent/start", secret, agentCfg)
+	apiCall(t, client, "POST", f.base+"/api/agent/start", f.secret, agentCfg)
 	select {
 	case <-done:
 	case <-time.After(10 * time.Second):
 		t.Fatal("concurrent stop never returned")
 	}
 
-	// Whatever the interleaving, the lifecycle must remain controllable:
-	// a stop reaches a stable stopped state and a later start works again.
-	if code := apiCall(t, client, "POST", base+"/api/agent/stop", secret, nil); code != http.StatusNoContent {
+	// Whatever the interleaving, the lifecycle must remain controllable.
+	if code := apiCall(t, client, "POST", f.base+"/api/agent/stop", f.secret, nil); code != http.StatusNoContent {
 		t.Fatalf("stop after race: got %d, want 204", code)
 	}
-	waitRunning(t, client, base, secret, false)
-	if code := apiCall(t, client, "POST", base+"/api/agent/start", secret, agentCfg); code != http.StatusNoContent {
+	waitRunning(t, client, f.base, f.secret, false)
+	if code := apiCall(t, client, "POST", f.base+"/api/agent/start", f.secret, agentCfg); code != http.StatusNoContent {
 		t.Fatalf("start after race: got %d, want 204", code)
 	}
-	waitRunning(t, client, base, secret, true)
-	if code := apiCall(t, client, "POST", base+"/api/agent/stop", secret, nil); code != http.StatusNoContent {
+	waitRunning(t, client, f.base, f.secret, true)
+	if code := apiCall(t, client, "POST", f.base+"/api/agent/stop", f.secret, nil); code != http.StatusNoContent {
 		t.Fatalf("final stop: got %d, want 204", code)
 	}
-	waitRunning(t, client, base, secret, false)
+	waitRunning(t, client, f.base, f.secret, false)
 }
 
 // TestShutdownWithRunningAgent pins W1: cancelling the server context must
-// drain HTTP and tear down the owned agent within a bounded time.
+// tear down the owned agent (its tunnel attachment drops) and Serve must
+// return only after teardown, within a bounded time.
 func TestShutdownWithRunningAgent(t *testing.T) {
-	base, secret, connected, cleanup := startUIServer(t)
-	defer cleanup()
+	f := startUIServer(t)
+	defer f.cleanup()
 
 	client := &http.Client{Timeout: 5 * time.Second}
-	if code := apiCall(t, client, "POST", base+"/api/agent/start", secret, agentCfg); code != http.StatusNoContent {
+	if code := apiCall(t, client, "POST", f.base+"/api/agent/start", f.secret, agentCfg); code != http.StatusNoContent {
 		t.Fatalf("start: got %d, want 204", code)
 	}
 	select {
-	case <-connected:
+	case <-f.connected:
 	case <-time.After(5 * time.Second):
 		t.Fatal("agent never connected to the tunnel stub")
 	}
-	// cleanup cancels the context and asserts Serve returns within 15s.
+
+	f.stop()
+	select {
+	case <-f.disconnected:
+	case <-time.After(10 * time.Second):
+		t.Fatal("agent tunnel attachment not torn down on shutdown")
+	}
+	select {
+	case <-f.serveDone:
+	case <-time.After(15 * time.Second):
+		t.Fatal("Serve did not return after teardown")
+	}
 }
 
 // TestLogoutStopsOwnedRuntimes pins S5: the UI owns its agent and connects,
 // so logout must tear them down instead of leaving them alive on a deleted
 // credential until silent server-side expiry.
 func TestLogoutStopsOwnedRuntimes(t *testing.T) {
-	base, secret, connected, cleanup := startUIServer(t)
-	defer cleanup()
+	f := startUIServer(t)
+	defer f.cleanup()
 
 	client := &http.Client{Timeout: 30 * time.Second}
-	if code := apiCall(t, client, "POST", base+"/api/agent/start", secret, agentCfg); code != http.StatusNoContent {
+	if code := apiCall(t, client, "POST", f.base+"/api/agent/start", f.secret, agentCfg); code != http.StatusNoContent {
 		t.Fatalf("start: got %d, want 204", code)
 	}
 	select {
-	case <-connected:
+	case <-f.connected:
 	case <-time.After(5 * time.Second):
 		t.Fatal("agent never connected to the tunnel stub")
 	}
-	waitRunning(t, client, base, secret, true)
+	waitRunning(t, client, f.base, f.secret, true)
 
-	if code := apiCall(t, client, "POST", base+"/api/logout", secret, nil); code != http.StatusNoContent {
+	if code := apiCall(t, client, "POST", f.base+"/api/logout", f.secret, nil); code != http.StatusNoContent {
 		t.Fatalf("logout: got %d, want 204", code)
 	}
-	waitRunning(t, client, base, secret, false)
+	waitRunning(t, client, f.base, f.secret, false)
+	select {
+	case <-f.disconnected:
+	case <-time.After(5 * time.Second):
+		t.Fatal("logout did not tear down the agent's tunnel attachment")
+	}
 }

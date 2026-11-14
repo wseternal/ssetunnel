@@ -53,14 +53,14 @@ export const httpBridge: Bridge = {
     return apiFetch<SessionDTO>('/login', {
       method: 'POST',
       body: JSON.stringify({ server, tunnel_server: tunnelServer, username, password, totp_code: totpCode }),
-    });
+    }, 20_000);
   },
 
   async checkTOTPRequired(server, username): Promise<boolean> {
     const result = await apiFetch<{ totp_required: boolean }>('/totp-check', {
       method: 'POST',
       body: JSON.stringify({ server, username }),
-    });
+    }, 20_000);
     return result.totp_required;
   },
 
@@ -98,18 +98,18 @@ export const httpBridge: Bridge = {
     await apiFetch<void>('/agent/start', {
       method: 'POST',
       body: JSON.stringify(cfg),
-    });
+    }, 25_000);
   },
 
   async stopAgent(): Promise<void> {
-    await apiFetch<void>('/agent/stop', { method: 'POST' });
+    await apiFetch<void>('/agent/stop', { method: 'POST' }, 25_000);
   },
 
   async restartAgent(cfg: AgentConfig): Promise<void> {
     await apiFetch<void>('/agent/restart', {
       method: 'POST',
       body: JSON.stringify(cfg),
-    });
+    }, 25_000);
   },
 
   async getConnectInstances(): Promise<ConnectStatus[]> {
@@ -120,17 +120,17 @@ export const httpBridge: Bridge = {
     await apiFetch<void>('/connect/start', {
       method: 'POST',
       body: JSON.stringify({ name, ...cfg }),
-    });
+    }, 25_000);
   },
 
   async stopConnect(name: string): Promise<void> {
-    await apiFetch<void>(`/connect/stop/${encodeURIComponent(name)}`, { method: 'POST' });
+    await apiFetch<void>(`/connect/stop/${encodeURIComponent(name)}`, { method: 'POST' }, 25_000);
   },
 
   async restartConnect(name: string, cfg: ConnectConfig): Promise<void> {
     await apiFetch<void>(`/connect/restart/${encodeURIComponent(name)}`, {
       method: 'POST',
       body: JSON.stringify(cfg),
-    });
+    }, 25_000);
   },
 };

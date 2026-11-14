@@ -1,6 +1,7 @@
 package clientserver
 
 import (
+	"errors"
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
@@ -65,6 +66,9 @@ func TestSecurityHeadersOnAllResponseClasses(t *testing.T) {
 		{"index", "GET", "/", false, http.StatusOK, "no-store"},
 		{"asset", "GET", asset, false, http.StatusOK, "public, max-age=31536000, immutable"},
 		{"unknown api", "GET", "/api/nope", true, http.StatusNotFound, "no-store"},
+		{"exact api", "GET", "/api", true, http.StatusNotFound, "no-store"},
+		{"asset missing", "GET", "/assets/nope.js", false, http.StatusNotFound, "no-store"},
+		{"path cleanup redirect", "GET", "//api/agent/status", false, http.StatusMovedPermanently, "no-store"},
 		{"method not allowed", "POST", "/", false, http.StatusMethodNotAllowed, "no-store"},
 		{"unauthorized api", "GET", "/api/agent/status", false, http.StatusUnauthorized, "no-store"},
 		{"bare assets", "GET", "/assets", false, http.StatusNotFound, "no-store"},
@@ -120,6 +124,9 @@ func TestHostCheck(t *testing.T) {
 		{"127.0.0.1:8080", http.StatusUnauthorized},
 		{"localhost:8080", http.StatusUnauthorized},
 		{"[::1]:8080", http.StatusUnauthorized},
+		{"127.0.0.1", http.StatusUnauthorized},
+		{"::1", http.StatusUnauthorized},
+		{"[::1]", http.StatusUnauthorized},
 	}
 	for _, tt := range tests {
 		t.Run(tt.host, func(t *testing.T) {
@@ -148,6 +155,7 @@ func TestOriginCheck(t *testing.T) {
 		{"https://127.0.0.1:8080", http.StatusForbidden},
 		{"http://localhost:8080", http.StatusUnauthorized},
 		{"http://127.0.0.1:8080", http.StatusUnauthorized},
+		{"http://[::1]:8080", http.StatusUnauthorized},
 	}
 	for _, tt := range tests {
 		t.Run(tt.origin, func(t *testing.T) {
@@ -207,5 +215,72 @@ func TestSecretComparison(t *testing.T) {
 	s.handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("correct secret: status = %d, want 200", rec.Code)
+	}
+}
+
+// TestOptionsStar pins the OPTIONS * hole: net/http would answer it before
+// the handler, so the server disables the general options handler and the
+// wrapper answers inside the header contract.
+func TestOptionsStar(t *testing.T) {
+	s := newTestServer(t)
+	req := httptest.NewRequest("OPTIONS", "*", nil)
+	rec := httptest.NewRecorder()
+	s.handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("OPTIONS *: status = %d, want 405", rec.Code)
+	}
+	if rec.Header().Get("Allow") == "" {
+		t.Error("OPTIONS * response has no Allow header")
+	}
+	assertContractHeaders(t, rec.Header(), "no-store")
+}
+
+func TestBodyLimit(t *testing.T) {
+	s := newTestServer(t)
+	body := strings.NewReader(strings.Repeat("x", 64*1024+1))
+	req := httptest.NewRequest("POST", "/api/login", body)
+	req.Host = "127.0.0.1:1234"
+	req.Header.Set("Authorization", "Bearer "+s.secret)
+	rec := httptest.NewRecorder()
+	s.handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversized body: status = %d, want 413", rec.Code)
+	}
+}
+
+func TestIndexMissingBundle(t *testing.T) {
+	s := newTestServer(t)
+	s.indexHTML = nil
+	req := httptest.NewRequest("GET", "/", nil)
+	rec := httptest.NewRecorder()
+	s.handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("missing bundle: status = %d, want 500", rec.Code)
+	}
+	assertContractHeaders(t, rec.Header(), "no-store")
+}
+
+func TestUIError(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"nil", nil, ""},
+		{
+			"cli wording translated",
+			errors.New("--server is required (no saved session found; run login first)"),
+			"no server configured (no saved session found; log in first)",
+		},
+		{"control chars stripped", errors.New("a\r\nb"), "ab"},
+		{"tab preserved", errors.New("keep\ttab"), "keep\ttab"},
+		{"truncated at rune boundary", errors.New(strings.Repeat("x", 300)), strings.Repeat("x", 200) + "…"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := uiError(tt.err); got != tt.want {
+				t.Fatalf("uiError = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }

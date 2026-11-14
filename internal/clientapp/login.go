@@ -21,21 +21,29 @@ import (
 // ErrInvalidCredentials marks a console rejection of the username/password/
 // TOTP combination. ErrConsoleUnavailable marks a network failure or a
 // non-auth console error; callers map it to 502, not 401.
+// ErrInvalidConsoleURL marks a locally rejected console URL (safe to echo).
 var (
 	ErrInvalidCredentials = errors.New("invalid credentials or TOTP code")
 	ErrConsoleUnavailable = errors.New("console unavailable")
+	ErrInvalidConsoleURL  = errors.New("invalid console URL")
 )
 
 // loginHTTPClient bounds every login/TOTP request. http.DefaultClient has
 // no timeout: a black-holed console would pin the caller goroutine forever
 // (the UI server's WriteTimeout kills the response, not the outbound call).
 // Cross-host redirects are refused so credentials are never forwarded to a
-// different origin.
+// different origin, and scheme downgrades are refused so an https console
+// cannot bounce the password into cleartext.
 var loginHTTPClient = &http.Client{
 	Timeout: 15 * time.Second,
 	CheckRedirect: func(req *http.Request, via []*http.Request) error {
-		if len(via) > 0 && req.URL.Host != via[0].URL.Host {
-			return fmt.Errorf("refusing cross-host redirect to %s", req.URL.Host)
+		if len(via) > 0 {
+			if req.URL.Host != via[0].URL.Host {
+				return fmt.Errorf("refusing cross-host redirect to %s", req.URL.Host)
+			}
+			if req.URL.Scheme != via[0].URL.Scheme {
+				return fmt.Errorf("refusing scheme-changing redirect to %s", req.URL.Scheme)
+			}
 		}
 		return nil
 	},
@@ -70,7 +78,7 @@ type LoginParams struct {
 func Login(ctx context.Context, p LoginParams) (*LoginResult, error) {
 	consoleBase, err := consoleAPIBase(p.ConsoleURL)
 	if err != nil {
-		return nil, fmt.Errorf("invalid console URL: %w", err)
+		return nil, err
 	}
 
 	reqBody, _ := json.Marshal(map[string]string{
@@ -147,7 +155,7 @@ func Login(ctx context.Context, p LoginParams) (*LoginResult, error) {
 func CheckTOTPRequired(ctx context.Context, consoleURL, username string) (bool, error) {
 	consoleBase, err := consoleAPIBase(consoleURL)
 	if err != nil {
-		return false, fmt.Errorf("invalid console URL: %w", err)
+		return false, err
 	}
 
 	checkBody, _ := json.Marshal(map[string]string{"username": username})
@@ -181,11 +189,11 @@ func CheckTOTPRequired(ctx context.Context, consoleURL, username string) (bool, 
 func consoleAPIBase(consoleURL string) (string, error) {
 	consoleURL = strings.TrimRight(consoleURL, "/")
 	if err := auth.ValidateConsoleURL(consoleURL); err != nil {
-		return "", err
+		return "", fmt.Errorf("%w: %v", ErrInvalidConsoleURL, err)
 	}
 	u, err := url.Parse(consoleURL)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("%w: %v", ErrInvalidConsoleURL, err)
 	}
 	u.Path = path.Join(u.Path, "/api/v1")
 	return u.String(), nil

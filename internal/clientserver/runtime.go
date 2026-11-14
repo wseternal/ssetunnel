@@ -71,6 +71,9 @@ func (ar *agentRuntime) start(parentCtx context.Context, cfg clientapp.AgentConf
 	run := &agentRun{cfg: cfg, cancel: cancel, done: make(chan struct{})}
 	go func() {
 		err := clientapp.RunAgent(ctx, cfg)
+		if err != nil {
+			log.Printf("ui: agent exited: %v", err)
+		}
 		run.err.Store(&err)
 		close(run.done)
 	}()
@@ -149,7 +152,7 @@ func uiError(err error) string {
 		return r
 	}, msg)
 	if len(msg) > 200 {
-		msg = msg[:200] + "…"
+		msg = string([]rune(msg)[:200]) + "…"
 	}
 	return msg
 }

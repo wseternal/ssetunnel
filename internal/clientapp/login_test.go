@@ -1,6 +1,43 @@
 package clientapp
 
-import "testing"
+import (
+	"errors"
+	"testing"
+)
+
+func TestConsoleAPIBase(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		input   string
+		want    string
+		wantErr error
+	}{
+		{"root", "http://127.0.0.1:8081", "http://127.0.0.1:8081/api/v1", nil},
+		{"trailing slash", "http://127.0.0.1:8081/", "http://127.0.0.1:8081/api/v1", nil},
+		{"console prefix preserved", "https://ex.com/console", "https://ex.com/console/api/v1", nil},
+		{"non-loopback http rejected", "http://192.168.1.5:8081", "", ErrInvalidConsoleURL},
+		{"non-http scheme rejected", "ftp://ex.com", "", ErrInvalidConsoleURL},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := consoleAPIBase(tt.input)
+			if tt.wantErr != nil {
+				if !errors.Is(err, tt.wantErr) {
+					t.Fatalf("consoleAPIBase(%q) err = %v, want %v", tt.input, err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("consoleAPIBase(%q): %v", tt.input, err)
+			}
+			if got != tt.want {
+				t.Fatalf("consoleAPIBase(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
 
 func TestDeriveTunnelURL(t *testing.T) {
 	t.Parallel()
