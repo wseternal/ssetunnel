@@ -232,6 +232,16 @@ type connectStartRequest struct {
 	BatchSize int    `json:"batch_size"`
 }
 
+func (r connectStartRequest) config() clientapp.ConnectConfig {
+	return clientapp.ConnectConfig{
+		ServerURL: r.ServerURL,
+		AgentID:   r.AgentID,
+		Target:    r.Target,
+		Local:     r.Local,
+		BatchSize: r.BatchSize,
+	}
+}
+
 // POST /api/agent/start
 func (s *Server) handleAgentStart(w http.ResponseWriter, r *http.Request) {
 	var req agentStartRequest
@@ -278,14 +288,7 @@ func (s *Server) handleConnectStart(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	cfg := clientapp.ConnectConfig{
-		ServerURL: req.ServerURL,
-		AgentID:   req.AgentID,
-		Target:    req.Target,
-		Local:     req.Local,
-		BatchSize: req.BatchSize,
-	}
-	if err := s.connects.start(req.Name, cfg); err != nil {
+	if err := s.connects.start(req.Name, req.config()); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -311,13 +314,7 @@ func (s *Server) handleConnectRestart(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	cfg := clientapp.ConnectConfig{
-		ServerURL: req.ServerURL,
-		AgentID:   req.AgentID,
-		Target:    req.Target,
-		Local:     req.Local,
-		BatchSize: req.BatchSize,
-	}
+	cfg := req.config()
 	// Empty request fields inherit the running instance's configuration so
 	// a bare restart keeps the same tunnel instead of silently re-targeting.
 	if prev, ok := s.connects.get(name); ok {

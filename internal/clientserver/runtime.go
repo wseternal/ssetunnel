@@ -276,6 +276,10 @@ func (cr *connectRegistry) stopAll() {
 	cr.instances = make(map[string]*clientapp.ConnectInstance)
 	cr.mu.Unlock()
 
+	if len(instances) == 0 {
+		return
+	}
+
 	var wg sync.WaitGroup
 	for name, inst := range instances {
 		wg.Add(1)
