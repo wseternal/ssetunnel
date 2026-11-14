@@ -167,9 +167,11 @@ func (s *Server) Serve(ctx context.Context) error {
 	}
 	// On context shutdown, Serve's return must mean everything is closed.
 	if ctx.Err() != nil {
+		t := time.NewTimer(teardownTimeout + 5*time.Second)
+		defer t.Stop()
 		select {
 		case <-teardownDone:
-		case <-time.After(teardownTimeout + 5*time.Second):
+		case <-t.C:
 			log.Printf("ui: runtime teardown did not complete; exiting")
 		}
 	}
