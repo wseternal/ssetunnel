@@ -227,13 +227,6 @@ func (cr *connectRegistry) start(name string, cfg clientapp.ConnectConfig) error
 	return nil
 }
 
-func (cr *connectRegistry) get(name string) (*clientapp.ConnectInstance, bool) {
-	cr.mu.Lock()
-	defer cr.mu.Unlock()
-	inst, ok := cr.instances[name]
-	return inst, ok
-}
-
 func (cr *connectRegistry) stop(name string) error {
 	cr.mu.Lock()
 	inst, exists := cr.instances[name]
@@ -279,7 +272,7 @@ func (cr *connectRegistry) list() []connectInfo {
 			ServerURL: inst.Config.ServerURL,
 			AgentID:   inst.Config.AgentID,
 			Target:    inst.Config.Target,
-			Running:   instErr == nil,
+			Running:   instErr == nil && !isDone(inst.Done()),
 		}
 		if instErr != nil {
 			info.Error = uiError(instErr)
@@ -287,6 +280,16 @@ func (cr *connectRegistry) list() []connectInfo {
 		result = append(result, info)
 	}
 	return result
+}
+
+// isDone reports whether ch has been closed without blocking.
+func isDone(ch <-chan struct{}) bool {
+	select {
+	case <-ch:
+		return true
+	default:
+		return false
+	}
 }
 
 // restart atomically stops a named connect (if running) and starts a new

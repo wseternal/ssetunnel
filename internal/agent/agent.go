@@ -101,6 +101,21 @@ type Agent struct {
 	runCtx atomic.Pointer[context.Context]
 }
 
+// InitLogCapture creates the log ring buffer without touching the global
+// log writer. The caller is responsible for calling log.SetOutput with a
+// MultiWriter that includes the returned buffer — typically under a
+// log-writer mutex so the SetOutput is serialized.
+//
+// When logBuf is already set, Run skips its own unprotected SetOutput,
+// closing the data-race window between concurrent log writer swaps.
+func (a *Agent) InitLogCapture() *LogBuffer {
+	a.logBuf = newLogBuffer(256)
+	return a.logBuf
+}
+
+// LogBuffer is a thread-safe ring buffer that captures recent log output.
+type LogBuffer = logBuffer
+
 // Close releases the module subsystem: it stops supervised module processes
 // and closes the IPC listener. Safe to call multiple times and safe when
 // modules were never initialized. Run does not call it — the Agent's owner
@@ -212,8 +227,15 @@ func (a *Agent) Run(ctx context.Context) error {
 	// Install log capture: all log.Printf output goes to both stderr
 	// and the ring buffer. The server can request recent lines via
 	// the control channel (MsgLogRequest).
-	a.logBuf = newLogBuffer(256)
-	log.SetOutput(io.MultiWriter(os.Stderr, a.logBuf))
+	//
+	// If logBuf was pre-set by the caller (e.g. clientapp.RunAgent
+	// via InstallLogCapture under a log-writer mutex), skip the
+	// SetOutput to avoid an unprotected concurrent write to the
+	// global log writer.
+	if a.logBuf == nil {
+		a.logBuf = newLogBuffer(256)
+		log.SetOutput(io.MultiWriter(os.Stderr, a.logBuf))
+	}
 
 	b := newAgentBackoff()
 	if a.MaxBackoff > 0 {

@@ -92,7 +92,10 @@ export default function ConnectPage({ bridge }: ConnectPageProps) {
         server_url: inst.server_url || '',
         agent_id: inst.agent_id || '',
         target: inst.target || '',
-        local: inst.local_addr || '',
+        // Send empty local so the backend inherits inst.Config.Local
+        // (the original listen spec). Sending local_addr (the resolved
+        // bind address) would fail on restart when the original was ":0".
+        local: '',
         batch_size: 0,
       });
       await refresh();

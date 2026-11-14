@@ -158,9 +158,12 @@ func RunAgent(ctx context.Context, cfg AgentConfig) error {
 	}
 	defer ag.Close()
 
-	// Save the current global log writer under the mutex so ag.Run's own
-	// log.SetOutput call and the deferred restore never race.
-	prevLog := swapLogOutput(os.Stderr)
+	// Install log capture under the mutex so ag.Run skips its own
+	// unprotected log.SetOutput (see Agent.InitLogCapture).
+	// The MultiWriter tees all log.Printf output to stderr and the
+	// agent's ring buffer; the deferred restore puts it back.
+	buf := ag.InitLogCapture()
+	prevLog := swapLogOutput(io.MultiWriter(os.Stderr, buf))
 	defer swapLogOutput(prevLog)
 
 	return ag.Run(ctx)
