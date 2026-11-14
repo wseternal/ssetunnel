@@ -19,7 +19,7 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: "1.2"
+          bun-version: "latest"
       - name: Install Task
         uses: arduino/setup-task@v2
         with:
