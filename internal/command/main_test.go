@@ -77,8 +77,11 @@ func TestRunServerParsesBareServiceArgs(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+	// BuildRunArgs produces the installed argv ["run", …flags]; the
+	// dispatcher strips the action verb before calling RunServer
+	// (runtimeFlags := filteredArgs[1:]), so mirror that here.
 	args := BuildRunArgs([]string{"start", "--listen", addr, "--console-listen=", "--metrics-dir=", "--disable-auth"})
-	err = RunServer(ctx, args)
+	err = RunServer(ctx, args[1:])
 	if err == nil {
 		t.Fatal("expected error when address is already bound, got nil")
 	}
