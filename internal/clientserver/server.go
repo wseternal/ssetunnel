@@ -70,13 +70,11 @@ func New(cfg Config) (*Server, error) {
 	secret := hex.EncodeToString(b)
 
 	s := &Server{
-		listener:  ln,
-		secret:    secret,
-		baseURL:   fmt.Sprintf("http://%s/#%s", ln.Addr().String(), secret),
-		agent:     &agentRuntime{},
-		connects:  newConnectRegistry(context.Background()),
-		serverCtx: context.Background(),
-		version:   cfg.Version,
+		listener: ln,
+		secret:   secret,
+		baseURL:  fmt.Sprintf("http://%s/#%s", ln.Addr().String(), secret),
+		agent:    &agentRuntime{},
+		version:  cfg.Version,
 	}
 	// The handler is built once; agent/connect runtimes started through it
 	// are tied to the context passed to Serve, not to this background ctx.
@@ -236,7 +234,11 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 		} else {
 			host = strings.Trim(host, "[]")
 		}
-		if host != "127.0.0.1" && host != "localhost" && host != "::1" {
+		// Lowercase the host for case-insensitive comparison (RFC 1035).
+		// Browsers send lowercase, but defense-in-depth normalizes explicitly.
+		hostLower := strings.ToLower(host)
+		if hostLower != "127.0.0.1" && hostLower != "localhost" && hostLower != "::1" {
+			log.Printf("api: rejected host %q for %s %s", r.Host, r.Method, r.URL.Path)
 			http.Error(w, "forbidden host", http.StatusForbidden)
 			return
 		}
@@ -245,11 +247,13 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 		// and port must all match the request's own origin.
 		if origin := r.Header.Get("Origin"); origin != "" {
 			u, parseErr := url.Parse(origin)
-			if parseErr != nil || u.Scheme != "http" || !allowedOriginHosts[u.Hostname()] {
+			if parseErr != nil || u.Scheme != "http" || !allowedOriginHosts[strings.ToLower(u.Hostname())] {
+				log.Printf("api: rejected origin %q for %s %s", origin, r.Method, r.URL.Path)
 				http.Error(w, "forbidden origin", http.StatusForbidden)
 				return
 			}
 			if originPort(u) != requestPort(r.Host) {
+				log.Printf("api: rejected origin port mismatch %q for %s %s", origin, r.Method, r.URL.Path)
 				http.Error(w, "forbidden origin", http.StatusForbidden)
 				return
 			}

@@ -3,6 +3,7 @@ package clientapp
 import (
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -12,6 +13,26 @@ import (
 	"github.com/wseternal/ssetunnel/internal/agent"
 	"github.com/wseternal/ssetunnel/internal/auth"
 )
+
+// DefaultDataDir is the agent data directory used when AgentConfig.DataDir
+// is empty. Both the CLI and the browser server reference this constant so
+// the module storage path stays consistent across surfaces.
+var DefaultDataDir = filepath.Join(".ssetunnel", "agent")
+
+// logOutputMu serializes swaps of the global log writer so concurrent
+// agent runs and the UI server never race on log.SetOutput/log.Writer.
+var logOutputMu sync.Mutex
+
+// swapLogOutput atomically swaps the global log writer under a mutex and
+// returns the previous writer. Callers must restore it with a deferred swap.
+// log.SetOutput and log.Writer are not goroutine-safe on their own.
+func swapLogOutput(w io.Writer) io.Writer {
+	logOutputMu.Lock()
+	defer logOutputMu.Unlock()
+	prev := log.Writer()
+	log.SetOutput(w)
+	return prev
+}
 
 // AgentConfig contains the parameters for starting an agent.
 type AgentConfig struct {
@@ -130,18 +151,17 @@ func RunAgent(ctx context.Context, cfg AgentConfig) error {
 		if homeErr != nil {
 			return fmt.Errorf("get home directory: %w", homeErr)
 		}
-		dataDir = filepath.Join(home, ".ssetunnel", "agent")
+		dataDir = filepath.Join(home, DefaultDataDir)
 	}
 	if err := ag.InitModules(ctx, dataDir); err != nil {
 		return fmt.Errorf("init modules: %w", err)
 	}
 	defer ag.Close()
 
-	// Run tees the global logger into the agent's ring buffer; restore the
-	// previous writer on exit so an in-process restart does not leave the
-	// UI server logging into a dead agent's buffer.
-	prevLog := log.Writer()
-	defer log.SetOutput(prevLog)
+	// Save the current global log writer under the mutex so ag.Run's own
+	// log.SetOutput call and the deferred restore never race.
+	prevLog := swapLogOutput(os.Stderr)
+	defer swapLogOutput(prevLog)
 
 	return ag.Run(ctx)
 }

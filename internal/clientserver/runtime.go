@@ -170,10 +170,12 @@ type agentStatus struct {
 }
 
 func waitDone(done <-chan struct{}, timeout time.Duration) bool {
+	t := time.NewTimer(timeout)
+	defer t.Stop()
 	select {
 	case <-done:
 		return true
-	case <-time.After(timeout):
+	case <-t.C:
 		return false
 	}
 }
@@ -194,17 +196,34 @@ func newConnectRegistry(ctx context.Context) *connectRegistry {
 
 func (cr *connectRegistry) start(name string, cfg clientapp.ConnectConfig) error {
 	cr.mu.Lock()
-	defer cr.mu.Unlock()
-
-	if _, exists := cr.instances[name]; exists {
-		return errors.New("connect instance already exists: " + name)
+	if prev, exists := cr.instances[name]; exists {
+		// Evict dead entries so a failed connect can be retried with the
+		// same name without requiring an explicit stop first.
+		select {
+		case <-prev.Done():
+			delete(cr.instances, name)
+		default:
+			cr.mu.Unlock()
+			return errors.New("connect instance already exists: " + name)
+		}
 	}
+	cr.mu.Unlock()
 
 	inst, err := clientapp.StartNamedConnect(cr.parentCtx, name, cfg)
 	if err != nil {
 		return err
 	}
+
+	cr.mu.Lock()
+	// A concurrent goroutine may have inserted the same name while we
+	// were starting; close ours as the orphan and fail.
+	if _, exists := cr.instances[name]; exists {
+		cr.mu.Unlock()
+		_ = inst.Close()
+		return errors.New("connect instance already exists: " + name)
+	}
 	cr.instances[name] = inst
+	cr.mu.Unlock()
 	return nil
 }
 
@@ -250,20 +269,79 @@ func (cr *connectRegistry) list() []connectInfo {
 
 	result := make([]connectInfo, 0, len(cr.instances))
 	for name, inst := range cr.instances {
+		// Read Err() once to avoid an inconsistent snapshot: the connect
+		// goroutine can set err between two reads, producing a contradictory
+		// {Running: true, Error: "..."} JSON.
+		instErr := inst.Err()
 		info := connectInfo{
 			Name:      name,
 			LocalAddr: inst.LocalAddr,
 			ServerURL: inst.Config.ServerURL,
 			AgentID:   inst.Config.AgentID,
 			Target:    inst.Config.Target,
-			Running:   inst.Err() == nil,
+			Running:   instErr == nil,
 		}
-		if e := inst.Err(); e != nil {
-			info.Error = uiError(e)
+		if instErr != nil {
+			info.Error = uiError(instErr)
 		}
 		result = append(result, info)
 	}
 	return result
+}
+
+// restart atomically stops a named connect (if running) and starts a new
+// one. Empty fields in cfg inherit the running instance's values so a bare
+// restart keeps the same tunnel instead of silently re-targeting. The
+// registry lock is released during Close so list() stays responsive.
+func (cr *connectRegistry) restart(name string, cfg clientapp.ConnectConfig) error {
+	cr.mu.Lock()
+	inst, exists := cr.instances[name]
+	if exists {
+		delete(cr.instances, name)
+	}
+	// Merge config from the running instance before releasing the lock,
+	// so the read and replacement are atomic.
+	if exists {
+		if cfg.ServerURL == "" {
+			cfg.ServerURL = inst.Config.ServerURL
+		}
+		if cfg.AgentID == "" {
+			cfg.AgentID = inst.Config.AgentID
+		}
+		if cfg.Target == "" {
+			cfg.Target = inst.Config.Target
+		}
+		if cfg.Local == "" {
+			cfg.Local = inst.Config.Local
+		}
+		if cfg.BatchSize == 0 {
+			cfg.BatchSize = inst.Config.BatchSize
+		}
+	}
+	cr.mu.Unlock()
+
+	if exists {
+		if err := inst.Close(); err != nil {
+			log.Printf("connect[%s]: closed (last error: %v)", name, err)
+		}
+	}
+
+	cr.mu.Lock()
+	if orphan, exists := cr.instances[name]; exists {
+		cr.mu.Unlock()
+		_ = orphan.Close()
+		return errors.New("connect instance already exists: " + name)
+	}
+
+	newInst, err := clientapp.StartNamedConnect(cr.parentCtx, name, cfg)
+	if err != nil {
+		cr.mu.Unlock()
+		return err
+	}
+	cr.instances[name] = newInst
+	cr.mu.Unlock()
+	log.Printf("connect[%s]: restarted (target=%s)", name, cfg.Target)
+	return nil
 }
 
 // stopAll shuts down every connect instance in parallel (called on server
@@ -296,9 +374,11 @@ func (cr *connectRegistry) stopAll() {
 		wg.Wait()
 		close(done)
 	}()
+	t := time.NewTimer(teardownTimeout)
+	defer t.Stop()
 	select {
 	case <-done:
-	case <-time.After(teardownTimeout):
+	case <-t.C:
 		log.Printf("connect: stopAll timed out after %s", teardownTimeout)
 	}
 }

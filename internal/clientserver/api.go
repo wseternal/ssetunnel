@@ -68,7 +68,9 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, v any) bool {
 func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
-	json.NewEncoder(w).Encode(v)
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		log.Printf("api: write JSON: %v", err)
+	}
 }
 
 func writeError(w http.ResponseWriter, code int, msg string) {
@@ -113,6 +115,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	log.Printf("api: login succeeded for %q (tunnel=%s)", req.Username, result.TunnelURL)
 	writeJSON(w, http.StatusOK, result)
 }
 
@@ -173,11 +176,28 @@ func (s *Server) handleListSessions(w http.ResponseWriter, _ *http.Request) {
 }
 
 // POST /api/logout
-func (s *Server) handleLogout(w http.ResponseWriter, _ *http.Request) {
-	// The UI owns these runtimes (ADR-005): logout tears them down so no
-	// tunnel keeps running on a deleted credential until silent expiry.
-	// Parallel and bounded like Serve's shutdown, so the handler stays
-	// inside the server WriteTimeout and the browser's abort budget.
+func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
+	// Delete the session credential first so a concurrent agent start
+	// during teardown cannot pick up a session that is about to vanish.
+	var req struct {
+		Server string `json:"server"`
+	}
+	// Body is optional — empty means "default session". Silently ignore
+	// decode errors so a content-less POST still logs out the default.
+	_ = readJSON(r, &req)
+	if _, resolvedServer, _, _, err := auth.LoadSession(req.Server); err != nil {
+		log.Printf("api: logout: cannot read session file: %v (runtimes will be stopped but session not deleted)", err)
+	} else if resolvedServer != "" {
+		if err := auth.DeleteSession(resolvedServer); err != nil {
+			log.Printf("api: logout failed to clear session: %v", err)
+			writeError(w, http.StatusInternalServerError, "failed to clear session")
+			return
+		}
+	}
+
+	// Tear down runtimes owned by the UI (ADR-005): parallel and bounded
+	// like Serve's shutdown, so the handler stays inside the server
+	// WriteTimeout and the browser's abort budget.
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go func() {
@@ -192,16 +212,7 @@ func (s *Server) handleLogout(w http.ResponseWriter, _ *http.Request) {
 	}()
 	wg.Wait()
 
-	// Delete only this entry, preserving other saved sessions for the login
-	// dropdown. LoadSession (not ResolveSession) so logout never blocks on a
-	// token-refresh round-trip.
-	if _, resolvedServer, _, _, err := auth.LoadSession(""); err == nil && resolvedServer != "" {
-		if err := auth.DeleteSession(resolvedServer); err != nil {
-			log.Printf("api: logout failed to clear session: %v", err)
-			writeError(w, http.StatusInternalServerError, "failed to clear session")
-			return
-		}
-	}
+	log.Printf("api: logout completed")
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -257,20 +268,23 @@ func (s *Server) handleAgentStart(w http.ResponseWriter, r *http.Request) {
 		Compress:    req.Compress,
 		NoAutoTune:  req.NoAutoTune,
 		Verbose:     req.Verbose,
+		Version:     s.version,
 	}
 	if err := s.agent.start(s.serverCtx, cfg); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeError(w, http.StatusInternalServerError, uiError(err))
 		return
 	}
+	log.Printf("api: agent started (target=%s, id=%s)", cfg.Target, cfg.AgentID)
 	w.WriteHeader(http.StatusNoContent)
 }
 
 // POST /api/agent/stop
 func (s *Server) handleAgentStop(w http.ResponseWriter, _ *http.Request) {
 	if err := s.agent.stop(); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeError(w, http.StatusInternalServerError, uiError(err))
 		return
 	}
+	log.Printf("api: agent stopped")
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -289,9 +303,10 @@ func (s *Server) handleConnectStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.connects.start(req.Name, req.config()); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeError(w, http.StatusInternalServerError, uiError(err))
 		return
 	}
+	log.Printf("api: connect[%s] started (target=%s)", req.Name, req.Target)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -314,29 +329,10 @@ func (s *Server) handleConnectRestart(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	cfg := req.config()
-	// Empty request fields inherit the running instance's configuration so
-	// a bare restart keeps the same tunnel instead of silently re-targeting.
-	if prev, ok := s.connects.get(name); ok {
-		if cfg.ServerURL == "" {
-			cfg.ServerURL = prev.Config.ServerURL
-		}
-		if cfg.AgentID == "" {
-			cfg.AgentID = prev.Config.AgentID
-		}
-		if cfg.Target == "" {
-			cfg.Target = prev.Config.Target
-		}
-		if cfg.Local == "" {
-			cfg.Local = prev.Config.Local
-		}
-		if cfg.BatchSize == 0 {
-			cfg.BatchSize = prev.Config.BatchSize
-		}
-	}
-	_ = s.connects.stop(name)
-	if err := s.connects.start(name, cfg); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+	// restart() merges empty fields from the running instance's config
+	// under the registry lock, so a bare restart keeps the same tunnel.
+	if err := s.connects.restart(name, req.config()); err != nil {
+		writeError(w, http.StatusInternalServerError, uiError(err))
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

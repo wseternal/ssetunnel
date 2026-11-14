@@ -56,6 +56,11 @@ func (ci *ConnectInstance) Err() error {
 	return ci.err
 }
 
+// Done returns a channel that is closed when the connect session exits.
+func (ci *ConnectInstance) Done() <-chan struct{} {
+	return ci.done
+}
+
 // RunConnect starts a connect session with the given configuration and blocks
 // until the context is cancelled or the session exits.
 func RunConnect(ctx context.Context, cfg ConnectConfig) error {

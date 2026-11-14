@@ -5,6 +5,7 @@ import {
   TableHead, TableRow, TableCell, TableBody,
 } from '@mui/material';
 import DeleteIcon from '@mui/icons-material/Delete';
+import RestartAltIcon from '@mui/icons-material/RestartAlt';
 import type { Bridge, ConnectStatus, ConnectConfig, SavedSession } from './types';
 import ServerURLField from './ServerURLField';
 
@@ -83,6 +84,25 @@ export default function ConnectPage({ bridge }: ConnectPageProps) {
     }
   };
 
+  const handleRestart = async (inst: ConnectStatus) => {
+    setAction(`restart:${inst.name}`);
+    setError('');
+    try {
+      await bridge.restartConnect(inst.name, {
+        server_url: inst.server_url || '',
+        agent_id: inst.agent_id || '',
+        target: inst.target || '',
+        local: inst.local_addr || '',
+        batch_size: 0,
+      });
+      await refresh();
+    } catch (e: any) {
+      setError(e.message);
+    } finally {
+      setAction('');
+    }
+  };
+
   if (loading) return <CircularProgress />;
 
   return (
@@ -121,7 +141,10 @@ export default function ConnectPage({ bridge }: ConnectPageProps) {
                       )}
                     </TableCell>
                     <TableCell align="right">
-                      <IconButton size="small" onClick={() => handleStop(inst.name)} disabled={!!action}>
+                      <IconButton size="small" onClick={() => handleRestart(inst)} disabled={!!action} title="Restart">
+                        <RestartAltIcon fontSize="small" />
+                      </IconButton>
+                      <IconButton size="small" onClick={() => handleStop(inst.name)} disabled={!!action} title="Stop">
                         <DeleteIcon fontSize="small" />
                       </IconButton>
                     </TableCell>

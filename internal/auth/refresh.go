@@ -3,8 +3,8 @@ package auth
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -48,6 +48,11 @@ func validateConsoleURL(consoleURL string) error {
 	if u.Scheme != "http" && u.Scheme != "https" {
 		return fmt.Errorf("console URL must use http or https scheme, got %q", u.Scheme)
 	}
+	// Block link-local addresses to prevent cloud metadata probing
+	// (e.g. https://169.254.169.254/latest/meta-data/).
+	if ip := net.ParseIP(u.Hostname()); ip != nil && ip.IsLinkLocalUnicast() {
+		return fmt.Errorf("console URL must not use link-local addresses")
+	}
 	if u.Scheme == "http" {
 		host := u.Hostname()
 		if host != "localhost" && host != "127.0.0.1" && host != "::1" {
@@ -80,8 +85,9 @@ func RefreshSession(consoleURL, currentToken string) (newToken string, newExpire
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return "", time.Time{}, fmt.Errorf("refresh failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		// Status-only error: the response body may contain attacker-controlled
+		// content that could be echoed through logs or UI error messages.
+		return "", time.Time{}, fmt.Errorf("refresh failed (status %d)", resp.StatusCode)
 	}
 
 	var result struct {
