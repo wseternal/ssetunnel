@@ -25,8 +25,15 @@ func init() {
 
 func main() {
 	log.SetPrefix("server: ")
-	if len(os.Args) > 1 && command.ServiceActions[os.Args[1]] {
-		if handled, err := command.DispatchServiceAction("server", os.Args[1:], serverRunFnBuilder); handled {
+	args := os.Args[1:]
+	// Services installed by the legacy ssetunnel binary invoke
+	// "server run <flags>"; accept that argv shape so an in-place
+	// binary upgrade keeps the installed service working.
+	if len(args) >= 2 && args[0] == "server" && args[1] == "run" {
+		args = args[2:]
+	}
+	if len(args) > 0 && command.ServiceActions[args[0]] {
+		if handled, err := command.DispatchServiceActionBare("server", args, serverRunFnBuilder); handled {
 			if err != nil {
 				log.Fatal(err)
 			}
@@ -35,7 +42,7 @@ func main() {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	if err := command.RunServer(ctx, os.Args[1:]); err != nil {
+	if err := command.RunServer(ctx, args); err != nil {
 		log.Fatal(err)
 	}
 }

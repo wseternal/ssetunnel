@@ -6,6 +6,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"log"
 	"os"
 	"strings"
 
@@ -13,7 +14,7 @@ import (
 )
 
 // RunLogin authenticates a user and stores a session for agent/connect.
-func RunLogin(_ context.Context, args []string) error {
+func RunLogin(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("login", flag.ContinueOnError)
 	serverURL := fs.String("server", "http://127.0.0.1:8081", "tunnel server URL (console port)")
 	tunnelServer := fs.String("tunnel-server", "", "tunnel server URL to save in session (default: --server with port 8081→8080)")
@@ -40,9 +41,13 @@ func RunLogin(_ context.Context, args []string) error {
 		return errors.New("password is required")
 	}
 
-	// Check if TOTP is required for this user.
+	// Check if TOTP is required for this user. On check failure, fail open:
+	// the prompt below still accepts an optional code.
 	var totpCode string
-	totpRequired, _ := clientapp.CheckTOTPRequired(*serverURL, username)
+	totpRequired, checkErr := clientapp.CheckTOTPRequired(ctx, *serverURL, username)
+	if checkErr != nil {
+		log.Printf("login: TOTP check failed (%v); continuing with optional code", checkErr)
+	}
 	if totpRequired {
 		fmt.Print("TOTP or Recovery Code: ")
 		totpCode, _ = reader.ReadString('\n')
@@ -54,7 +59,7 @@ func RunLogin(_ context.Context, args []string) error {
 		totpCode = strings.TrimSpace(totpCode)
 	}
 
-	result, err := clientapp.Login(clientapp.LoginParams{
+	result, err := clientapp.Login(ctx, clientapp.LoginParams{
 		ConsoleURL: *serverURL,
 		TunnelURL:  *tunnelServer,
 		Username:   username,

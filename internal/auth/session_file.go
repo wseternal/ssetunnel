@@ -283,26 +283,6 @@ func DeleteSession(serverURL string) error {
 	return saveSessionFile(sf)
 }
 
-// ClearSessionToken clears the token and expiry for the session entry
-// matching the given server URL, but preserves the server metadata
-// (server URL, console URL, username) so the entry remains available
-// for server selection UIs. Returns nil when no matching entry exists.
-func ClearSessionToken(serverURL string) error {
-	sf, err := loadSessionFile()
-	if err != nil {
-		return err
-	}
-	key := sessionKey(serverURL)
-	entry, ok := sf.Sessions[key]
-	if !ok {
-		return nil
-	}
-	entry.Token = ""
-	entry.ExpiresAt = ""
-	sf.Sessions[key] = entry
-	return saveSessionFile(sf)
-}
-
 // SessionServers returns the list of server URLs with stored sessions.
 func SessionServers() ([]string, error) {
 	sf, err := loadSessionFile()

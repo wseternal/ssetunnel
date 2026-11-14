@@ -116,6 +116,9 @@ export default function ConnectPage({ bridge }: ConnectPageProps) {
                     <TableCell>{inst.target || '(dynamic)'}</TableCell>
                     <TableCell>
                       <Chip label={inst.running ? 'Running' : 'Stopped'} color={inst.running ? 'success' : 'default'} size="small" variant="outlined" />
+                      {inst.error && (
+                        <Typography variant="caption" color="error" sx={{ display: 'block' }}>{inst.error}</Typography>
+                      )}
                     </TableCell>
                     <TableCell align="right">
                       <IconButton size="small" onClick={() => handleStop(inst.name)} disabled={!!action}>

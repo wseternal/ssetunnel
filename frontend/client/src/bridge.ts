@@ -14,9 +14,9 @@ import type {
 } from './types';
 
 function getSecret(): string {
-  const stored = sessionStorage.getItem('ssetunnel-secret');
-  if (stored) return stored;
-
+  // A fresh launch fragment wins over stored state: reopening a new launch
+  // URL in the same tab (e.g. after a server restart reused the port) must
+  // not keep authenticating with the previous invocation's dead secret.
   const hash = window.location.hash.slice(1);
   if (hash) {
     sessionStorage.setItem('ssetunnel-secret', hash);
@@ -24,10 +24,10 @@ function getSecret(): string {
     window.history.replaceState(null, '', window.location.pathname + window.location.search);
     return hash;
   }
-  return '';
+  return sessionStorage.getItem('ssetunnel-secret') || '';
 }
 
-async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
+async function apiFetch<T>(path: string, init?: RequestInit, timeoutMs = 10_000): Promise<T> {
   const secret = getSecret();
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
@@ -37,7 +37,9 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
     headers['Authorization'] = `Bearer ${secret}`;
   }
 
-  const resp = await fetch(`/api${path}`, { ...init, headers });
+  // A hung request must not stall the serial poll chain forever; the abort
+  // surfaces as an error the pages render and the next poll retries.
+  const resp = await fetch(`/api${path}`, { ...init, headers, signal: AbortSignal.timeout(timeoutMs) });
   if (!resp.ok) {
     const body = await resp.text().catch(() => '');
     throw new Error(`${resp.status}: ${body || resp.statusText}`);
@@ -79,7 +81,9 @@ export const httpBridge: Bridge = {
   },
 
   async logout(): Promise<void> {
-    await apiFetch<void>('/logout', { method: 'POST' });
+    // Logout tears down owned runtimes server-side; allow the bounded
+    // teardown (20 s cap) plus margin instead of the default 10 s.
+    await apiFetch<void>('/logout', { method: 'POST' }, 30_000);
   },
 
   async getAgentStatus(): Promise<AgentStatus | null> {
@@ -112,8 +116,8 @@ export const httpBridge: Bridge = {
     return apiFetch<ConnectStatus[]>('/connect/list');
   },
 
-  async startConnect(name: string, cfg: ConnectConfig): Promise<ConnectStatus> {
-    return apiFetch<ConnectStatus>('/connect/start', {
+  async startConnect(name: string, cfg: ConnectConfig): Promise<void> {
+    await apiFetch<void>('/connect/start', {
       method: 'POST',
       body: JSON.stringify({ name, ...cfg }),
     });
@@ -123,8 +127,8 @@ export const httpBridge: Bridge = {
     await apiFetch<void>(`/connect/stop/${encodeURIComponent(name)}`, { method: 'POST' });
   },
 
-  async restartConnect(name: string, cfg: ConnectConfig): Promise<ConnectStatus> {
-    return apiFetch<ConnectStatus>(`/connect/restart/${encodeURIComponent(name)}`, {
+  async restartConnect(name: string, cfg: ConnectConfig): Promise<void> {
+    await apiFetch<void>(`/connect/restart/${encodeURIComponent(name)}`, {
       method: 'POST',
       body: JSON.stringify(cfg),
     });

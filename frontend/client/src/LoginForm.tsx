@@ -33,8 +33,10 @@ export default function LoginForm({ onLogin, bridge, error }: LoginFormProps) {
   const [totpCode, setTotpCode] = useState('');
   const [totpRequired, setTotpRequired] = useState(false);
   const [checking, setChecking] = useState(false);
+  const [checkFailed, setCheckFailed] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [savedSessions, setSavedSessions] = useState<SavedSession[]>([]);
+  const [consoleEdited, setConsoleEdited] = useState(false);
 
   useEffect(() => {
     bridge.listSessions().then(setSavedSessions).catch(() => {});
@@ -45,8 +47,11 @@ export default function LoginForm({ onLogin, bridge, error }: LoginFormProps) {
     ...savedSessions.map(s => ({ label: s.server_url, group: 'Saved Sessions' })),
   ];
 
-  // Auto-fill console URL when tunnel server selection changes.
+  // Auto-fill console URL when tunnel server selection changes — unless the
+  // user has typed their own, which a late-arriving session list must not
+  // clobber.
   useEffect(() => {
+    if (consoleEdited) return;
     const url = tunnelURL(tunnelOpt);
     if (url === DEFAULT_TUNNEL) {
       setConsoleOpt(defaultConsoleOpt);
@@ -56,17 +61,20 @@ export default function LoginForm({ onLogin, bridge, error }: LoginFormProps) {
     if (match?.console_url) {
       setConsoleOpt({ label: match.console_url });
     }
-  }, [tunnelOpt, savedSessions]);
+  }, [tunnelOpt, savedSessions, consoleEdited]);
 
   const handleUsernameBlur = async () => {
     const cs = consoleURL(consoleOpt);
     if (!username || !cs) return;
     setChecking(true);
+    setCheckFailed(false);
     try {
       const required = await bridge.checkTOTPRequired(cs, username);
       setTotpRequired(required);
     } catch {
-      // Allow login attempt even if check fails.
+      // Surface the failure instead of silently hiding the TOTP requirement;
+      // the login attempt itself is still allowed.
+      setCheckFailed(true);
     } finally {
       setChecking(false);
     }
@@ -104,7 +112,7 @@ export default function LoginForm({ onLogin, bridge, error }: LoginFormProps) {
         options={[defaultConsoleOpt]}
         getOptionLabel={opt => typeof opt === 'string' ? opt : opt.label}
         value={consoleOpt}
-        onChange={(_, v) => { if (v !== null) setConsoleOpt(v); }}
+        onChange={(_, v) => { if (v !== null) { setConsoleOpt(v); setConsoleEdited(true); } }}
         renderInput={params => (
           <TextField {...params} fullWidth label="Console URL" required />
         )}
@@ -125,7 +133,7 @@ export default function LoginForm({ onLogin, bridge, error }: LoginFormProps) {
         fullWidth label={totpRequired ? 'TOTP or Recovery Code' : 'TOTP or Recovery Code (optional)'}
         value={totpCode}
         onChange={e => setTotpCode(e.target.value)}
-        helperText={checking ? 'Checking...' : undefined}
+        helperText={checking ? 'Checking...' : checkFailed ? 'TOTP check failed — enter your code if you have one' : undefined}
         sx={{ mb: 3 }}
       />
       <Button fullWidth variant="contained" type="submit" disabled={submitting} size="large">

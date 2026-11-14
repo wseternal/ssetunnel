@@ -7,6 +7,7 @@ export interface SessionDTO {
   role: string;
   tunnel_url: string;
   expires_at: string;
+  warning?: string;
 }
 
 export interface SavedSession {
@@ -23,6 +24,7 @@ export interface AgentStatus {
   batch_size: number;
   concurrency: number;
   compress: boolean;
+  error?: string;
 }
 
 export interface ConnectStatus {
@@ -32,6 +34,7 @@ export interface ConnectStatus {
   agent_id: string;
   target: string;
   running: boolean;
+  error?: string;
 }
 
 export interface Bridge {
@@ -47,9 +50,9 @@ export interface Bridge {
   restartAgent(cfg: AgentConfig): Promise<void>;
 
   getConnectInstances(): Promise<ConnectStatus[]>;
-  startConnect(name: string, cfg: ConnectConfig): Promise<ConnectStatus>;
+  startConnect(name: string, cfg: ConnectConfig): Promise<void>;
   stopConnect(name: string): Promise<void>;
-  restartConnect(name: string, cfg: ConnectConfig): Promise<ConnectStatus>;
+  restartConnect(name: string, cfg: ConnectConfig): Promise<void>;
 }
 
 export interface AgentConfig {

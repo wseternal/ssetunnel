@@ -30,6 +30,13 @@ func NeedsRefresh(expiresAt time.Time) bool {
 	return time.Until(expiresAt) < sessionRefreshThreshold
 }
 
+// ValidateConsoleURL checks that the console URL uses a safe scheme and,
+// for non-localhost hosts, requires HTTPS to prevent SSRF against internal
+// services via a manipulated session file.
+func ValidateConsoleURL(consoleURL string) error {
+	return validateConsoleURL(consoleURL)
+}
+
 // validateConsoleURL checks that the console URL uses a safe scheme and,
 // for non-localhost hosts, requires HTTPS to prevent SSRF against internal
 // services via a manipulated session file.

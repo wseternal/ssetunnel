@@ -16,19 +16,22 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gorilla/mux"
-	"github.com/visdomtech/orcacommon/litespaserver"
-	"github.com/wseternal/ssetunnel/frontend"
+	clientassets "github.com/wseternal/ssetunnel/frontend/client"
 )
 
 // Config controls the browser server startup.
 type Config struct {
 	// Listen is the loopback address to bind (default "127.0.0.1:0").
+	// Non-loopback addresses are rejected: the launch secret is printed to
+	// the terminal and visible in process arguments, so the API must never
+	// be reachable from the network.
 	Listen string
-	// Secret overrides the generated launch secret (for testing).
-	Secret string
+	// Version is the build version string, logged at startup.
+	Version string
 }
 
 // Server is the secured local HTTP server for the browser client.
@@ -37,9 +40,11 @@ type Server struct {
 	secret    string
 	baseURL   string
 	handler   http.Handler
+	indexHTML []byte
 	agent     *agentRuntime
 	connects  *connectRegistry
 	serverCtx context.Context // lives as long as the server
+	version   string
 }
 
 // New creates a new browser server bound to the configured loopback address.
@@ -48,21 +53,21 @@ func New(cfg Config) (*Server, error) {
 	if listen == "" {
 		listen = "127.0.0.1:0"
 	}
+	if err := validateLoopbackListen(listen); err != nil {
+		return nil, err
+	}
 
 	ln, err := net.Listen("tcp", listen)
 	if err != nil {
 		return nil, fmt.Errorf("listen %s: %w", listen, err)
 	}
 
-	secret := cfg.Secret
-	if secret == "" {
-		b := make([]byte, 32)
-		if _, err := rand.Read(b); err != nil {
-			ln.Close()
-			return nil, fmt.Errorf("generate secret: %w", err)
-		}
-		secret = hex.EncodeToString(b)
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		ln.Close()
+		return nil, fmt.Errorf("generate secret: %w", err)
 	}
+	secret := hex.EncodeToString(b)
 
 	s := &Server{
 		listener:  ln,
@@ -70,11 +75,31 @@ func New(cfg Config) (*Server, error) {
 		baseURL:   fmt.Sprintf("http://%s/#%s", ln.Addr().String(), secret),
 		agent:     &agentRuntime{},
 		serverCtx: context.Background(),
+		version:   cfg.Version,
 	}
-	// Build handler with a cancellable context so the agent/connect
-	// runtimes are torn down when Serve exits.
-	s.handler = s.buildHandler(context.Background())
+	// The handler is built once; agent/connect runtimes started through it
+	// are tied to the context passed to Serve, not to this background ctx.
+	s.handler = s.buildHandler()
 	return s, nil
+}
+
+// validateLoopbackListen rejects any bind address that is not loopback.
+// The Host header check is not a compensating control: a non-browser client
+// controls its own Host header, so a wildcard bind would expose the API to
+// the network with only the launch secret as a barrier.
+func validateLoopbackListen(listen string) error {
+	host, _, err := net.SplitHostPort(listen)
+	if err != nil {
+		return fmt.Errorf("invalid listen address %q: %w", listen, err)
+	}
+	if host == "localhost" {
+		return nil
+	}
+	ip := net.ParseIP(host)
+	if ip == nil || !ip.IsLoopback() {
+		return fmt.Errorf("ui: --listen must be a loopback address (127.0.0.1, localhost, ::1), got %q", listen)
+	}
+	return nil
 }
 
 // Addr returns the bound address.
@@ -87,7 +112,8 @@ func (s *Server) URL() string {
 	return s.baseURL
 }
 
-// Serve starts the HTTP server and blocks until the context is cancelled.
+// Serve starts the HTTP server and blocks until the context is cancelled
+// and all owned runtimes are torn down.
 func (s *Server) Serve(ctx context.Context) error {
 	// Store the server context so API handlers can start agents/connects
 	// whose lifetime is tied to the server.
@@ -102,83 +128,119 @@ func (s *Server) Serve(ctx context.Context) error {
 		ReadTimeout:       30 * time.Second,
 		WriteTimeout:      30 * time.Second,
 		IdleTimeout:       60 * time.Second,
+		// net/http answers OPTIONS * itself, before the handler, so that
+		// response would bypass the security headers the wrapper declares.
+		DisableGeneralOptionsHandler: true,
 	}
 
+	teardownDone := make(chan struct{})
 	go func() {
 		<-ctx.Done()
-		// Stop all agent/connect runtimes before HTTP shutdown.
-		s.agent.stop()
-		s.connects.stopAll()
+		// Drain HTTP first so no in-flight request can register a new
+		// runtime after teardown has cleared the registries.
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		srv.Shutdown(shutdownCtx)
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			log.Printf("ui: http shutdown: %v", err)
+		}
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			if err := s.agent.stop(); err != nil {
+				log.Printf("ui: agent teardown: %v", err)
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			s.connects.stopAll()
+		}()
+		wg.Wait()
+		close(teardownDone)
 	}()
 
+	if s.version != "" {
+		log.Printf("ui: ssetunnel %s", s.version)
+	}
 	log.Printf("ui: listening on %s", s.listener.Addr().String())
 	if err := srv.Serve(s.listener); err != nil && err != http.ErrServerClosed {
 		return err
+	}
+	// On context shutdown, Serve's return must mean everything is closed.
+	if ctx.Err() != nil {
+		select {
+		case <-teardownDone:
+		case <-time.After(teardownTimeout + 5*time.Second):
+			log.Printf("ui: runtime teardown did not complete; exiting")
+		}
 	}
 	return nil
 }
 
 // buildHandler creates the mux router with security middleware and routes.
-func (s *Server) buildHandler(ctx context.Context) http.Handler {
+// The client SPA is a single page with no router and no streaming, so it is
+// served by dedicated index/asset handlers instead of litespaserver: that
+// library Set()s its own headers over any outer wrapper and puts no-store
+// on hashed assets. The securityHeaders wrapper above mux covers every
+// response class, including mux-generated 404/405/301.
+func (s *Server) buildHandler() http.Handler {
+	index, err := fs.ReadFile(clientassets.ClientWebRootFs, "index.html")
+	if err != nil {
+		log.Printf("ui: ERROR embedded client/dist has no index.html (%v); the SPA will not load", err)
+	} else {
+		s.indexHTML = index
+	}
+
 	r := mux.NewRouter()
 
 	// API routes (require launch secret).
 	api := r.PathPrefix("/api").Subrouter()
 	api.Use(s.authMiddleware)
-	api.Use(securityHeaders)
 	s.registerAPIRoutes(api)
 
 	// Explicit 404 for unmatched API paths.
 	api.PathPrefix("/").HandlerFunc(notFound)
 
-	// SPA catch-all — uses litespaserver with embedded client bundle,
-	// matching the console server pattern. StaticPaths lets it serve
-	// hashed assets from /assets/** directly from the embedded FS.
-	spaCfg := litespaserver.Config{
-		EmbeddedContent: frontend.ClientWebRootFs,
-		StaticPaths:     []string{"/assets/**"},
-		CDNVersion:      "embedded",
-		CSP: litespaserver.CSPConfig{
-			Disable: true,
-		},
-	}
-	spaServer := litespaserver.NewServer(ctx, nil, spaCfg)
-	r.PathPrefix("/").HandlerFunc(spaServer.ServeRoot).Methods("GET", "HEAD")
+	// Hashed assets: immutable, served directly from the embedded FS.
+	r.PathPrefix("/assets/").HandlerFunc(s.serveAsset).Methods("GET", "HEAD")
+	r.Path("/assets").HandlerFunc(notFound).Methods("GET", "HEAD")
 
-	if _, err := fs.Stat(frontend.ClientWebRootFs, "index.html"); err != nil {
-		log.Printf("ui: ERROR embedded client/dist has no index.html (%v); the SPA will not load", err)
-	}
+	// SPA catch-all — must stay last.
+	r.PathPrefix("/").HandlerFunc(s.serveIndex).Methods("GET", "HEAD")
 
-	return r
+	return securityHeaders(r)
 }
 
 // allowedOriginHosts is the set of hostnames accepted for the Origin header.
 var allowedOriginHosts = map[string]bool{
 	"127.0.0.1": true,
-	"localhost":  true,
-	"::1":        true,
+	"localhost": true,
+	"::1":       true,
 }
 
 // authMiddleware enforces the launch secret on every API request.
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Exact Host check — reject DNS rebinding.
+		// Exact Host check — reject DNS rebinding. SplitHostPort handles
+		// the bracketed IPv6 form ("[::1]:port"); a bare host passes through.
 		host := r.Host
-		if idx := strings.IndexByte(host, ':'); idx > 0 {
-			host = host[:idx]
+		if h, _, err := net.SplitHostPort(host); err == nil {
+			host = h
 		}
 		if host != "127.0.0.1" && host != "localhost" && host != "::1" {
 			http.Error(w, "forbidden host", http.StatusForbidden)
 			return
 		}
 
-		// Same-origin Origin check when present — parse and compare hostname exactly.
+		// Same-origin Origin check when present: scheme, loopback hostname,
+		// and port must all match the request's own origin.
 		if origin := r.Header.Get("Origin"); origin != "" {
 			u, parseErr := url.Parse(origin)
-			if parseErr != nil || !allowedOriginHosts[u.Hostname()] {
+			if parseErr != nil || u.Scheme != "http" || !allowedOriginHosts[u.Hostname()] {
+				http.Error(w, "forbidden origin", http.StatusForbidden)
+				return
+			}
+			if originPort(u) != requestPort(r.Host) {
 				http.Error(w, "forbidden origin", http.StatusForbidden)
 				return
 			}
@@ -196,22 +258,42 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// securityHeaders applies CSP, nosniff, frame, referrer, and cache headers.
+func originPort(u *url.URL) string {
+	if p := u.Port(); p != "" {
+		return p
+	}
+	return "80"
+}
+
+func requestPort(host string) string {
+	if _, p, err := net.SplitHostPort(host); err == nil {
+		return p
+	}
+	return "80"
+}
+
+// securityHeaders applies the ADR-005 browser security contract to every
+// response, including mux-generated errors. Handlers may override individual
+// values (the asset handler sets immutable caching); nothing downstream
+// re-sets them wholesale, which is why litespaserver is not used here.
 func securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("X-Content-Type-Options", "nosniff")
-		w.Header().Set("X-Frame-Options", "DENY")
-		w.Header().Set("Referrer-Policy", "no-referrer")
-		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; object-src 'none'; form-action 'self'; base-uri 'self'")
-		w.Header().Set("Cache-Control", "no-store")
+		h := w.Header()
+		h.Set("X-Content-Type-Options", "nosniff")
+		h.Set("X-Frame-Options", "DENY")
+		h.Set("Referrer-Policy", "no-referrer")
+		h.Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; object-src 'none'; form-action 'self'; base-uri 'self'")
+		h.Set("Cache-Control", "no-store")
+		if r.URL.Path == "*" {
+			h.Set("Allow", "OPTIONS, GET, HEAD")
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
 		next.ServeHTTP(w, r)
 	})
 }
 
-// notFound writes a 404 response with security headers.
-func notFound(w http.ResponseWriter, _ *http.Request) {
-	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.Header().Set("Cache-Control", "no-store")
-	http.NotFound(w, nil)
+// notFound writes a 404 response; the wrapper supplies the security headers.
+func notFound(w http.ResponseWriter, r *http.Request) {
+	http.NotFound(w, r)
 }
-

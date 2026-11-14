@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/wseternal/ssetunnel/internal/clientserver"
+	"github.com/wseternal/ssetunnel/internal/command"
 )
 
 // RunUI starts the secured local browser server for the client UI.
@@ -18,7 +19,8 @@ func RunUI(ctx context.Context, args []string) error {
 	}
 
 	srv, err := clientserver.New(clientserver.Config{
-		Listen: *listen,
+		Listen:  *listen,
+		Version: command.BuildVersion(),
 	})
 	if err != nil {
 		return fmt.Errorf("create ui server: %w", err)

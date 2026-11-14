@@ -30,18 +30,19 @@ type ConnectConfig struct {
 type ConnectInstance struct {
 	Name      string
 	LocalAddr string
+	Config    ConnectConfig
 	cancel    context.CancelFunc
-	listener  net.Listener
 	done      chan struct{}
 	err       error
 	mu        sync.Mutex
 }
 
-// Close cancels the connect session and waits for cleanup.
+// Close cancels the connect session and waits for cleanup. The listener is
+// closed by the session goroutine's deferred cleanup, which also covers the
+// early-return paths (session resolution failure, token probe failure) where
+// ServeListener never installs its own context watcher.
 func (ci *ConnectInstance) Close() error {
 	ci.cancel()
-	// Listener is closed by ServeListener when the context is cancelled;
-	// closing it here would race with ServeListener's own cleanup.
 	<-ci.done
 	ci.mu.Lock()
 	defer ci.mu.Unlock()
@@ -110,16 +111,23 @@ func StartNamedConnect(ctx context.Context, name string, cfg ConnectConfig) (*Co
 	inst := &ConnectInstance{
 		Name:      name,
 		LocalAddr: ln.Addr().String(),
+		Config:    cfg,
 		cancel:    cancel,
-		listener:  ln,
 		done:      make(chan struct{}),
 	}
 
 	go func() {
 		defer close(inst.done)
+		// Own the listener and the child context for every exit path:
+		// ServeListener returns before installing its ctx watcher when the
+		// eager token probe fails, which would otherwise leak the bound
+		// port for the process lifetime. Double-close with ServeListener's
+		// own cleanup is harmless.
+		defer ln.Close()
+		defer cancel()
+
 		sess, sessErr := ResolveSession(cfg.ServerURL, "connect")
 		if sessErr != nil {
-			ln.Close()
 			inst.mu.Lock()
 			inst.err = sessErr
 			inst.mu.Unlock()

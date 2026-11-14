@@ -11,6 +11,11 @@
 
 ### Features
 
+* **client surfaces:** product split into `server`, `cli`, legacy `ssetunnel`, and a Wails `clix` skeleton (ADR-005)
+  - Shared workflow packages: `internal/command`, `internal/clicommand`, `internal/clientapp`
+  - `cli ui`: secured loopback browser UI (launch-secret auth, agent/connect lifecycle, login with saved-session dropdowns)
+  - Client SPA (`frontend/client`) embedded in its own Go package; server binaries no longer carry client assets
+  - Release workflow builds all three binaries and both frontends
 * **modules:** agent module registry with pluggable HTTP services
   - Provider SDK (`sdk/provider.go`) for module authors with `http.Handler` interface
   - Consumer SDK (`sdk/discovery.go`) for service discovery and invocation
@@ -22,6 +27,15 @@
   - Per-agent metrics collection (invocations, pending opens, errors, bytes)
   - Process supervisor with exponential backoff (500 ms → 30 s cap)
   - Package validation with symlink traversal protection
+
+### Fixes
+
+* **clientserver:** agent restart no longer deadlocks the UI server (per-run lifecycle structs); concurrent stop/start can no longer orphan an agent; shutdown drains HTTP before runtime teardown
+* **server:** installed OS services now parse all flags (`server start` previously dropped every flag and ran with defaults)
+* **clientserver:** loopback-only bind enforced; IPv6 Host parsing fixed; contract security headers on every response class; immutable hashed assets
+* **clientapp:** login/TOTP requests bounded (15 s) with context propagation and SSRF-validated console URLs; failed connect starts release their local port; agent module IPC/supervisor torn down on exit
+* **ui:** logout stops owned runtimes; runtime errors visible in the UI; Start works with saved sessions; tab switches preserve config
+* **ci:** release workflow installs bun before building frontends
 
 ### Breaking Changes
 

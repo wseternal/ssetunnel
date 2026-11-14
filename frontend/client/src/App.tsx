@@ -31,7 +31,13 @@ interface TabPanelProps {
 }
 
 function TabPanel({ children, value, index }: TabPanelProps) {
-  return value === index ? <Box sx={{ p: 3 }}>{children}</Box> : null;
+  // Keep both panels mounted: unmounting reset page state, so a tab
+  // round-trip silently re-targeted Restart with default (empty) config.
+  return (
+    <Box sx={{ p: 3, display: value === index ? 'block' : 'none' }} hidden={value !== index}>
+      {children}
+    </Box>
+  );
 }
 
 export default function App() {
@@ -55,10 +61,13 @@ export default function App() {
 
   const handleLogin = async (server: string, tunnelServer: string, username: string, password: string, totpCode: string) => {
     try {
-      await bridge.login(server, tunnelServer, username, password, totpCode);
+      const result = await bridge.login(server, tunnelServer, username, password, totpCode);
       await refreshSession();
       setLoginError('');
       setLoginOpen(false);
+      if (result.warning) {
+        setError(result.warning);
+      }
     } catch (e: any) {
       setLoginError(e.message || 'Login failed');
     }

@@ -574,3 +574,42 @@ func TestConnectServiceNameRequiresValue(t *testing.T) {
 		t.Errorf("unexpected error: %v", err)
 	}
 }
+
+func TestBuildRunArgs(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		args []string
+		want []string
+	}{
+		{
+			"start with flags",
+			[]string{"start", "--listen", ":9000", "--db-url", "postgres://x"},
+			[]string{"run", "--listen", ":9000", "--db-url", "postgres://x"},
+		},
+		{
+			"bare action",
+			[]string{"run"},
+			[]string{"run"},
+		},
+		{
+			"strips service-user and retired base",
+			[]string{"start", "--service-user", "alice", "--base", "/sse", "--listen", ":9000"},
+			[]string{"run", "--listen", ":9000"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := BuildRunArgs(tt.args)
+			if len(got) != len(tt.want) {
+				t.Fatalf("BuildRunArgs = %v, want %v", got, tt.want)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Fatalf("BuildRunArgs[%d] = %q, want %q", i, got[i], tt.want[i])
+				}
+			}
+		})
+	}
+}

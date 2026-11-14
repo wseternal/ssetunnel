@@ -7,5 +7,4 @@
 import type { Bridge } from './types';
 
 // WailsBridge will be populated once bindings are generated.
-// For now, it serves as the integration point for Task 15.
 export const wailsBridge: Bridge | null = null;

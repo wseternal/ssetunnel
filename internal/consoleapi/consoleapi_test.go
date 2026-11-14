@@ -428,7 +428,7 @@ func TestNonAdminSessionFiltering(t *testing.T) {
 	// Regular user can also list agents (read-only, all configs).
 	agentID := sanitizeUsername(t.Name()) + "_agent"
 	if _, err := store.CreateAgentConfig(ctx, agentID, "test", []string{"*"}); err != nil {
-		t.Logf("create agent config (may exist from prior run): %v", err)
+		t.Fatalf("create agent config: %v", err)
 	}
 
 	req = httptest.NewRequest("GET", "/api/v1/agents", nil)

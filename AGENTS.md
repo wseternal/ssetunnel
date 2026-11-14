@@ -40,9 +40,9 @@ User (SSH, DB client, ...)
 
 ## Sub-Module Architecture & Directory Guides
 
-### 1. [CLI Entry Point](cmd/ssetunnel/AGENTS.md)
-* **Responsibility**: Multi-command CLI (`server`, `agent`, `connect`, `probe`) with flag parsing and lifecycle management. Server and agent support full OS service management (start/stop/restart/status/reload/uninstall). Connect supports named daemon instances via `--name` (start/stop/restart/status/uninstall, no reload).
-* **Path**: `cmd/ssetunnel/`
+### 1. [CLI Entry Points](cmd/ssetunnel/AGENTS.md)
+* **Responsibility**: Three binaries share the command layer (ADR-005). `cmd/server` runs the tunnel server only (single-command; installed services use `["run", …flags]` argv). `cmd/cli` runs client commands (`login`, `agent`, `connect`, `probe`, `module`, `ui`, `version`). `cmd/ssetunnel` is the frozen legacy wrapper preserving the full multi-command surface for installed services and SSH ProxyCommand. Server and agent support full OS service management (start/stop/restart/status/reload/uninstall); connect supports named daemon instances via `--name` (no reload). All binaries share the `ssetunnel-*` service namespace.
+* **Path**: `cmd/server/`, `cmd/cli/`, `cmd/ssetunnel/`
 
 ### 2. [Server](internal/server/AGENTS.md)
 * **Responsibility**: Public tunnel server — HTTP endpoints (`/events`, `/up`, `/probe`, `/connect`, `/connect-up`), session registry, yamux attachment, auth middleware, agent routing by `agent_id`, bidirectional proxy between agent connections and yamux streams, cloud shell proxy (`__shell__` target with PTY resize), metrics collection hooks, and auto-tune SSE frame injection.
@@ -91,6 +91,22 @@ User (SSH, DB client, ...)
 ### 13. [Metrics](internal/metrics/AGENTS.md)
 * **Responsibility**: Per-agent transport metrics collection (rolling window), BadgerDB persistence, auto-tuner that evaluates throughput saturation, latency, and error rate to push batch-size / concurrency / compression changes to agents via SSE `event: tune` control frames.
 * **Path**: `internal/metrics/`
+
+### 14. [Command Layer](internal/command/AGENTS.md)
+* **Responsibility**: Server workflow (`RunServer`) plus shared CLI infrastructure: OS service dispatch (`DispatchServiceAction`, `DispatchServiceActionBare` for single-command binaries), flag helpers, service argv construction (`BuildServiceArgs` legacy-prefixed, `BuildRunArgs` bare), version, SIGHUP. Imported by all three entry points; owns the consoleserver import, so client binaries transitively embed the console bundle.
+* **Path**: `internal/command/`
+
+### 15. [Client Commands](internal/clicommand/AGENTS.md)
+* **Responsibility**: Client-side command workflows (`RunLogin`, `RunAgent`, `RunConnect`, `RunProbe`, `RunModule`, `RunUI`) shared by `cmd/cli` and `cmd/ssetunnel`. Kept separate from `internal/command` so `cmd/server` never pulls client packages. `BinaryName` parameterizes help text; `BuildRunFn` builds service run closures.
+* **Path**: `internal/clicommand/`
+
+### 16. [Client Workflows](internal/clientapp/AGENTS.md)
+* **Responsibility**: Transport-neutral workflows shared by CLI, browser, and desktop surfaces: `Login`/`CheckTOTPRequired` (bounded 15 s client, SSRF-validated console URL, status-only errors, credential/upstream sentinels), `ResolveSession` (proactive token refresh), `RunAgent` (module teardown + logger restore on exit), `RunConnect`/`StartNamedConnect` (synchronous bind, goroutine owns listener cleanup), flag clamping.
+* **Path**: `internal/clientapp/`
+
+### 17. [Browser Client Server](internal/clientserver/AGENTS.md)
+* **Responsibility**: Secured loopback HTTP server for `cli ui`: launch-secret auth (constant-time), exact Host + same-origin Origin checks, loopback-only bind, contract security headers on every response class, dedicated index/immutable-asset handlers, 64 KiB body limit. Owns the in-process agent/connect lifecycle (per-run structs, bounded teardown, logout stops owned runtimes) and the JSON API delegating to `clientapp`.
+* **Path**: `internal/clientserver/`
 
 ---
 

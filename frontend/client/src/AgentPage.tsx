@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import {
   Box, Card, CardContent, TextField, Button, Typography, Switch,
   FormControlLabel, Alert, Chip, Stack, CircularProgress,
@@ -53,6 +53,24 @@ export default function AgentPage({ bridge }: AgentPageProps) {
     poll();
     return () => { cancelled = true; };
   }, [refresh]);
+
+  // Seed the form from a running agent once, so Restart reflects the live
+  // configuration instead of silently re-targeting with empty defaults.
+  const seeded = useRef(false);
+  useEffect(() => {
+    if (!seeded.current && status?.running) {
+      seeded.current = true;
+      setConfig(c => ({
+        ...c,
+        server_url: status.server_url,
+        target: status.target,
+        agent_id: status.agent_id,
+        batch_size: status.batch_size || c.batch_size,
+        concurrency: status.concurrency || c.concurrency,
+        compress: status.compress,
+      }));
+    }
+  }, [status]);
 
   const handleStart = async () => {
     setAction('start');
@@ -117,6 +135,7 @@ export default function AgentPage({ bridge }: AgentPageProps) {
       </Stack>
 
       {error && <Alert severity="error" sx={{ mb: 2 }} onClose={() => setError('')}>{error}</Alert>}
+      {status?.error && <Alert severity="error" sx={{ mb: 2 }}>{status.error}</Alert>}
 
       <Card sx={{ mb: 2 }}>
         <CardContent>
@@ -144,13 +163,13 @@ export default function AgentPage({ bridge }: AgentPageProps) {
             <TextField
               label="Batch Size" type="number" value={config.batch_size}
               onChange={e => setConfig({ ...config, batch_size: Number(e.target.value) })}
-              inputProps={{ min: 1024, max: 1048576 }}
+              slotProps={{ htmlInput: { min: 1024, max: 1048576 } }}
               sx={{ width: 160 }}
             />
             <TextField
               label="Concurrency" type="number" value={config.concurrency}
               onChange={e => setConfig({ ...config, concurrency: Number(e.target.value) })}
-              inputProps={{ min: 1, max: 4 }}
+              slotProps={{ htmlInput: { min: 1, max: 4 } }}
               sx={{ width: 140 }}
             />
           </Stack>
@@ -173,7 +192,7 @@ export default function AgentPage({ bridge }: AgentPageProps) {
 
       <Stack direction="row" spacing={2}>
         {!running ? (
-          <Button variant="contained" onClick={handleStart} disabled={!!action || !config.server_url || !config.agent_id}>
+          <Button variant="contained" onClick={handleStart} disabled={!!action}>
             {action === 'start' ? 'Starting...' : 'Start'}
           </Button>
         ) : (

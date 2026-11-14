@@ -29,7 +29,7 @@ func (s *Server) registerAPIRoutes(r *mux.Router) {
 	r.HandleFunc("/agent/status", s.handleAgentStatus).Methods("GET")
 	r.HandleFunc("/agent/start", s.handleAgentStart).Methods("POST")
 	r.HandleFunc("/agent/stop", s.handleAgentStop).Methods("POST")
-	r.HandleFunc("/agent/restart", s.handleAgentRestart).Methods("POST")
+	r.HandleFunc("/agent/restart", s.handleAgentStart).Methods("POST")
 	r.HandleFunc("/connect/list", s.handleConnectList).Methods("GET")
 	r.HandleFunc("/connect/start", s.handleConnectStart).Methods("POST")
 	r.HandleFunc("/connect/stop/{name}", s.handleConnectStop).Methods("POST")
@@ -88,10 +88,10 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.Server == "" {
-		req.Server = "http://127.0.0.1:8081"
+		req.Server = "http://127.0.0.1:8081/console"
 	}
 
-	result, err := clientapp.Login(clientapp.LoginParams{
+	result, err := clientapp.Login(r.Context(), clientapp.LoginParams{
 		ConsoleURL: req.Server,
 		TunnelURL:  req.TunnelServer,
 		Username:   req.Username,
@@ -100,7 +100,14 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		log.Printf("api: login failed for %q: %v", req.Username, err)
-		writeError(w, http.StatusUnauthorized, "login failed: invalid credentials or TOTP code")
+		switch {
+		case errors.Is(err, clientapp.ErrInvalidCredentials):
+			writeError(w, http.StatusUnauthorized, "login failed: invalid credentials or TOTP code")
+		case errors.Is(err, clientapp.ErrConsoleUnavailable):
+			writeError(w, http.StatusBadGateway, "login failed: console unreachable or rejected the request")
+		default:
+			writeError(w, http.StatusInternalServerError, "login failed")
+		}
 		return
 	}
 	writeJSON(w, http.StatusOK, result)
@@ -115,7 +122,12 @@ func (s *Server) handleTOTPCheck(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	required, _ := clientapp.CheckTOTPRequired(req.Server, req.Username)
+	required, err := clientapp.CheckTOTPRequired(r.Context(), req.Server, req.Username)
+	if err != nil {
+		log.Printf("api: totp check failed for %q: %v", req.Username, err)
+		writeError(w, http.StatusBadGateway, "TOTP check failed: console unreachable")
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]bool{"totp_required": required})
 }
 
@@ -159,6 +171,13 @@ func (s *Server) handleListSessions(w http.ResponseWriter, _ *http.Request) {
 
 // POST /api/logout
 func (s *Server) handleLogout(w http.ResponseWriter, _ *http.Request) {
+	// The UI owns these runtimes (ADR-005): logout tears them down so no
+	// tunnel keeps running on a deleted credential until silent expiry.
+	if err := s.agent.stop(); err != nil {
+		log.Printf("api: logout: agent teardown: %v", err)
+	}
+	s.connects.stopAll()
+
 	// Resolve the current session first so we only delete this one entry,
 	// preserving other saved sessions for the login page dropdown.
 	sess, err := clientapp.ResolveSession("", "ui")
@@ -231,28 +250,8 @@ func (s *Server) handleAgentStop(w http.ResponseWriter, _ *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// POST /api/agent/restart
-func (s *Server) handleAgentRestart(w http.ResponseWriter, r *http.Request) {
-	var req agentStartRequest
-	if !decodeJSON(w, r, &req) {
-		return
-	}
-	cfg := clientapp.AgentConfig{
-		ServerURL:   req.ServerURL,
-		Target:      req.Target,
-		AgentID:     req.AgentID,
-		BatchSize:   req.BatchSize,
-		Concurrency: req.Concurrency,
-		Compress:    req.Compress,
-		NoAutoTune:  req.NoAutoTune,
-		Verbose:     req.Verbose,
-	}
-	if err := s.agent.start(s.serverCtx, cfg); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
-}
+// POST /api/agent/restart is an alias for start: start replaces a running
+// agent, so the two operations are identical.
 
 // GET /api/connect/list
 func (s *Server) handleConnectList(w http.ResponseWriter, _ *http.Request) {
@@ -283,7 +282,11 @@ func (s *Server) handleConnectStart(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleConnectStop(w http.ResponseWriter, r *http.Request) {
 	name := mux.Vars(r)["name"]
 	if err := s.connects.stop(name); err != nil {
-		writeError(w, http.StatusNotFound, err.Error())
+		if errors.Is(err, errNotFound) {
+			writeError(w, http.StatusNotFound, err.Error())
+		} else {
+			writeError(w, http.StatusInternalServerError, err.Error())
+		}
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -296,8 +299,6 @@ func (s *Server) handleConnectRestart(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	// Stop the existing instance first.
-	_ = s.connects.stop(name)
 	cfg := clientapp.ConnectConfig{
 		ServerURL: req.ServerURL,
 		AgentID:   req.AgentID,
@@ -305,6 +306,26 @@ func (s *Server) handleConnectRestart(w http.ResponseWriter, r *http.Request) {
 		Local:     req.Local,
 		BatchSize: req.BatchSize,
 	}
+	// Empty request fields inherit the running instance's configuration so
+	// a bare restart keeps the same tunnel instead of silently re-targeting.
+	if prev, ok := s.connects.get(name); ok {
+		if cfg.ServerURL == "" {
+			cfg.ServerURL = prev.Config.ServerURL
+		}
+		if cfg.AgentID == "" {
+			cfg.AgentID = prev.Config.AgentID
+		}
+		if cfg.Target == "" {
+			cfg.Target = prev.Config.Target
+		}
+		if cfg.Local == "" {
+			cfg.Local = prev.Config.Local
+		}
+		if cfg.BatchSize == 0 {
+			cfg.BatchSize = prev.Config.BatchSize
+		}
+	}
+	_ = s.connects.stop(name)
 	if err := s.connects.start(name, cfg); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -319,13 +340,41 @@ var pollingPaths = map[string]bool{
 	"/api/connect/list": true,
 }
 
-// requestLogging logs API requests for audit and debugging.
-// Polling GET endpoints are silenced to keep the terminal output clean.
+// statusWriter records the response status so requestLogging can report it.
+// clientserver has no streaming responses, so wrapping the writer is safe
+// here (it must NOT be copied to consoleserver, whose SSE handlers assert
+// http.Flusher on the original writer).
+type statusWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (w *statusWriter) WriteHeader(code int) {
+	w.status = code
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w *statusWriter) Write(b []byte) (int, error) {
+	if w.status == 0 {
+		w.status = http.StatusOK
+	}
+	return w.ResponseWriter.Write(b)
+}
+
+// requestLogging logs API requests for audit and debugging. Successful
+// polling GETs are silenced to keep the terminal output clean; errors are
+// always logged, including on polling paths.
 func requestLogging(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet || !pollingPaths[r.URL.Path] {
-			log.Printf("api: %s %s", r.Method, r.URL.Path)
+		start := time.Now()
+		sw := &statusWriter{ResponseWriter: w}
+		next.ServeHTTP(sw, r)
+		if sw.status == 0 {
+			sw.status = http.StatusOK
 		}
-		next.ServeHTTP(w, r)
+		polling := r.Method == http.MethodGet && pollingPaths[r.URL.Path]
+		if !polling || sw.status >= 400 {
+			log.Printf("api: %s %s -> %d (%s)", r.Method, r.URL.Path, sw.status, time.Since(start).Round(time.Millisecond))
+		}
 	})
 }

@@ -7,7 +7,6 @@ vars:
   BUILD_DIR: build
   FRONTEND_DIR: frontend/console
   CLIENT_DIR: frontend/client
-  CLIX_DIR: app/clix
   GIT_SHA:
     sh: git rev-parse --short HEAD 2>/dev/null || echo unknown
   VERSION:

@@ -61,6 +61,32 @@ func TestRunServer_AddressAlreadyBound(t *testing.T) {
 	}
 }
 
+func TestRunServerParsesBareServiceArgs(t *testing.T) {
+	t.Parallel()
+	// The argv installed by DispatchServiceActionBare must parse every
+	// flag: an occupied --listen port must surface "address already in
+	// use". The legacy prefixed argv (["server","run",...]) made
+	// flag.Parse stop at the first non-flag token and silently drop all
+	// flags, so the daemon bound the default port instead.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("setup listen: %v", err)
+	}
+	defer ln.Close()
+	addr := ln.Addr().String()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	args := BuildRunArgs([]string{"start", "--listen", addr, "--console-listen=", "--metrics-dir=", "--disable-auth"})
+	err = RunServer(ctx, args)
+	if err == nil {
+		t.Fatal("expected error when address is already bound, got nil")
+	}
+	if !strings.Contains(err.Error(), "address already in use") {
+		t.Fatalf("bare service argv did not parse --listen (flags dropped?): %v", err)
+	}
+}
+
 func TestIsEmbeddedPostgres(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

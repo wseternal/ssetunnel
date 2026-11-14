@@ -1,6 +1,11 @@
 # Frontend
 
-React admin console SPA built with Vite + TypeScript + MUI v9 + orca-ui. Mercury Console light theme design system. Embedded into the Go binary via `go:embed` for the `litespaserver`.
+Two React SPAs built with Vite + TypeScript + MUI v9:
+
+- **Console** (`frontend/console`) — admin management UI, Mercury Console light theme, served by `internal/consoleserver` via `litespaserver`.
+- **Client** (`frontend/client`) — end-user tunnel UI (login, agent, connect), served by `internal/clientserver` (`cli ui`) and the Clix desktop app.
+
+Both are embedded into Go binaries via `go:embed`, in separate packages so server binaries never carry client assets (ADR-005).
 
 ## Structure
 
@@ -18,7 +23,21 @@ frontend/
 │   ├── index.html
 │   ├── package.json
 │   └── vite.config.ts
-└── frontend.go         # go:embed ConsoleWebRootFs
+├── client/
+│   ├── dist/           # Built assets (committed for go:embed)
+│   ├── src/
+│   │   ├── App.tsx          # Tabs + login dialog + bridge selection
+│   │   ├── AgentPage.tsx    # Agent config + lifecycle
+│   │   ├── ConnectPage.tsx  # Named connect instances
+│   │   ├── LoginForm.tsx    # Server dropdowns + TOTP check
+│   │   ├── bridge.ts        # HTTP bridge (launch-secret auth)
+│   │   ├── wails.ts         # Wails adapter (null until bindings exist)
+│   │   └── types.ts         # Transport-neutral Bridge contract + DTOs
+│   ├── assets.go       # go:embed ClientWebRootFs (package client)
+│   ├── index.html
+│   ├── package.json
+│   └── vite.config.ts
+└── console.go          # go:embed ConsoleWebRootFs (package frontend)
 ```
 
 ## Dependencies
@@ -52,6 +71,16 @@ tasks (`fe:build`, `fe:ci-build`) run `bun run build` with no environment
 overrides. The server strips the prefix via `--console-prefix` (default
 `/console`); behind a reverse proxy that already strips, pass
 `--console-prefix=""`.
+
+## Client SPA
+
+The client UI (`frontend/client`) is a two-tab app (Agent, Connect) with a login dialog. Pages contain no transport logic: they call the `Bridge` interface (`types.ts`), implemented by `httpBridge` (browser, `cli ui`) and — once Wails bindings exist — `wailsBridge` (desktop).
+
+- **Auth**: the launch secret arrives in the URL fragment, moves to `sessionStorage`, and is sent as `Authorization: Bearer` on every `/api` request. A fresh fragment always wins over stored state. Fetches carry a 10 s abort timeout (30 s for logout, which tears down runtimes server-side).
+- **State**: both tab panels stay mounted (hidden) so config survives tab switches; AgentPage seeds its form from a running agent's status once. Status polls every 5 s; runtime errors (`error` field on the DTOs) render as alerts.
+- **Build**: `task client:install && task client:build`; CI runs `client:ci-build` + `client:dist-drift`. `dist/` is committed — rebuild and commit it whenever `src/` changes. `build.target` is `es2022` (same enum-miscompile constraint as the console, see docs/rca/001).
+- **Base path**: `/` (the client server serves at root, unlike the console's `/console`).
+- **No frontend tests** (project policy): validate with build + typecheck; browser e2e only with explicit permission.
 
 ## Tabs
 

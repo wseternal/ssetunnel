@@ -90,6 +90,7 @@ type Agent struct {
 	moduleInvoker *ModuleInvoker
 	modRegistry   *agentmod.Registry
 	modIPC        *agentmod.IPCServer
+	modSupervisor *agentmod.Supervisor
 
 	// Current yamux session (set in runOnce, cleared on disconnect).
 	// Used by the module invoker to open reverse streams.
@@ -98,6 +99,21 @@ type Agent struct {
 	// runCtx stores the Run context for use by control message handlers
 	// (e.g., module_open needs a cancellable context).
 	runCtx atomic.Pointer[context.Context]
+}
+
+// Close releases the module subsystem: it stops supervised module processes
+// and closes the IPC listener. Safe to call multiple times and safe when
+// modules were never initialized. Run does not call it — the Agent's owner
+// (process exit for the CLI, clientapp.RunAgent for the UI) must, or each
+// in-process restart leaks an accept loop, a socket FD, and module children.
+func (a *Agent) Close() error {
+	if a.modSupervisor != nil {
+		a.modSupervisor.Stop()
+	}
+	if a.modIPC != nil {
+		return a.modIPC.Close()
+	}
+	return nil
 }
 
 // InitModules initializes the module subsystem for this agent. It creates
@@ -134,6 +150,7 @@ func (a *Agent) InitModules(ctx context.Context, dataDir string) error {
 	supervisor := agentmod.NewSupervisor(ctx, registry, ipc)
 	a.modRegistry = registry
 	a.modIPC = ipc
+	a.modSupervisor = supervisor
 	a.moduleManager = NewModuleManager(registry, ipc, supervisor)
 	a.moduleInvoker = NewModuleInvoker(a, ipc, registry)
 

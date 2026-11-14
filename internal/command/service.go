@@ -93,7 +93,21 @@ type RunFnBuilder func(subcommand string, args []string) func(context.Context) e
 // handled=false and the caller falls through to the legacy direct-run path.
 // The runFnBuilder constructs the run function for the given subcommand;
 // pass nil to use a default that returns an "unsupported subcommand" error.
+// Installed services are invoked as: binary <subcommand> run <flags...>.
 func DispatchServiceAction(subcommand string, args []string, runFnBuilder RunFnBuilder) (handled bool, err error) {
+	return dispatchServiceAction(subcommand, args, runFnBuilder, BuildServiceArgs)
+}
+
+// DispatchServiceActionBare is DispatchServiceAction for single-command
+// binaries (e.g. cmd/server) that have no subcommand dispatch layer:
+// installed services are invoked as: binary run <flags...>.
+func DispatchServiceActionBare(subcommand string, args []string, runFnBuilder RunFnBuilder) (handled bool, err error) {
+	return dispatchServiceAction(subcommand, args, runFnBuilder, func(_ string, args []string) []string {
+		return BuildRunArgs(args)
+	})
+}
+
+func dispatchServiceAction(subcommand string, args []string, runFnBuilder RunFnBuilder, buildArgs func(string, []string) []string) (handled bool, err error) {
 	if runFnBuilder == nil {
 		runFnBuilder = defaultRunFnBuilder
 	}
@@ -197,7 +211,7 @@ func DispatchServiceAction(subcommand string, args []string, runFnBuilder RunFnB
 		Name:        svcName,
 		DisplayName: "ssetunnel " + subcommand,
 		Description: "ssetunnel " + subcommand + " daemon",
-		Arguments:   BuildServiceArgs(subcommand, append([]string{action}, runtimeFlags...)),
+		Arguments:   buildArgs(subcommand, append([]string{action}, runtimeFlags...)),
 		Option:      service.KeyValue{},
 	}
 	if userService {
@@ -304,15 +318,22 @@ func DispatchServiceAction(subcommand string, args []string, runFnBuilder RunFnB
 	return false, nil
 }
 
-// buildServiceArgs constructs the Arguments slice for service.Config.
-// The OS service manager invokes: binary <Arguments...>.
+// BuildServiceArgs constructs the Arguments slice for service.Config of a
+// multi-command binary (ssetunnel, cli). The OS service manager invokes:
+// binary <subcommand> run <flags...>.
+func BuildServiceArgs(subcommand string, args []string) []string {
+	return append([]string{subcommand}, BuildRunArgs(args)...)
+}
+
+// BuildRunArgs constructs the Arguments slice for a single-command binary
+// (server). The OS service manager invokes: binary run <flags...>.
 // We replace the action verb with "run" and preserve all remaining flags.
 // --service-user is stripped: it is consumed by the service installer
 // (service.Config.UserName) and is not a runtime flag the daemon recognises.
 // --base is stripped: route prefixing is the reverse proxy's job now, so a
 // re-install must not carry the retired flag forward into the unit file.
-func BuildServiceArgs(subcommand string, args []string) []string {
-	out := []string{subcommand, "run"}
+func BuildRunArgs(args []string) []string {
+	out := []string{"run"}
 	if len(args) > 1 {
 		out = append(out, args[1:]...)
 	}

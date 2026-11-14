@@ -6,7 +6,7 @@ import (
 	"log"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
-	"github.com/wseternal/ssetunnel/frontend"
+	clientassets "github.com/wseternal/ssetunnel/frontend/client"
 )
 
 //go:embed build/appicon.png
@@ -67,7 +67,7 @@ func (s *ClientService) StopConnect(name string) error {
 }
 
 func main() {
-	clientFS := frontend.ClientWebRootFs
+	clientFS := clientassets.ClientWebRootFs
 
 	clientSvc := NewClientService()
 

@@ -135,6 +135,13 @@ func RunAgent(ctx context.Context, cfg AgentConfig) error {
 	if err := ag.InitModules(ctx, dataDir); err != nil {
 		return fmt.Errorf("init modules: %w", err)
 	}
+	defer ag.Close()
+
+	// Run tees the global logger into the agent's ring buffer; restore the
+	// previous writer on exit so an in-process restart does not leave the
+	// UI server logging into a dead agent's buffer.
+	prevLog := log.Writer()
+	defer log.SetOutput(prevLog)
 
 	return ag.Run(ctx)
 }
