@@ -6,6 +6,7 @@ package clicommand
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -20,6 +21,10 @@ import (
 // proxies streams to a local TCP target or spawns a local shell.
 func RunAgent(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("agent", flag.ContinueOnError)
+	fs.Usage = func() {
+		fmt.Fprintf(fs.Output(), "usage: agent [flags]\n  or: agent <action> [flags]\n\nactions: run, start, stop, restart, status, reload, uninstall\n\nflags:\n")
+		fs.PrintDefaults()
+	}
 	serverURL := fs.String("server", "", "tunnel server URL (default: from saved session)")
 	target := fs.String("target", "", "TCP address to forward streams to (empty = dynamic target mode)")
 	agentID := fs.String("id", "", "agent identifier for routing (e.g. mydevbox)")
@@ -31,6 +36,9 @@ func RunAgent(ctx context.Context, args []string) error {
 	base := command.AcceptDeprecatedBaseFlag(fs)
 
 	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
 		return err
 	}
 	command.WarnDeprecatedBase("agent", *base)
@@ -64,6 +72,10 @@ func RunAgent(ctx context.Context, args []string) error {
 // to a remote agent via the tunnel server.
 func RunConnect(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("connect", flag.ContinueOnError)
+	fs.Usage = func() {
+		fmt.Fprintf(fs.Output(), "usage: connect [flags]\n  or: connect <action> [flags]\n\nactions: run, start, stop, restart, status, uninstall\n\nflags:\n")
+		fs.PrintDefaults()
+	}
 	server := fs.String("server", "", "tunnel server URL (default: from saved session)")
 	agentID := fs.String("agent", "", "agent identifier to connect to (e.g. mydevbox)")
 	target := fs.String("target", "", "target address on the agent machine (e.g. 127.0.0.1:22)")
@@ -72,6 +84,9 @@ func RunConnect(ctx context.Context, args []string) error {
 	base := command.AcceptDeprecatedBaseFlag(fs)
 
 	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
 		return err
 	}
 	command.WarnDeprecatedBase("connect", *base)

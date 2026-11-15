@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"os"
 	"os/signal"
@@ -31,6 +32,15 @@ func main() {
 	// binary upgrade keeps the installed service working.
 	if len(args) >= 2 && args[0] == "server" && args[1] == "run" {
 		args = args[2:]
+	}
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "usage: server [flags]")
+		fmt.Fprintln(os.Stderr, "  or: server <action> [flags]")
+		fmt.Fprintln(os.Stderr)
+		fmt.Fprintln(os.Stderr, "actions: run, start, stop, restart, status, reload, uninstall")
+		fmt.Fprintln(os.Stderr)
+		fmt.Fprintln(os.Stderr, "Run 'server --help' for the full flag list.")
+		os.Exit(2)
 	}
 	if len(args) > 0 && command.ServiceActions[args[0]] {
 		if handled, err := command.DispatchServiceActionBare("server", args, serverRunFnBuilder); handled {
