@@ -11,6 +11,11 @@
 
 ### Features
 
+* **client surfaces:** product split into `server`, `cli`, legacy `ssetunnel`, and a Wails `clix` skeleton (ADR-005)
+  - Shared workflow packages: `internal/command`, `internal/clicommand`, `internal/clientapp`
+  - `cli ui`: secured loopback browser UI (launch-secret auth, agent/connect lifecycle, login with saved-session dropdowns)
+  - Client SPA (`frontend/client`) embedded in its own Go package; server binaries no longer carry client assets
+  - Release workflow builds all three binaries and both frontends
 * **modules:** agent module registry with pluggable HTTP services
   - Provider SDK (`sdk/provider.go`) for module authors with `http.Handler` interface
   - Consumer SDK (`sdk/discovery.go`) for service discovery and invocation
@@ -23,8 +28,22 @@
   - Process supervisor with exponential backoff (500 ms → 30 s cap)
   - Package validation with symlink traversal protection
 
+### Fixes
+
+* **clientserver:** agent restart no longer deadlocks the UI server (per-run lifecycle structs); concurrent stop/start can no longer orphan an agent; shutdown drains HTTP before runtime teardown
+* **server:** installed OS services now parse all flags (`server start` previously dropped every flag and ran with defaults)
+* **clientserver:** loopback-only bind enforced; IPv6 Host parsing fixed; contract security headers on every response class; immutable hashed assets
+* **clientapp:** login/TOTP requests bounded (15 s) with context propagation and SSRF-validated console URLs; failed connect starts release their local port; agent module IPC/supervisor torn down on exit
+* **ui:** logout stops owned runtimes; runtime errors visible in the UI; Start works with saved sessions; tab switches preserve config
+* **ci:** release workflow installs bun before building frontends
+
 ### Breaking Changes
 
+* **login console URL validation** — `login` (all surfaces) now applies the
+  same SSRF rule as session refresh: plain `http://` console URLs are
+  accepted only for loopback hosts (`localhost`, `127.0.0.1`, `::1`).
+  LAN dev setups like `http://192.168.1.5:8081` must use HTTPS or a
+  loopback port-forward.
 * **remove --base flag and /console path prefix** — all routes are now
   root-relative (`/events`, `/api/v1/...` instead of `/console/api/v1/...`).
   Path prefixing is delegated to the reverse proxy (e.g. Caddy `handle_path`).

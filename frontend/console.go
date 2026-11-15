@@ -5,9 +5,10 @@ import (
 	"io/fs"
 )
 
-//go:embed console/dist
+//go:embed all:console/dist
 var consoleFS embed.FS
 
+// ConsoleWebRootFs is the embedded admin console SPA filesystem.
 var ConsoleWebRootFs fs.FS
 
 func init() {

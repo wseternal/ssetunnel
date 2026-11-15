@@ -90,6 +90,7 @@ type Agent struct {
 	moduleInvoker *ModuleInvoker
 	modRegistry   *agentmod.Registry
 	modIPC        *agentmod.IPCServer
+	modSupervisor *agentmod.Supervisor
 
 	// Current yamux session (set in runOnce, cleared on disconnect).
 	// Used by the module invoker to open reverse streams.
@@ -98,6 +99,36 @@ type Agent struct {
 	// runCtx stores the Run context for use by control message handlers
 	// (e.g., module_open needs a cancellable context).
 	runCtx atomic.Pointer[context.Context]
+}
+
+// InitLogCapture creates the log ring buffer without touching the global
+// log writer. The caller is responsible for calling log.SetOutput with a
+// MultiWriter that includes the returned buffer — typically under a
+// log-writer mutex so the SetOutput is serialized.
+//
+// When logBuf is already set, Run skips its own unprotected SetOutput,
+// closing the data-race window between concurrent log writer swaps.
+func (a *Agent) InitLogCapture() *LogBuffer {
+	a.logBuf = newLogBuffer(256)
+	return a.logBuf
+}
+
+// LogBuffer is a thread-safe ring buffer that captures recent log output.
+type LogBuffer = logBuffer
+
+// Close releases the module subsystem: it stops supervised module processes
+// and closes the IPC listener. Safe to call multiple times and safe when
+// modules were never initialized. Run does not call it — the Agent's owner
+// (process exit for the CLI, clientapp.RunAgent for the UI) must, or each
+// in-process restart leaks an accept loop, a socket FD, and module children.
+func (a *Agent) Close() error {
+	if a.modSupervisor != nil {
+		a.modSupervisor.Stop()
+	}
+	if a.modIPC != nil {
+		return a.modIPC.Close()
+	}
+	return nil
 }
 
 // InitModules initializes the module subsystem for this agent. It creates
@@ -134,6 +165,7 @@ func (a *Agent) InitModules(ctx context.Context, dataDir string) error {
 	supervisor := agentmod.NewSupervisor(ctx, registry, ipc)
 	a.modRegistry = registry
 	a.modIPC = ipc
+	a.modSupervisor = supervisor
 	a.moduleManager = NewModuleManager(registry, ipc, supervisor)
 	a.moduleInvoker = NewModuleInvoker(a, ipc, registry)
 
@@ -195,8 +227,15 @@ func (a *Agent) Run(ctx context.Context) error {
 	// Install log capture: all log.Printf output goes to both stderr
 	// and the ring buffer. The server can request recent lines via
 	// the control channel (MsgLogRequest).
-	a.logBuf = newLogBuffer(256)
-	log.SetOutput(io.MultiWriter(os.Stderr, a.logBuf))
+	//
+	// If logBuf was pre-set by the caller (e.g. clientapp.RunAgent
+	// via InstallLogCapture under a log-writer mutex), skip the
+	// SetOutput to avoid an unprotected concurrent write to the
+	// global log writer.
+	if a.logBuf == nil {
+		a.logBuf = newLogBuffer(256)
+		log.SetOutput(io.MultiWriter(os.Stderr, a.logBuf))
+	}
 
 	b := newAgentBackoff()
 	if a.MaxBackoff > 0 {

@@ -34,6 +34,26 @@ You (SSH, DB client, VNC …)
 
 ---
 
+## Products
+
+One implementation, four surfaces (see [ADR-005](docs/adr/005-client-surfaces.md)):
+
+| Binary | Purpose |
+|--------|---------|
+| `server` | Tunnel server only — deploy without any client code |
+| `cli` | Client commands: `login`, `agent`, `connect`, `probe`, `module`, and `ui` |
+| `ssetunnel` | Legacy all-in-one binary, kept compatible with existing services and SSH ProxyCommand setups |
+| `clix` | Wails desktop app (in progress — bindings not wired yet) |
+
+**Browser UI** — `cli ui` starts a secured loopback server and opens the client UI in your browser: log in, start/stop/restart the agent, and manage named connect instances without touching a terminal. The URL carries a per-invocation launch secret; nothing is exposed to the network.
+
+```bash
+cli login --server https://tunnel.example.com
+cli ui
+```
+
+---
+
 ## In Action
 
 **Live tunnel sessions** — monitor every connected agent, bandwidth, and connection in real time from the web console.
