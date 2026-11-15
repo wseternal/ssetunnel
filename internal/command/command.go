@@ -44,16 +44,6 @@ commands:
   version   print the build version and git revision
 `
 
-// ServerUsage is the top-level help text for the server binary.
-const ServerUsage = `usage: server [flags]
-  or: server <action> [flags]
-
-actions: run, start, stop, restart, status, reload, uninstall
-
-flags:
-  Run 'server --help' for the full flag list.
-`
-
 // CLIUsage is the top-level help text for the CLI binary.
 const CLIUsage = `usage: cli <command> [flags]
 
@@ -88,6 +78,10 @@ func WarnDeprecatedBase(prefix, base string) {
 
 func RunServer(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("server", flag.ContinueOnError)
+	fs.Usage = func() {
+		fmt.Fprintf(fs.Output(), "usage: server [flags]\n  or: server <action> [flags]\n\nactions: run, start, stop, restart, status, reload, uninstall\n\nflags:\n")
+		fs.PrintDefaults()
+	}
 	listen := fs.String("listen", ":8080", "HTTP listen address for tunnel endpoints")
 	consoleListen := fs.String("console-listen", ":8081", "HTTP listen address for admin console SPA")
 	heartbeat := fs.Duration("heartbeat", 15*time.Second, "SSE heartbeat interval")
@@ -109,6 +103,9 @@ func RunServer(ctx context.Context, args []string) error {
 	base := AcceptDeprecatedBaseFlag(fs)
 
 	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
 		return err
 	}
 	WarnDeprecatedBase("server", *base)
