@@ -56,9 +56,10 @@ export default function AgentPage({ bridge }: AgentPageProps) {
 
   // Seed the form from a running agent once, so Restart reflects the live
   // configuration instead of silently re-targeting with empty defaults.
+  // Skip seeding from external agents whose config may be zero/unknown.
   const seeded = useRef(false);
   useEffect(() => {
-    if (!seeded.current && status?.running) {
+    if (!seeded.current && status?.running && !status.external) {
       seeded.current = true;
       setConfig(c => ({
         ...c,
@@ -114,6 +115,7 @@ export default function AgentPage({ bridge }: AgentPageProps) {
   if (loading) return <CircularProgress />;
 
   const running = status?.running ?? false;
+  const external = status?.external ?? false;
 
   return (
     <Box>
@@ -125,6 +127,8 @@ export default function AgentPage({ bridge }: AgentPageProps) {
           color={running ? 'success' : 'default'}
           variant="outlined"
         />
+        {external && <Chip label="External" color="warning" variant="outlined" size="small" />}
+        {running && status?.pid && <Chip label={`PID: ${status.pid}`} variant="outlined" size="small" />}
         {running && status && (
           <>
             <Chip label={`Server: ${status.server_url}`} variant="outlined" size="small" />
@@ -133,6 +137,13 @@ export default function AgentPage({ bridge }: AgentPageProps) {
           </>
         )}
       </Stack>
+
+      {external && (
+        <Alert severity="info" sx={{ mb: 2 }}>
+          This agent is running externally (e.g. <code>cli agent run</code> or as an OS service).
+          Starting a new agent will terminate the external one.
+        </Alert>
+      )}
 
       {error && <Alert severity="error" sx={{ mb: 2 }} onClose={() => setError('')}>{error}</Alert>}
       {status?.error && <Alert severity="error" sx={{ mb: 2 }}>{status.error}</Alert>}
@@ -194,6 +205,10 @@ export default function AgentPage({ bridge }: AgentPageProps) {
         {!running ? (
           <Button variant="contained" onClick={handleStart} disabled={!!action}>
             {action === 'start' ? 'Starting...' : 'Start'}
+          </Button>
+        ) : external ? (
+          <Button variant="contained" color="warning" onClick={handleStart} disabled={!!action}>
+            {action === 'start' ? 'Starting...' : 'Start (Replace)'}
           </Button>
         ) : (
           <>

@@ -2,6 +2,7 @@ package clientapp
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -9,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/wseternal/ssetunnel/internal/agent"
 	"github.com/wseternal/ssetunnel/internal/auth"
@@ -131,6 +133,27 @@ func RunAgent(ctx context.Context, cfg AgentConfig) error {
 			sess.URL, cfg.AgentID, batch, conc, cfg.Compress)
 	}
 
+	// Write a status file so the browser UI can detect this agent
+	// even when it was started outside the UI process (e.g. `cli agent run`).
+	// Service-managed agents also write a PID file via serviceProgram.Start;
+	// this status file carries the same PID plus config for the UI to display.
+	statusPath, pathErr := agentStatusFilePath()
+	if pathErr != nil {
+		log.Printf("agent: status file: %v", pathErr)
+	} else {
+		writeAgentStatusFile(statusPath, AgentStatusInfo{
+			PID:         os.Getpid(),
+			ServerURL:   sess.URL,
+			Target:      cfg.Target,
+			AgentID:     cfg.AgentID,
+			BatchSize:   batch,
+			Concurrency: conc,
+			Compress:    cfg.Compress,
+			StartedAt:   time.Now(),
+		})
+		defer removeAgentStatusFile(statusPath)
+	}
+
 	ag := &agent.Agent{
 		ServerURL:       sess.URL,
 		Target:          cfg.Target,
@@ -167,4 +190,172 @@ func RunAgent(ctx context.Context, cfg AgentConfig) error {
 	defer swapLogOutput(prevLog)
 
 	return ag.Run(ctx)
+}
+
+// AgentStatusInfo is the JSON payload written to the agent status file.
+// The browser UI reads this to detect agents running outside its process.
+type AgentStatusInfo struct {
+	PID         int       `json:"pid"`
+	ServerURL   string    `json:"server_url"`
+	Target      string    `json:"target"`
+	AgentID     string    `json:"agent_id"`
+	BatchSize   int       `json:"batch_size"`
+	Concurrency int       `json:"concurrency"`
+	Compress    bool      `json:"compress"`
+	StartedAt   time.Time `json:"started_at"`
+}
+
+// statusFileMaxAge is the maximum age of a status file entry before it
+// is considered stale. Entries older than this are rejected to mitigate
+// PID-reuse false positives after crashes or reboots.
+const statusFileMaxAge = 7 * 24 * time.Hour
+
+// statusFileMaxBytes is the maximum size of a status file read.
+// The expected payload is ~200 bytes; 4 KiB provides ample headroom.
+const statusFileMaxBytes = 4096
+
+// agentStatusPath caches the status file path so os.UserHomeDir is
+// resolved once per process lifetime.
+var (
+	agentStatusPath     string
+	agentStatusPathOnce sync.Once
+	agentStatusPathErr  error
+)
+
+// agentStatusFilePath returns ~/.ssetunnel/ssetunnel-agent.json.
+// This mirrors the service PID file location (~/.ssetunnel/ssetunnel-agent.pid)
+// but carries additional config fields for the UI to display.
+// Returns an error when the home directory is unavailable (no /tmp fallback).
+func agentStatusFilePath() (string, error) {
+	agentStatusPathOnce.Do(func() {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			agentStatusPathErr = fmt.Errorf("cannot determine home directory: %w", err)
+			return
+		}
+		agentStatusPath = filepath.Join(home, ".ssetunnel", "ssetunnel-agent.json")
+	})
+	return agentStatusPath, agentStatusPathErr
+}
+
+func writeAgentStatusFile(path string, info AgentStatusInfo) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		log.Printf("agent: status file: mkdir: %v", err)
+		return
+	}
+	data, err := json.Marshal(info)
+	if err != nil {
+		log.Printf("agent: status file: marshal: %v", err)
+		return
+	}
+	// Atomic write: write to a unique temp file then rename. This prevents
+	// concurrent readers from seeing partial data, blocks symlink attacks
+	// (os.Rename replaces symlinks rather than following them), and avoids
+	// collisions when two writers start concurrently.
+	f, err := os.CreateTemp(filepath.Dir(path), "ssetunnel-agent-*.tmp")
+	if err != nil {
+		log.Printf("agent: status file: temp: %v", err)
+		return
+	}
+	tmp := f.Name()
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+		log.Printf("agent: status file: write: %v", err)
+		return
+	}
+	if err := f.Chmod(0o600); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+		log.Printf("agent: status file: chmod: %v", err)
+		return
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmp)
+		log.Printf("agent: status file: close: %v", err)
+		return
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		log.Printf("agent: status file: rename: %v", err)
+		_ = os.Remove(tmp)
+		return
+	}
+	log.Printf("agent: status file written: %s (pid=%d)", path, info.PID)
+}
+
+// removeAgentStatusFile deletes the status file only if it still contains
+// the current process's PID, so a replacement agent's file is not removed.
+// Uses an atomic rename-before-delete to close the TOCTOU window between
+// the PID check and the removal.
+func removeAgentStatusFile(path string) {
+	data, err := readStatusFile(path)
+	if err != nil {
+		return // already gone or unreadable — nothing to clean
+	}
+	var info AgentStatusInfo
+	if err := json.Unmarshal(data, &info); err != nil {
+		return
+	}
+	if info.PID != os.Getpid() {
+		return // another agent owns the file
+	}
+	// Rename away first so readers never see a half-deleted file.
+	tmp := path + ".removing"
+	if err := os.Rename(path, tmp); err != nil {
+		// Rename failed (maybe already removed); fall back to direct remove.
+		_ = os.Remove(path)
+		return
+	}
+	_ = os.Remove(tmp)
+}
+
+// readStatusFile reads the status file with a size limit to prevent
+// OOM from a crafted or corrupted file. It rejects non-regular files
+// (symlinks, FIFOs, device files) to prevent blocking opens.
+func readStatusFile(path string) ([]byte, error) {
+	fi, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if !fi.Mode().IsRegular() {
+		return nil, fmt.Errorf("status file is not a regular file: %s", fi.Mode())
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return io.ReadAll(io.LimitReader(f, statusFileMaxBytes))
+}
+
+// ReadExternalAgentStatus checks for an agent status file written by a
+// process outside the UI server (e.g. `cli agent run` or a service).
+// It returns nil when no file exists, the file is corrupt, the recorded
+// PID is dead, or the entry is stale (older than statusFileMaxAge).
+func ReadExternalAgentStatus() *AgentStatusInfo {
+	path, err := agentStatusFilePath()
+	if err != nil {
+		return nil
+	}
+	data, err := readStatusFile(path)
+	if err != nil {
+		return nil
+	}
+	var info AgentStatusInfo
+	if err := json.Unmarshal(data, &info); err != nil {
+		log.Printf("agent: status file: parse error: %v", err)
+		return nil
+	}
+	if info.PID <= 0 || !processAlive(info.PID) {
+		if info.PID > 0 {
+			log.Printf("agent: status file: pid %d not alive", info.PID)
+		}
+		return nil
+	}
+	// Reject stale entries to mitigate PID-reuse false positives.
+	if !info.StartedAt.IsZero() && time.Since(info.StartedAt) > statusFileMaxAge {
+		log.Printf("agent: status file: entry stale (started %s)", info.StartedAt.Format(time.RFC3339))
+		return nil
+	}
+	return &info
 }

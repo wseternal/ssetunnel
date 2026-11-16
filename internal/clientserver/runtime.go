@@ -3,7 +3,9 @@ package clientserver
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -51,7 +53,9 @@ type agentRuntime struct {
 
 // start launches the agent, replacing any running instance. The previous
 // run is cancelled and awaited without holding mu, so status stays
-// responsive while the old goroutine exits.
+// responsive while the old goroutine exits. If an external agent is
+// detected (running outside this process), it is terminated first to
+// prevent dual-agent conflicts.
 func (ar *agentRuntime) start(parentCtx context.Context, cfg clientapp.AgentConfig) error {
 	ar.opMu.Lock()
 	defer ar.opMu.Unlock()
@@ -64,6 +68,18 @@ func (ar *agentRuntime) start(parentCtx context.Context, cfg clientapp.AgentConf
 		prev.cancel()
 		if !waitDone(prev.done, teardownTimeout) {
 			return errors.New("agent: previous instance did not exit within teardown timeout")
+		}
+	}
+
+	// Detect and terminate any external agent before starting a new one.
+	// This prevents dual-agent conflicts where both agents connect to the
+	// server with the same AgentID.
+	if ext := clientapp.ReadExternalAgentStatus(); ext != nil {
+		if ext.PID != os.Getpid() {
+			log.Printf("ui: terminating external agent (pid %d) before starting in-process", ext.PID)
+			if err := clientapp.TerminateExternalAgent(ext.PID, 5*time.Second); err != nil {
+				return fmt.Errorf("agent: failed to terminate external agent (pid %d): %w", ext.PID, err)
+			}
 		}
 	}
 
@@ -111,17 +127,58 @@ func (ar *agentRuntime) stop() error {
 	return nil
 }
 
-// status snapshots the current run. It never waits on teardown.
+// status snapshots the current run. When no in-process agent is
+// running, it checks for an external agent via the status file
+// written by `cli agent run` or a service-managed agent.
 func (ar *agentRuntime) status() agentStatus {
 	ar.mu.Lock()
 	run := ar.cur
 	ar.mu.Unlock()
 
 	if run == nil {
+		// Check for an agent running outside this process.
+		if ext := clientapp.ReadExternalAgentStatus(); ext != nil {
+			// Guard against "ghost external": if the file's PID matches
+			// our own process, it's a stale entry from this process's
+			// own agent that hasn't been cleaned up yet.
+			if ext.PID != os.Getpid() {
+				return agentStatus{
+					Running:     true,
+					External:    true,
+					PID:         ext.PID,
+					ServerURL:   ext.ServerURL,
+					Target:      ext.Target,
+					AgentID:     ext.AgentID,
+					BatchSize:   ext.BatchSize,
+					Concurrency: ext.Concurrency,
+					Compress:    ext.Compress,
+				}
+			}
+		}
 		return agentStatus{}
 	}
+
+	// run is non-nil. Check for a real external agent (not ghost) first.
+	if run.exited() {
+		if ext := clientapp.ReadExternalAgentStatus(); ext != nil && ext.PID != os.Getpid() {
+			return agentStatus{
+				Running:     true,
+				External:    true,
+				PID:         ext.PID,
+				ServerURL:   ext.ServerURL,
+				Target:      ext.Target,
+				AgentID:     ext.AgentID,
+				BatchSize:   ext.BatchSize,
+				Concurrency: ext.Concurrency,
+				Compress:    ext.Compress,
+			}
+		}
+		// No external agent — fall through to report the exited run's error.
+	}
+
 	st := agentStatus{
 		Running:     !run.exited(),
+		PID:         os.Getpid(),
 		ServerURL:   run.cfg.ServerURL,
 		Target:      run.cfg.Target,
 		AgentID:     run.cfg.AgentID,
@@ -160,6 +217,8 @@ func uiError(err error) string {
 // agentStatus is the JSON-serializable agent state.
 type agentStatus struct {
 	Running     bool   `json:"running"`
+	External    bool   `json:"external,omitempty"`
+	PID         int    `json:"pid,omitempty"`
 	ServerURL   string `json:"server_url"`
 	Target      string `json:"target"`
 	AgentID     string `json:"agent_id"`
