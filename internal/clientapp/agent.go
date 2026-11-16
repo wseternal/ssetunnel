@@ -248,12 +248,31 @@ func writeAgentStatusFile(path string, info AgentStatusInfo) {
 		log.Printf("agent: status file: marshal: %v", err)
 		return
 	}
-	// Atomic write: write to a temp file then rename. This prevents
-	// concurrent readers from seeing partial data and blocks symlink attacks
-	// (os.Rename replaces symlinks rather than following them).
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+	// Atomic write: write to a unique temp file then rename. This prevents
+	// concurrent readers from seeing partial data, blocks symlink attacks
+	// (os.Rename replaces symlinks rather than following them), and avoids
+	// collisions when two writers start concurrently.
+	f, err := os.CreateTemp(filepath.Dir(path), "ssetunnel-agent-*.tmp")
+	if err != nil {
+		log.Printf("agent: status file: temp: %v", err)
+		return
+	}
+	tmp := f.Name()
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
 		log.Printf("agent: status file: write: %v", err)
+		return
+	}
+	if err := f.Chmod(0o600); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+		log.Printf("agent: status file: chmod: %v", err)
+		return
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmp)
+		log.Printf("agent: status file: close: %v", err)
 		return
 	}
 	if err := os.Rename(tmp, path); err != nil {
@@ -291,8 +310,16 @@ func removeAgentStatusFile(path string) {
 }
 
 // readStatusFile reads the status file with a size limit to prevent
-// OOM from a crafted or corrupted file.
+// OOM from a crafted or corrupted file. It rejects non-regular files
+// (symlinks, FIFOs, device files) to prevent blocking opens.
 func readStatusFile(path string) ([]byte, error) {
+	fi, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if !fi.Mode().IsRegular() {
+		return nil, fmt.Errorf("status file is not a regular file: %s", fi.Mode())
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err

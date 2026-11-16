@@ -135,8 +135,10 @@ func (ar *agentRuntime) status() agentStatus {
 	run := ar.cur
 	ar.mu.Unlock()
 
-	if run == nil {
+	if run == nil || run.exited() {
 		// Check for an agent running outside this process.
+		// Also check when the in-process run has exited: an external
+		// agent may have started after our run finished.
 		if ext := clientapp.ReadExternalAgentStatus(); ext != nil {
 			// Guard against "ghost external": if the file's PID matches
 			// our own process, it's a stale entry from this process's

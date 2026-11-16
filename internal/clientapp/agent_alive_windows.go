@@ -1,6 +1,9 @@
+//go:build windows
+
 package clientapp
 
 import (
+	"context"
 	"syscall"
 	"time"
 )
@@ -44,7 +47,7 @@ func terminateProcess(pid int, timeout time.Duration) error {
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	return syscall.Errno(0) // timed out — caller decides how to handle
+	return context.DeadlineExceeded // timed out
 }
 
 // TerminateExternalAgent terminates an agent process running outside
