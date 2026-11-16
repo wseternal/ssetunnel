@@ -73,15 +73,8 @@ tasks:
   go:build:
     desc: Build all Go binaries (ssetunnel, server, cli)
     cmds:
-      - task: go:build:legacy
       - task: go:build:server
       - task: go:build:cli
-
-  go:build:legacy:
-    desc: Build the legacy compatibility binary
-    cmds:
-      - mkdir -p {{.BUILD_DIR}}
-      - go build -ldflags "{{.LDFLAGS}}" -o {{.BUILD_DIR}}/{{.BIN}} ./cmd/ssetunnel
 
   go:build:server:
     desc: Build the server binary
@@ -121,11 +114,6 @@ tasks:
     cmds:
       - go mod tidy
 
-  go:run:
-    desc: Run legacy binary (pass CLI_ARGS="..." for arguments)
-    cmds:
-      - go run -ldflags "{{.LDFLAGS}}" ./cmd/ssetunnel {{.CLI_ARGS}}
-
   go:run:server:
     desc: Run server binary (pass CLI_ARGS="..." for arguments)
     cmds:
@@ -140,7 +128,6 @@ tasks:
     desc: Build native release binaries for all products
     cmds:
       - mkdir -p {{.DIST}}
-      - go build -trimpath -ldflags "{{.RELEASE_LDFLAGS}}" -o {{.DIST}}/{{.BIN}}-{{OS}}-{{ARCH}} ./cmd/ssetunnel
       - go build -trimpath -ldflags "{{.RELEASE_LDFLAGS}}" -o {{.DIST}}/{{.SERVER_BIN}}-{{OS}}-{{ARCH}} ./cmd/server
       - go build -trimpath -ldflags "{{.RELEASE_LDFLAGS}}" -o {{.DIST}}/{{.CLI_BIN}}-{{OS}}-{{ARCH}} ./cmd/cli
 
@@ -153,8 +140,7 @@ tasks:
   go:release:install:
     desc: build release binary for current platform, sign it and then install
     cmds:
-      - task: go:release
-      - task: sign
+      - task: go:release:signed
       - \rm -fr '/Applications/SSE Tunnel.app'
       - mv 'dist/SSE Tunnel.app' /Applications/
 
@@ -162,7 +148,6 @@ tasks:
     desc: Cross compile for linux amd64 with purego
     cmds:
       - mkdir -p {{.DIST}}
-      - CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -tags purego -trimpath -ldflags "{{.RELEASE_LDFLAGS}}" -o {{.DIST}}/{{.BIN}}-linux-amd64 ./cmd/ssetunnel
       - CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -tags purego -trimpath -ldflags "{{.RELEASE_LDFLAGS}}" -o {{.DIST}}/{{.SERVER_BIN}}-linux-amd64 ./cmd/server
       - CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -tags purego -trimpath -ldflags "{{.RELEASE_LDFLAGS}}" -o {{.DIST}}/{{.CLI_BIN}}-linux-amd64 ./cmd/cli
 
@@ -207,12 +192,12 @@ tasks:
   sign:
     desc: Wrap the release binary in a macOS .app bundle and codesign the bundle (SIGN_BIN=source binary, SIGN_APP=output bundle)
     vars:
-      SIGN_BIN: '{{.SIGN_BIN | default (printf "%s/%s-%s-%s" .DIST .BIN OS ARCH)}}'
+      SIGN_BIN: '{{.SIGN_BIN | default (printf "%s/%s-%s-%s" .DIST .CLI_BIN OS ARCH)}}'
       SIGN_APP: '{{.SIGN_APP | default (printf "%s/SSE Tunnel.app" .DIST)}}'
     cmds:
       - rm -rf "{{.SIGN_APP}}"
       - mkdir -p "{{.SIGN_APP}}/Contents/MacOS"
-      - cp -af "{{.SIGN_BIN}}" "{{.SIGN_APP}}/Contents/MacOS/{{.BIN}}"
+      - cp -af "{{.SIGN_BIN}}" "{{.SIGN_APP}}/Contents/MacOS/{{.CLI_BIN}}"
       - rm -f "{{.SIGN_BIN}}"
       - |
         cat > "{{.SIGN_APP}}/Contents/Info.plist" <<'EOF'
