@@ -94,14 +94,13 @@ cd /Users/jiangzhaohua/codes/wseternal/ssetunnel
 ./local.sh agent \
   --server http://localhost:8080 \
   --agent-id test-agent \
-  --target 127.0.0.1:22 \
-  --data-dir /tmp/ssetunnel-agent
+  --target 127.0.0.1:22
 ```
 
 The agent will:
 - Connect to the server
 - Create an IPC endpoint for modules
-- Store module state in `/tmp/ssetunnel-agent`
+- Store module state in `~/.ssetunnel/agent`
 
 ---
 
@@ -128,7 +127,7 @@ import (
 
 func main() {
 	// Set environment variables (from agent's IPC endpoint)
-	os.Setenv("SSETUNNEL_MODULE_IPC_ENDPOINT", "/tmp/ssetunnel-agent/module.sock")
+	os.Setenv("SSETUNNEL_MODULE_IPC_ENDPOINT", os.ExpandEnv("$HOME/.ssetunnel/agent/module.sock"))
 	os.Setenv("SSETUNNEL_MODULE_IPC_CREDENTIAL", "YOUR_CREDENTIAL_HERE")
 
 	ds, err := sdk.NewDataStore()
@@ -180,7 +179,7 @@ EOF
 #   agent: module IPC credential: abcdef12...
 
 # Or read from the agent's data directory:
-cat /tmp/ssetunnel-agent/credential 2>/dev/null || echo "Check agent logs for credential"
+cat ~/.ssetunnel/agent/credential 2>/dev/null || echo "Check agent logs for credential"
 ```
 
 ### 3.3 Run the Test
@@ -206,7 +205,7 @@ go run /tmp/test-datastore.go
 
 ```bash
 # Copy the proxy binary to a location the agent can find
-cp ./build/ai-automation-proxy /tmp/ssetunnel-agent/modules/
+cp ./build/ai-automation-proxy ~/.ssetunnel/agent/modules/
 
 # Or register via the agent's module install command:
 ./build/cli module install \
@@ -219,7 +218,7 @@ cp ./build/ai-automation-proxy /tmp/ssetunnel-agent/modules/
 
 ```bash
 # Set environment variables for the module
-export SSETUNNEL_MODULE_IPC_ENDPOINT="/tmp/ssetunnel-agent/module.sock"
+export SSETUNNEL_MODULE_IPC_ENDPOINT="$HOME/.ssetunnel/agent/module.sock"
 export SSETUNNEL_MODULE_IPC_CREDENTIAL="<credential_from_step_3.2>"
 
 # Start the module
@@ -383,10 +382,10 @@ Check the extension's background page console:
 
 ```bash
 # Check agent logs for module registration:
-tail -f /tmp/ssetunnel-agent/logs/agent.log | grep -i module
+tail -f ~/.ssetunnel/agent/logs/agent.log | grep -i module
 
 # Verify IPC endpoint exists:
-ls -la /tmp/ssetunnel-agent/module.sock
+ls -la ~/.ssetunnel/agent/module.sock
 ```
 
 ### Data Store Requests Failing
@@ -439,7 +438,7 @@ curl -s http://localhost:9090/health
 psql "$DATABASE_URL" -c "DELETE FROM module_records WHERE module_id = 'com.test.module';"
 
 # Remove agent state:
-rm -rf /tmp/ssetunnel-agent
+rm -rf ~/.ssetunnel/agent
 
 # Stop PostgreSQL (if Docker):
 docker stop ssetunnel-pg
