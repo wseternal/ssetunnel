@@ -56,9 +56,10 @@ export default function AgentPage({ bridge }: AgentPageProps) {
 
   // Seed the form from a running agent once, so Restart reflects the live
   // configuration instead of silently re-targeting with empty defaults.
+  // Skip seeding from external agents whose config may be zero/unknown.
   const seeded = useRef(false);
   useEffect(() => {
-    if (!seeded.current && status?.running) {
+    if (!seeded.current && status?.running && !status.external) {
       seeded.current = true;
       setConfig(c => ({
         ...c,
@@ -127,6 +128,7 @@ export default function AgentPage({ bridge }: AgentPageProps) {
           variant="outlined"
         />
         {external && <Chip label="External" color="warning" variant="outlined" size="small" />}
+        {running && status?.pid && <Chip label={`PID: ${status.pid}`} variant="outlined" size="small" />}
         {running && status && (
           <>
             <Chip label={`Server: ${status.server_url}`} variant="outlined" size="small" />
@@ -139,7 +141,7 @@ export default function AgentPage({ bridge }: AgentPageProps) {
       {external && (
         <Alert severity="info" sx={{ mb: 2 }}>
           This agent is running externally (e.g. <code>cli agent run</code> or as an OS service).
-          Stop it from the terminal or service manager where it was started.
+          Starting a new agent will terminate the external one.
         </Alert>
       )}
 
@@ -205,7 +207,7 @@ export default function AgentPage({ bridge }: AgentPageProps) {
             {action === 'start' ? 'Starting...' : 'Start'}
           </Button>
         ) : external ? (
-          <Button variant="contained" onClick={handleStart} disabled={!!action}>
+          <Button variant="contained" color="warning" onClick={handleStart} disabled={!!action}>
             {action === 'start' ? 'Starting...' : 'Start (Replace)'}
           </Button>
         ) : (
