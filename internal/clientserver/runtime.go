@@ -135,17 +135,32 @@ func (ar *agentRuntime) status() agentStatus {
 	run := ar.cur
 	ar.mu.Unlock()
 
-	if run == nil || run.exited() {
+	if run == nil {
 		// Check for an agent running outside this process.
-		// Also check when the in-process run has exited: an external
-		// agent may have started after our run finished.
 		if ext := clientapp.ReadExternalAgentStatus(); ext != nil {
 			// Guard against "ghost external": if the file's PID matches
 			// our own process, it's a stale entry from this process's
 			// own agent that hasn't been cleaned up yet.
-			if ext.PID == os.Getpid() {
-				return agentStatus{}
+			if ext.PID != os.Getpid() {
+				return agentStatus{
+					Running:     true,
+					External:    true,
+					PID:         ext.PID,
+					ServerURL:   ext.ServerURL,
+					Target:      ext.Target,
+					AgentID:     ext.AgentID,
+					BatchSize:   ext.BatchSize,
+					Concurrency: ext.Concurrency,
+					Compress:    ext.Compress,
+				}
 			}
+		}
+		return agentStatus{}
+	}
+
+	// run is non-nil. Check for a real external agent (not ghost) first.
+	if run.exited() {
+		if ext := clientapp.ReadExternalAgentStatus(); ext != nil && ext.PID != os.Getpid() {
 			return agentStatus{
 				Running:     true,
 				External:    true,
@@ -158,8 +173,9 @@ func (ar *agentRuntime) status() agentStatus {
 				Compress:    ext.Compress,
 			}
 		}
-		return agentStatus{}
+		// No external agent — fall through to report the exited run's error.
 	}
+
 	st := agentStatus{
 		Running:     !run.exited(),
 		PID:         os.Getpid(),
