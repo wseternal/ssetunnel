@@ -48,6 +48,11 @@ type IPCServer struct {
 	// Used by the agent to remove the module from the registry
 	// and trigger a catalog snapshot publish.
 	onDeregister func(moduleID string)
+
+	// onDataStore is called when a module sends a DATASTORE request.
+	// The handler processes the request and returns a JSON response.
+	// Returns nil if data store is not configured.
+	onDataStore func(requestJSON []byte) ([]byte, error)
 }
 
 // Registration represents a live module registration from a connected process.
@@ -103,6 +108,15 @@ func (s *IPCServer) SetOnDeregister(fn func(moduleID string)) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.onDeregister = fn
+}
+
+// SetOnDataStore sets the handler for data store requests from modules.
+// The handler receives raw JSON request bytes and returns JSON response
+// bytes. If not set, data store requests return an error.
+func (s *IPCServer) SetOnDataStore(fn func(requestJSON []byte) ([]byte, error)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.onDataStore = fn
 }
 
 // SetListener attaches a listener to the IPC server for accepting
@@ -220,20 +234,30 @@ func (s *IPCServer) handleConnection(conn net.Conn) {
 		return
 	}
 
-	// 2. Read REG message.
+	// 2. Read next command: REG (normal module) or DATASTORE (data store client).
 	conn.SetDeadline(time.Now().Add(10 * time.Second))
-	regLine, err := reader.ReadString('\n')
+	firstLine, err := reader.ReadString('\n')
 	if err != nil {
 		log.Printf("ipc: reg read error: %v", err)
 		return
 	}
-	if len(regLine) > maxIPCMessageSize {
-		log.Printf("ipc: REG message too long: %d bytes", len(regLine))
+	if len(firstLine) > maxIPCMessageSize {
+		log.Printf("ipc: message too long: %d bytes", len(firstLine))
 		return
 	}
-	regLine = strings.TrimSuffix(regLine, "\n")
+	firstLine = strings.TrimSuffix(firstLine, "\n")
+
+	// Data store proxy mode: module opens a dedicated connection for
+	// data store requests only (no REG, no health loop).
+	if strings.HasPrefix(firstLine, "DATASTORE ") {
+		s.handleDataStoreConnection(conn, reader, firstLine)
+		return
+	}
+
+	// Normal module registration flow.
+	regLine := firstLine
 	if !strings.HasPrefix(regLine, "REG ") {
-		log.Printf("ipc: expected REG, got %q", regLine)
+		log.Printf("ipc: expected REG or DATASTORE, got %q", regLine)
 		return
 	}
 
@@ -441,4 +465,67 @@ func (s *IPCServer) Close() error {
 		return s.listener.Close()
 	}
 	return nil
+}
+
+// handleDataStoreConnection processes a data store proxy connection.
+// After AUTH, the module sends DATASTORE commands in a request/response
+// loop. Each command carries a length-prefixed JSON payload; the server
+// forwards it to the data store handler and returns the JSON response.
+func (s *IPCServer) handleDataStoreConnection(conn net.Conn, reader *bufio.Reader, firstLine string) {
+	defer conn.Close()
+
+	s.mu.RLock()
+	handler := s.onDataStore
+	s.mu.RUnlock()
+
+	if handler == nil {
+		log.Printf("ipc: data store request received but no handler configured")
+		conn.Write([]byte(`{"error":"data store not configured"}`))
+		return
+	}
+
+	// Process the first DATASTORE command and then enter a loop.
+	for line := firstLine; ; {
+		// Parse "DATASTORE <len>".
+		lenStr := strings.TrimPrefix(line, "DATASTORE ")
+		dataLen, err := strconv.Atoi(lenStr)
+		if err != nil || dataLen < 0 || dataLen > maxIPCMessageSize {
+			log.Printf("ipc: invalid DATASTORE length: %q", lenStr)
+			return
+		}
+
+		// Read the JSON payload.
+		dataBuf := make([]byte, dataLen)
+		if dataLen > 0 {
+			if _, err := io.ReadFull(reader, dataBuf); err != nil {
+				log.Printf("ipc: data store payload read error: %v", err)
+				return
+			}
+		}
+
+		// Forward to the data store handler.
+		conn.SetDeadline(time.Now().Add(60 * time.Second))
+		respJSON, err := handler(dataBuf)
+		if err != nil {
+			errResp := fmt.Sprintf(`{"error":%q}`, err.Error())
+			conn.Write([]byte(errResp))
+		} else {
+			conn.Write(respJSON)
+		}
+
+		// Read next command or detect disconnect.
+		conn.SetReadDeadline(time.Now().Add(5 * time.Minute))
+		line, err = reader.ReadString('\n')
+		if err != nil {
+			if !errors.Is(err, io.EOF) {
+				log.Printf("ipc: data store connection closed: %v", err)
+			}
+			return
+		}
+		line = strings.TrimSuffix(line, "\n")
+		if !strings.HasPrefix(line, "DATASTORE ") {
+			log.Printf("ipc: unexpected command in data store mode: %q", line)
+			return
+		}
+	}
 }

@@ -159,6 +159,11 @@ func (a *Agent) dispatchControlMessage(msg *mux.ControlMessage) {
 			}
 		}
 		return
+	case mux.MsgDataStoreResp:
+		if a.dataStoreFwd != nil {
+			a.dataStoreFwd.HandleResponse(msg)
+		}
+		return
 	}
 
 	target, ok := a.registry.Lookup(msg.StreamID)

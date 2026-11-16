@@ -20,6 +20,7 @@ import (
 	"github.com/hashicorp/yamux"
 	"github.com/wseternal/ssetunnel/internal/agentmod"
 	"github.com/wseternal/ssetunnel/internal/metrics"
+	"github.com/wseternal/ssetunnel/internal/moduleproto"
 	"github.com/wseternal/ssetunnel/internal/mux"
 	"github.com/wseternal/ssetunnel/internal/remoteapp"
 	"github.com/wseternal/ssetunnel/internal/transport"
@@ -92,6 +93,10 @@ type Agent struct {
 	modIPC        *agentmod.IPCServer
 	modSupervisor *agentmod.Supervisor
 
+	// Data store forwarder correlates module data store requests with
+	// server responses through the control tunnel.
+	dataStoreFwd *dataStoreForwarder
+
 	// Current yamux session (set in runOnce, cleared on disconnect).
 	// Used by the module invoker to open reverse streams.
 	currentSess atomic.Pointer[yamux.Session]
@@ -129,6 +134,24 @@ func (a *Agent) Close() error {
 		return a.modIPC.Close()
 	}
 	return nil
+}
+
+// DataStoreRequest forwards a data store CRUD request through the
+// control tunnel to the server and blocks until the response arrives.
+// Returns an error if the control stream is unavailable or the request
+// times out. Called from the IPC layer when a module sends a DATASTORE
+// command.
+func (a *Agent) DataStoreRequest(req moduleproto.DataStoreRequestPayload) (*moduleproto.DataStoreResponsePayload, error) {
+	if a.dataStoreFwd == nil {
+		return nil, fmt.Errorf("data store not initialized")
+	}
+	a.controlMu.RLock()
+	send := a.sendControl
+	a.controlMu.RUnlock()
+	if send == nil {
+		return nil, fmt.Errorf("control stream not available")
+	}
+	return a.dataStoreFwd.Send(req, send)
 }
 
 // InitModules initializes the module subsystem for this agent. It creates
@@ -193,6 +216,20 @@ func (a *Agent) InitModules(ctx context.Context, dataDir string) error {
 		a.moduleManager.OnRegistryChange()
 	})
 
+	// Wire IPC data store handler to forward requests through the
+	// control tunnel to the server's database.
+	ipc.SetOnDataStore(func(requestJSON []byte) ([]byte, error) {
+		var req moduleproto.DataStoreRequestPayload
+		if err := json.Unmarshal(requestJSON, &req); err != nil {
+			return nil, fmt.Errorf("unmarshal data store request: %w", err)
+		}
+		resp, err := a.DataStoreRequest(req)
+		if err != nil {
+			return nil, err
+		}
+		return json.Marshal(resp)
+	})
+
 	// Reconcile desired state: start enabled modules.
 	if err := supervisor.Reconcile(); err != nil {
 		log.Printf("agent: module reconcile: %v", err)
@@ -223,6 +260,10 @@ func (a *Agent) runContext() context.Context {
 func (a *Agent) Run(ctx context.Context) error {
 	// Store run context for control message handlers (W7 fix).
 	a.runCtx.Store(&ctx)
+
+	// Initialize data store forwarder for module CRUD requests
+	// through the control tunnel.
+	a.dataStoreFwd = newDataStoreForwarder()
 
 	// Install log capture: all log.Printf output goes to both stderr
 	// and the ring buffer. The server can request recent lines via

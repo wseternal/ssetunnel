@@ -37,6 +37,14 @@ const (
 	// MsgModuleRemove signals that a module has been deregistered.
 	// Agent→server direction only.
 	MsgModuleRemove = "module_remove"
+
+	// MsgDataStoreReq carries a data store CRUD request from agent→server.
+	// Correlated by request_id with the response.
+	MsgDataStoreReq = "data_store_req"
+
+	// MsgDataStoreResp carries the server's response to a data store request.
+	// Server→agent direction only.
+	MsgDataStoreResp = "data_store_resp"
 )
 
 // Module stream marker: the first line written by the agent when opening
@@ -135,6 +143,53 @@ type ModuleHealthPayload struct {
 type ModuleRemovePayload struct {
 	// ModuleID identifies the deregistered module.
 	ModuleID string `json:"module_id"`
+}
+
+// DataStoreOp identifies a data store operation.
+type DataStoreOp string
+
+const (
+	DataStoreCreate DataStoreOp = "create"
+	DataStoreGet    DataStoreOp = "get"
+	DataStoreList   DataStoreOp = "list"
+	DataStoreDelete DataStoreOp = "delete"
+)
+
+// DataStoreRequestPayload is the JSON payload for MsgDataStoreReq.
+// Agent→server direction. The server processes the request and replies
+// with a DataStoreResponsePayload sharing the same request_id.
+type DataStoreRequestPayload struct {
+	RequestID string           `json:"request_id"`
+	Op        DataStoreOp      `json:"op"`
+	ModuleID  string           `json:"module_id"`
+	RecordID  string           `json:"record_id,omitempty"`
+	Data      json.RawMessage  `json:"data,omitempty"`
+	Filter    *DataStoreFilter `json:"filter,omitempty"`
+}
+
+// DataStoreFilter specifies optional pagination for list operations.
+type DataStoreFilter struct {
+	Limit  int `json:"limit,omitempty"`
+	Offset int `json:"offset,omitempty"`
+}
+
+// DataStoreResponsePayload is the JSON payload for MsgDataStoreResp.
+// Server→agent direction. Correlated by request_id.
+type DataStoreResponsePayload struct {
+	RequestID string            `json:"request_id"`
+	Error     string            `json:"error,omitempty"`
+	Record    *DataStoreRecord  `json:"record,omitempty"`
+	Records   []DataStoreRecord `json:"records,omitempty"`
+	Deleted   int64             `json:"deleted,omitempty"`
+}
+
+// DataStoreRecord is one record in a data store response.
+type DataStoreRecord struct {
+	ModuleID  string          `json:"module_id"`
+	RecordID  string          `json:"record_id"`
+	Data      json.RawMessage `json:"data"`
+	CreatedAt string          `json:"created_at"`
+	UpdatedAt string          `json:"updated_at"`
 }
 
 // SnapshotModuleEntry is one module entry in a snapshot chunk.

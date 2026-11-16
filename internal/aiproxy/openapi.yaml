@@ -1,0 +1,239 @@
+openapi: "3.0.3"
+info:
+  title: AI Automation Proxy
+  description: >
+    Bridges external client requests to the gemini-automation-extension
+    WXT browser extension via HTTP long polling. Clients submit LLM
+    automation jobs asynchronously and poll for results.
+  version: "0.1.0"
+
+paths:
+  /jobs:
+    post:
+      summary: Submit a new automation job
+      operationId: submitJob
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SubmitRequest"
+      responses:
+        "202":
+          description: Job accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SubmitResponse"
+        "400":
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /jobs/{job_id}:
+    get:
+      summary: Get job status and result
+      operationId: getJob
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: wait
+          in: query
+          description: Block until the job completes (true/false)
+          schema:
+            type: string
+            enum: ["true"]
+        - name: wait_timeout
+          in: query
+          description: Maximum wait duration (e.g. "120s")
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Job status and result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Job"
+        "404":
+          description: Job not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /health:
+    get:
+      summary: Health check
+      responses:
+        "200":
+          description: Healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+
+  /poll:
+    get:
+      summary: Long-poll for a pending job (extension client)
+      description: >
+        Blocks until a pending automation job is available or the timeout
+        expires. Used by the WXT extension's long-polling client.
+      parameters:
+        - name: timeout
+          in: query
+          description: Maximum wait time in seconds (default 30, max 300)
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Job available
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PollResponse"
+        "204":
+          description: No job available (timeout expired)
+
+  /result:
+    post:
+      summary: Submit automation result (extension client)
+      description: >
+        Called by the WXT extension after completing an automation job.
+        Correlates the result to the original job by job_id.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ResultRequest"
+      responses:
+        "200":
+          description: Result accepted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+
+components:
+  schemas:
+    SubmitRequest:
+      type: object
+      required: [prompt]
+      properties:
+        prompt:
+          type: string
+          description: The LLM prompt to execute
+        file:
+          $ref: "#/components/schemas/FilePayload"
+        provider_id:
+          type: string
+          description: LLM provider (gemini, deepseek)
+          default: gemini
+        timeout_ms:
+          type: integer
+          description: Streaming timeout in milliseconds
+          default: 120000
+        target_url:
+          type: string
+          description: Specific conversation URL to target
+
+    FilePayload:
+      type: object
+      required: [name, mime_type, data_base64, byte_length]
+      properties:
+        name:
+          type: string
+        mime_type:
+          type: string
+        data_base64:
+          type: string
+          description: Base64-encoded file bytes
+        byte_length:
+          type: integer
+
+    SubmitResponse:
+      type: object
+      properties:
+        job_id:
+          type: string
+
+    Job:
+      type: object
+      properties:
+        id:
+          type: string
+        status:
+          type: string
+          enum: [pending, running, completed, failed, timeout]
+        request:
+          $ref: "#/components/schemas/SubmitRequest"
+        result:
+          $ref: "#/components/schemas/AutomationResult"
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    AutomationResult:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [ok, error]
+        text:
+          type: string
+        markdown:
+          type: string
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+            message:
+              type: string
+            step:
+              type: string
+        meta:
+          type: object
+
+    PollResponse:
+      type: object
+      properties:
+        job_id:
+          type: string
+        request:
+          $ref: "#/components/schemas/SubmitRequest"
+
+    ResultRequest:
+      type: object
+      required: [job_id, result]
+      properties:
+        job_id:
+          type: string
+        result:
+          $ref: "#/components/schemas/AutomationResult"
+
+    Error:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+            message:
+              type: string

@@ -90,8 +90,18 @@ type Session struct {
 	// Module stream handler (invocation stream management).
 	moduleStreamHandler *ModuleStreamHandler
 
+	// Data store handler for module CRUD requests forwarded through
+	// the control tunnel. May be nil if no database is configured.
+	dataStore *DataStore
+
 	closeOnce sync.Once
 	closeCh   chan struct{} // closed by Close(); for monitor goroutines
+}
+
+// SetDataStore installs the data store handler for this session.
+// Called by Server.attach() after the control stream is accepted.
+func (s *Session) SetDataStore(ds *DataStore) {
+	s.dataStore = ds
 }
 
 // defaultWriteTimeout keeps POST handlers short-lived when the consumer
@@ -328,6 +338,15 @@ func (s *Session) handleControlMessage(msg *mux.ControlMessage) {
 			}
 		} else {
 			log.Printf("server: module message received but no catalog initialized")
+		}
+	case mux.MsgDataStoreReq:
+		if s.dataStore != nil {
+			resp := s.dataStore.HandleRequest(msg)
+			if err := s.SendControl(resp); err != nil {
+				log.Printf("server: data store response send failed: %v", err)
+			}
+		} else {
+			log.Printf("server: data_store_req received but no data store configured")
 		}
 	default:
 		log.Printf("server: unexpected control message type=%s from agent session %s",
