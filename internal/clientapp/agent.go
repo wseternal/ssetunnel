@@ -2,6 +2,7 @@ package clientapp
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -131,6 +132,19 @@ func RunAgent(ctx context.Context, cfg AgentConfig) error {
 			sess.URL, cfg.AgentID, batch, conc, cfg.Compress)
 	}
 
+	// Write a status file so the browser UI can detect this agent
+	// even when it was started outside the UI process (e.g. `cli agent run`).
+	// Service-managed agents also write a PID file via serviceProgram.Start;
+	// this status file carries the same PID plus config for the UI to display.
+	statusPath := agentStatusFilePath()
+	writeAgentStatusFile(statusPath, AgentStatusInfo{
+		PID:       os.Getpid(),
+		ServerURL: sess.URL,
+		Target:    cfg.Target,
+		AgentID:   cfg.AgentID,
+	})
+	defer removeAgentStatusFile(statusPath)
+
 	ag := &agent.Agent{
 		ServerURL:       sess.URL,
 		Target:          cfg.Target,
@@ -167,4 +181,75 @@ func RunAgent(ctx context.Context, cfg AgentConfig) error {
 	defer swapLogOutput(prevLog)
 
 	return ag.Run(ctx)
+}
+
+// AgentStatusInfo is the JSON payload written to the agent status file.
+// The browser UI reads this to detect agents running outside its process.
+type AgentStatusInfo struct {
+	PID       int    `json:"pid"`
+	ServerURL string `json:"server_url"`
+	Target    string `json:"target"`
+	AgentID   string `json:"agent_id"`
+}
+
+// agentStatusFilePath returns ~/.ssetunnel/ssetunnel-agent.json.
+// This mirrors the service PID file location (~/.ssetunnel/ssetunnel-agent.pid)
+// but carries additional config fields for the UI to display.
+func agentStatusFilePath() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return filepath.Join(os.TempDir(), ".ssetunnel", "ssetunnel-agent.json")
+	}
+	return filepath.Join(home, ".ssetunnel", "ssetunnel-agent.json")
+}
+
+func writeAgentStatusFile(path string, info AgentStatusInfo) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		log.Printf("agent: status file: mkdir: %v", err)
+		return
+	}
+	data, err := json.Marshal(info)
+	if err != nil {
+		log.Printf("agent: status file: marshal: %v", err)
+		return
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		log.Printf("agent: status file: write: %v", err)
+	}
+}
+
+// removeAgentStatusFile deletes the status file only if it still contains
+// the current process's PID, so a replacement agent's file is not removed.
+func removeAgentStatusFile(path string) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return // already gone or unreadable — nothing to clean
+	}
+	var info AgentStatusInfo
+	if err := json.Unmarshal(data, &info); err != nil {
+		return
+	}
+	if info.PID != os.Getpid() {
+		return // another agent owns the file
+	}
+	_ = os.Remove(path)
+}
+
+// ReadExternalAgentStatus checks for an agent status file written by a
+// process outside the UI server (e.g. `cli agent run` or a service).
+// It returns nil when no file exists or the recorded PID is dead.
+func ReadExternalAgentStatus() *AgentStatusInfo {
+	path := agentStatusFilePath()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	var info AgentStatusInfo
+	if err := json.Unmarshal(data, &info); err != nil {
+		return nil
+	}
+	if info.PID <= 0 || !processAlive(info.PID) {
+		return nil
+	}
+	return &info
 }

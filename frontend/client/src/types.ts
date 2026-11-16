@@ -18,6 +18,7 @@ export interface SavedSession {
 
 export interface AgentStatus {
   running: boolean;
+  external?: boolean;
   server_url: string;
   target: string;
   agent_id: string;

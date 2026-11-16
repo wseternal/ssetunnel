@@ -111,13 +111,25 @@ func (ar *agentRuntime) stop() error {
 	return nil
 }
 
-// status snapshots the current run. It never waits on teardown.
+// status snapshots the current run. When no in-process agent is
+// running, it checks for an external agent via the status file
+// written by `cli agent run` or a service-managed agent.
 func (ar *agentRuntime) status() agentStatus {
 	ar.mu.Lock()
 	run := ar.cur
 	ar.mu.Unlock()
 
 	if run == nil {
+		// Check for an agent running outside this process.
+		if ext := clientapp.ReadExternalAgentStatus(); ext != nil {
+			return agentStatus{
+				Running:   true,
+				External:  true,
+				ServerURL: ext.ServerURL,
+				Target:    ext.Target,
+				AgentID:   ext.AgentID,
+			}
+		}
 		return agentStatus{}
 	}
 	st := agentStatus{
@@ -160,6 +172,7 @@ func uiError(err error) string {
 // agentStatus is the JSON-serializable agent state.
 type agentStatus struct {
 	Running     bool   `json:"running"`
+	External    bool   `json:"external,omitempty"`
 	ServerURL   string `json:"server_url"`
 	Target      string `json:"target"`
 	AgentID     string `json:"agent_id"`

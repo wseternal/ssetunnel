@@ -114,6 +114,7 @@ export default function AgentPage({ bridge }: AgentPageProps) {
   if (loading) return <CircularProgress />;
 
   const running = status?.running ?? false;
+  const external = status?.external ?? false;
 
   return (
     <Box>
@@ -125,6 +126,7 @@ export default function AgentPage({ bridge }: AgentPageProps) {
           color={running ? 'success' : 'default'}
           variant="outlined"
         />
+        {external && <Chip label="External" color="warning" variant="outlined" size="small" />}
         {running && status && (
           <>
             <Chip label={`Server: ${status.server_url}`} variant="outlined" size="small" />
@@ -133,6 +135,13 @@ export default function AgentPage({ bridge }: AgentPageProps) {
           </>
         )}
       </Stack>
+
+      {external && (
+        <Alert severity="info" sx={{ mb: 2 }}>
+          This agent is running externally (e.g. <code>cli agent run</code> or as an OS service).
+          Stop it from the terminal or service manager where it was started.
+        </Alert>
+      )}
 
       {error && <Alert severity="error" sx={{ mb: 2 }} onClose={() => setError('')}>{error}</Alert>}
       {status?.error && <Alert severity="error" sx={{ mb: 2 }}>{status.error}</Alert>}
@@ -194,6 +203,10 @@ export default function AgentPage({ bridge }: AgentPageProps) {
         {!running ? (
           <Button variant="contained" onClick={handleStart} disabled={!!action}>
             {action === 'start' ? 'Starting...' : 'Start'}
+          </Button>
+        ) : external ? (
+          <Button variant="contained" onClick={handleStart} disabled={!!action}>
+            {action === 'start' ? 'Starting...' : 'Start (Replace)'}
           </Button>
         ) : (
           <>
