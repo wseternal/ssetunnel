@@ -4,6 +4,7 @@ package clientapp
 
 import (
 	"os"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -19,7 +20,9 @@ func processAlive(pid int) bool {
 		return false
 	}
 	err = proc.Signal(syscall.Signal(0))
-	return err == nil || err.Error() == "os: permission denied" || err.Error() == "os: operation not permitted"
+	// EPERM manifests as "operation not permitted" (Linux) or
+	// "permission denied" (Darwin). Both contain "not permitted".
+	return err == nil || strings.Contains(err.Error(), "not permitted")
 }
 
 // terminateProcess sends SIGTERM to the given PID and waits for it to exit.
@@ -33,8 +36,8 @@ func terminateProcess(pid int, timeout time.Duration) error {
 	if err := proc.Signal(syscall.SIGTERM); err != nil {
 		// ESRCH: process already exited between ReadExternalAgentStatus
 		// and this signal — not an error, the goal (process gone) is met.
-		msg := err.Error()
-		if msg == "os: process already finished" || msg == "os: no such process" {
+		// Linux returns "no such process", Darwin returns "os: process already finished".
+		if strings.Contains(err.Error(), "no such process") || strings.Contains(err.Error(), "already finished") {
 			return nil
 		}
 		return err
