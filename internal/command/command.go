@@ -79,7 +79,7 @@ func WarnDeprecatedBase(prefix, base string) {
 func RunServer(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("server", flag.ContinueOnError)
 	fs.Usage = func() {
-		fmt.Fprintf(fs.Output(), "usage: server [flags]\n  or: server <action> [flags]\n\nactions: run, start, stop, restart, status, reload, uninstall\n\nflags:\n")
+		fmt.Fprintf(fs.Output(), "usage: server [flags]\n  or: server <action> [flags]\n\nactions: run, start, stop, restart, status, reload, uninstall, version\n\nflags:\n")
 		fs.PrintDefaults()
 	}
 	listen := fs.String("listen", ":8080", "HTTP listen address for tunnel endpoints")
