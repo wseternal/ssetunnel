@@ -37,10 +37,14 @@ func main() {
 		fmt.Fprintln(os.Stderr, "usage: server [flags]")
 		fmt.Fprintln(os.Stderr, "  or: server <action> [flags]")
 		fmt.Fprintln(os.Stderr)
-		fmt.Fprintln(os.Stderr, "actions: run, start, stop, restart, status, reload, uninstall")
+		fmt.Fprintln(os.Stderr, "actions: run, start, stop, restart, status, reload, uninstall, version")
 		fmt.Fprintln(os.Stderr)
 		fmt.Fprintln(os.Stderr, "Run 'server --help' for the full flag list.")
 		os.Exit(2)
+	}
+	if args[0] == "version" {
+		fmt.Println(command.BuildVersion())
+		return
 	}
 	if len(args) > 0 && command.ServiceActions[args[0]] {
 		if handled, err := command.DispatchServiceActionBare("server", args, serverRunFnBuilder); handled {
