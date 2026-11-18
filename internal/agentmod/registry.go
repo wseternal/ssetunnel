@@ -339,6 +339,7 @@ type Supervisor struct {
 	registry *Registry
 	ipc      *IPCServer
 	processes map[string]*ProcessHandle
+	restarts  map[string]int // cumulative restart count per module ID
 	ctx      context.Context
 	cancel   context.CancelFunc
 	wg       sync.WaitGroup
@@ -350,7 +351,6 @@ type ProcessHandle struct {
 	Package    *Package
 	Process    *os.Process
 	StartedAt  time.Time
-	RestartCount int
 	LastExit   time.Time
 	cancel     context.CancelFunc
 }
@@ -363,6 +363,7 @@ func NewSupervisor(ctx context.Context, registry *Registry, ipc *IPCServer) *Sup
 		registry:  registry,
 		ipc:       ipc,
 		processes: make(map[string]*ProcessHandle),
+		restarts:  make(map[string]int),
 		ctx:       ctx,
 		cancel:    cancel,
 	}
@@ -385,6 +386,7 @@ func (s *Supervisor) Reconcile() error {
 			log.Printf("supervisor: stopping disabled module %s", id)
 			s.stopProcess(handle)
 			delete(s.processes, id)
+			delete(s.restarts, id)
 		}
 	}
 
@@ -421,7 +423,7 @@ func (s *Supervisor) startProcess(pkg *Package) error {
 		cancel()
 		return fmt.Errorf("get listener addr: %w", err)
 	}
-	cmd := startModuleProcess(ctx, pkg.Executable, s.ipc.Credential(), listenerAddr)
+	cmd := startModuleProcess(ctx, pkg.Executable, s.ipc.Credential(), listenerAddr, pkg.ModuleID)
 	if err := cmd.Start(); err != nil {
 		cancel()
 		return fmt.Errorf("start process: %w", err)
@@ -463,9 +465,10 @@ func (s *Supervisor) monitorProcess(handle *ProcessHandle) {
 	// If the handle is still in our map and the module is enabled, restart.
 	if current, ok := s.processes[handle.ModuleID]; ok && current == handle {
 		if s.registry.IsEnabled(handle.ModuleID) {
-			handle.RestartCount++
-			backoff := calculateBackoff(handle.RestartCount)
-			log.Printf("supervisor: restarting module %s in %v (attempt %d)", handle.ModuleID, backoff, handle.RestartCount)
+			s.restarts[handle.ModuleID]++
+			count := s.restarts[handle.ModuleID]
+			backoff := calculateBackoff(count)
+			log.Printf("supervisor: restarting module %s in %v (attempt %d)", handle.ModuleID, backoff, count)
 
 			// Release lock before sleeping (C6 fix: prevent deadlock).
 			s.mu.Unlock()
@@ -489,6 +492,7 @@ func (s *Supervisor) monitorProcess(handle *ProcessHandle) {
 			return
 		}
 		delete(s.processes, handle.ModuleID)
+		delete(s.restarts, handle.ModuleID)
 	}
 	s.mu.Unlock()
 }
@@ -528,6 +532,7 @@ func (s *Supervisor) Stop() {
 	for id, handle := range s.processes {
 		s.stopProcess(handle)
 		delete(s.processes, id)
+		delete(s.restarts, id)
 	}
 	s.mu.Unlock()
 
