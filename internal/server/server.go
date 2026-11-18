@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/hashicorp/yamux"
@@ -30,9 +31,10 @@ type Server struct {
 	// Reg is the live session registry (exported for tests and the console).
 	Reg *Registry
 
-	handler *Handler
-	store   *auth.Store
-	metrics *metrics.MetricsCollector
+	handler   *Handler
+	store     *auth.Store
+	metrics   *metrics.MetricsCollector
+	dataStore atomic.Pointer[DataStore]
 }
 
 // NewServer builds a server given an SSE heartbeat interval.
@@ -77,6 +79,14 @@ func (s *Server) SetMetricsCollector(mc *metrics.MetricsCollector) {
 // MetricsCollector returns the attached metrics collector (may be nil).
 func (s *Server) MetricsCollector() *metrics.MetricsCollector {
 	return s.metrics
+}
+
+// SetDataStore attaches a data store for processing module data store
+// requests forwarded through the control tunnel. Safe for concurrent
+// use; existing sessions that already captured a nil pointer will not
+// pick up the change (by design — see attach).
+func (s *Server) SetDataStore(ds *DataStore) {
+	s.dataStore.Store(ds)
 }
 
 // FindSession returns the session for a given agent ID, or nil if not found.
@@ -153,6 +163,7 @@ func (s *Server) attach(sess *Session) {
 		sess.SetModuleCatalog(mc)
 		streamHandler := NewModuleStreamHandler(sess)
 		sess.SetModuleStreamHandler(streamHandler)
+		sess.SetDataStore(s.dataStore.Load())
 
 		// Accept module streams in background (agent opens these for invocations).
 		go s.acceptModuleStreams(ms, sess, streamHandler)

@@ -39,10 +39,16 @@ func NewRegistry(dataDir string) (*Registry, error) {
 		packages: make(map[string]*Package),
 		desired:  make(map[string]DesiredState),
 	}
+	if err := r.loadPackages(); err != nil {
+		log.Printf("registry: failed to load packages: %v", err)
+		// Continue with empty packages; will be populated as modules are installed.
+	}
 	if err := r.loadDesiredState(); err != nil {
 		log.Printf("registry: failed to load desired state: %v", err)
 		// Continue with empty state; will be populated as modules are installed.
 	}
+	// Prune desired state entries whose packages were not loaded from disk.
+	r.pruneOrphanDesiredState()
 	return r, nil
 }
 
@@ -67,6 +73,9 @@ func (r *Registry) Install(pkg *Package) error {
 		r.desired[pkg.ModuleID] = DesiredState{Enabled: false, UpdatedAt: time.Now()}
 	}
 
+	if err := r.savePackages(); err != nil {
+		return fmt.Errorf("save packages: %w", err)
+	}
 	return r.saveDesiredState()
 }
 
@@ -87,6 +96,9 @@ func (r *Registry) Remove(moduleID string) error {
 	delete(r.packages, moduleID)
 	delete(r.desired, moduleID)
 
+	if err := r.savePackages(); err != nil {
+		return fmt.Errorf("save packages: %w", err)
+	}
 	return r.saveDesiredState()
 }
 
@@ -191,6 +203,9 @@ func (r *Registry) InstallFromIPC(moduleID, serviceName, version, revision strin
 	// Auto-enable: the module process is already running.
 	r.desired[moduleID] = DesiredState{Enabled: true, UpdatedAt: time.Now()}
 
+	if err := r.savePackages(); err != nil {
+		return fmt.Errorf("save packages: %w", err)
+	}
 	return r.saveDesiredState()
 }
 
@@ -202,8 +217,145 @@ func (r *Registry) Uninstall(moduleID string) {
 
 	delete(r.packages, moduleID)
 	delete(r.desired, moduleID)
+	if err := r.savePackages(); err != nil {
+		log.Printf("registry: failed to save packages after uninstall: %v", err)
+	}
 	if err := r.saveDesiredState(); err != nil {
 		log.Printf("registry: failed to save desired state after uninstall: %v", err)
+	}
+}
+
+// Reload re-reads packages and desired state from disk. This is called
+// when the agent receives SIGHUP to pick up changes made by CLI module
+// commands (install, start, stop, etc.) that modify the on-disk state
+// in a separate process.
+//
+// The load and prune steps happen on local maps without holding r.mu,
+// so concurrent readers (EnabledModules, Package) are unaffected. The
+// final swap is performed under a single write lock for atomicity.
+func (r *Registry) Reload() error {
+	pkgs, err := r.readPackagesFromDisk()
+	if err != nil {
+		return fmt.Errorf("reload packages: %w", err)
+	}
+	desired, err := r.readDesiredStateFromDisk()
+	if err != nil {
+		return fmt.Errorf("reload desired state: %w", err)
+	}
+	// Prune orphan desired state entries locally.
+	for id := range desired {
+		if _, ok := pkgs[id]; !ok {
+			delete(desired, id)
+		}
+	}
+	// Persist the pruned desired state.
+	data, err := json.MarshalIndent(desired, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal desired state: %w", err)
+	}
+	tmp := r.desiredStatePath() + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		return fmt.Errorf("write desired state: %w", err)
+	}
+	if err := os.Rename(tmp, r.desiredStatePath()); err != nil {
+		os.Remove(tmp)
+		return fmt.Errorf("rename desired state: %w", err)
+	}
+	// Atomic swap under write lock.
+	r.mu.Lock()
+	r.packages = pkgs
+	r.desired = desired
+	r.mu.Unlock()
+	return nil
+}
+
+// readPackagesFromDisk loads package metadata from disk into a new map.
+// Does not mutate r.packages.
+func (r *Registry) readPackagesFromDisk() (map[string]*Package, error) {
+	data, err := os.ReadFile(r.packagesPath())
+	if err != nil {
+		if os.IsNotExist(err) {
+			return make(map[string]*Package), nil
+		}
+		return nil, err
+	}
+	var pkgs map[string]*Package
+	if err := json.Unmarshal(data, &pkgs); err != nil {
+		return nil, err
+	}
+	if pkgs == nil {
+		pkgs = make(map[string]*Package)
+	}
+	return pkgs, nil
+}
+
+// readDesiredStateFromDisk loads desired state from disk into a new map.
+// Does not mutate r.desired.
+func (r *Registry) readDesiredStateFromDisk() (map[string]DesiredState, error) {
+	data, err := os.ReadFile(r.desiredStatePath())
+	if err != nil {
+		if os.IsNotExist(err) {
+			return make(map[string]DesiredState), nil
+		}
+		return nil, err
+	}
+	var desired map[string]DesiredState
+	if err := json.Unmarshal(data, &desired); err != nil {
+		return nil, err
+	}
+	if desired == nil {
+		desired = make(map[string]DesiredState)
+	}
+	return desired, nil
+}
+
+// packagesPath returns the path to the packages persistence file.
+func (r *Registry) packagesPath() string {
+	return filepath.Join(r.dataDir, "packages.json")
+}
+
+// loadPackages loads installed package metadata from disk.
+func (r *Registry) loadPackages() error {
+	data, err := os.ReadFile(r.packagesPath())
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil // No packages file yet.
+		}
+		return err
+	}
+	return json.Unmarshal(data, &r.packages)
+}
+
+// savePackages persists installed package metadata to disk atomically.
+func (r *Registry) savePackages() error {
+	data, err := json.MarshalIndent(r.packages, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal packages: %w", err)
+	}
+
+	// Write to a temp file and rename for atomicity.
+	tmp := r.packagesPath() + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		return fmt.Errorf("write temp file: %w", err)
+	}
+	if err := os.Rename(tmp, r.packagesPath()); err != nil {
+		os.Remove(tmp)
+		return fmt.Errorf("rename: %w", err)
+	}
+	return nil
+}
+
+// pruneOrphanDesiredState removes desired state entries that have no
+// corresponding package metadata. This keeps the two maps consistent
+// after a restart where packages.json may be missing or incomplete.
+func (r *Registry) pruneOrphanDesiredState() {
+	for id := range r.desired {
+		if _, ok := r.packages[id]; !ok {
+			delete(r.desired, id)
+		}
+	}
+	if err := r.saveDesiredState(); err != nil {
+		log.Printf("registry: failed to save desired state after prune: %v", err)
 	}
 }
 
@@ -251,6 +403,7 @@ type Supervisor struct {
 	registry *Registry
 	ipc      *IPCServer
 	processes map[string]*ProcessHandle
+	restarts  map[string]int // cumulative restart count per module ID
 	ctx      context.Context
 	cancel   context.CancelFunc
 	wg       sync.WaitGroup
@@ -262,7 +415,6 @@ type ProcessHandle struct {
 	Package    *Package
 	Process    *os.Process
 	StartedAt  time.Time
-	RestartCount int
 	LastExit   time.Time
 	cancel     context.CancelFunc
 }
@@ -275,6 +427,7 @@ func NewSupervisor(ctx context.Context, registry *Registry, ipc *IPCServer) *Sup
 		registry:  registry,
 		ipc:       ipc,
 		processes: make(map[string]*ProcessHandle),
+		restarts:  make(map[string]int),
 		ctx:       ctx,
 		cancel:    cancel,
 	}
@@ -297,6 +450,7 @@ func (s *Supervisor) Reconcile() error {
 			log.Printf("supervisor: stopping disabled module %s", id)
 			s.stopProcess(handle)
 			delete(s.processes, id)
+			delete(s.restarts, id)
 		}
 	}
 
@@ -333,7 +487,7 @@ func (s *Supervisor) startProcess(pkg *Package) error {
 		cancel()
 		return fmt.Errorf("get listener addr: %w", err)
 	}
-	cmd := startModuleProcess(ctx, pkg.Executable, s.ipc.Credential(), listenerAddr)
+	cmd := startModuleProcess(ctx, pkg.Executable, s.ipc.Credential(), listenerAddr, pkg.ModuleID)
 	if err := cmd.Start(); err != nil {
 		cancel()
 		return fmt.Errorf("start process: %w", err)
@@ -375,9 +529,10 @@ func (s *Supervisor) monitorProcess(handle *ProcessHandle) {
 	// If the handle is still in our map and the module is enabled, restart.
 	if current, ok := s.processes[handle.ModuleID]; ok && current == handle {
 		if s.registry.IsEnabled(handle.ModuleID) {
-			handle.RestartCount++
-			backoff := calculateBackoff(handle.RestartCount)
-			log.Printf("supervisor: restarting module %s in %v (attempt %d)", handle.ModuleID, backoff, handle.RestartCount)
+			s.restarts[handle.ModuleID]++
+			count := s.restarts[handle.ModuleID]
+			backoff := calculateBackoff(count)
+			log.Printf("supervisor: restarting module %s in %v (attempt %d)", handle.ModuleID, backoff, count)
 
 			// Release lock before sleeping (C6 fix: prevent deadlock).
 			s.mu.Unlock()
@@ -401,6 +556,7 @@ func (s *Supervisor) monitorProcess(handle *ProcessHandle) {
 			return
 		}
 		delete(s.processes, handle.ModuleID)
+		delete(s.restarts, handle.ModuleID)
 	}
 	s.mu.Unlock()
 }
@@ -440,6 +596,7 @@ func (s *Supervisor) Stop() {
 	for id, handle := range s.processes {
 		s.stopProcess(handle)
 		delete(s.processes, id)
+		delete(s.restarts, id)
 	}
 	s.mu.Unlock()
 

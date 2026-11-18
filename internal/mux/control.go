@@ -36,6 +36,14 @@ const (
 	// MsgLogResponse carries recent log lines from agent→server.
 	// Sent in reply to a MsgLogRequest, with the same request_id.
 	MsgLogResponse = "log_resp"
+
+	// MsgDataStoreReq carries a data store request from agent→server.
+	// The server processes the request and replies with MsgDataStoreResp.
+	MsgDataStoreReq = "data_store_req"
+
+	// MsgDataStoreResp carries a data store response from server→agent.
+	// Correlated by request_id with the originating MsgDataStoreReq.
+	MsgDataStoreResp = "data_store_resp"
 )
 
 // maxControlMessageSize caps a single control message at 64 KiB.

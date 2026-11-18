@@ -9,9 +9,10 @@ import (
 	"time"
 )
 
-// moduleIDRegexp validates a module ID: reverse-DNS, lowercase, max 128 chars.
-// Examples: "com.example.mymodule", "io.github.user.project".
-var moduleIDRegexp = regexp.MustCompile(`^[a-z][a-z0-9]*(\.[a-z][a-z0-9]*)+$`)
+// ModuleIDRegexp validates a module ID: reverse-DNS, lowercase, max 128 chars.
+// Segments may contain hyphens (e.g. "com.example.ai-automation-proxy").
+// This is the canonical definition used by both the SDK and internal packages.
+var ModuleIDRegexp = regexp.MustCompile(`^[a-z][a-z0-9]*(-[a-z0-9]+)*(\.[a-z][a-z0-9]*(-[a-z0-9]+)*)+$`)
 
 // MaxModuleIDLen caps a module ID at 128 characters.
 const MaxModuleIDLen = 128
@@ -78,7 +79,7 @@ func (m *Manifest) Validate() error {
 	if len(m.ModuleID) > MaxModuleIDLen {
 		return fmt.Errorf("module ID too long: %d characters (max %d)", len(m.ModuleID), MaxModuleIDLen)
 	}
-	if !moduleIDRegexp.MatchString(m.ModuleID) {
+	if !ModuleIDRegexp.MatchString(m.ModuleID) {
 		return fmt.Errorf("module ID %q is not a valid reverse-DNS identifier", m.ModuleID)
 	}
 	if m.ServiceName == "" {
@@ -157,21 +158,21 @@ const (
 type UIDescriptor struct {
 	// Kind is "provider" (module-owned UI) or "consumer" (server-local UI
 	// that consumes this module's API).
-	Kind UIKind
+	Kind UIKind `json:"kind"`
 
 	// RemoteName is the federation remote name (e.g. "com.example.mymodule").
-	RemoteName string
+	RemoteName string `json:"remote_name"`
 
 	// PageURL is the module page path within the console (e.g. "/modules/mymodule").
-	PageURL string
+	PageURL string `json:"page_url"`
 
 	// PackageDigest is the SHA-256 hex digest of the trusted UI package.
 	// Required for provider UIs; empty for consumer UIs (which use a local
 	// trust store entry).
-	PackageDigest string
+	PackageDigest string `json:"package_digest,omitempty"`
 
 	// AssetPaths lists the relative paths of all assets in the UI package.
-	AssetPaths []AssetEntry
+	AssetPaths []AssetEntry `json:"asset_paths,omitempty"`
 }
 
 // UIKind identifies whether a UI descriptor is a provider or consumer remote.
@@ -184,9 +185,9 @@ const (
 
 // AssetEntry is one file in a UI package with its expected size and digest.
 type AssetEntry struct {
-	Path   string // relative path within the package (e.g. "assets/index.js")
-	Size   int64  // file size in bytes
-	Digest string // SHA-256 hex digest of the file content
+	Path   string `json:"path"`   // relative path within the package (e.g. "assets/index.js")
+	Size   int64  `json:"size"`   // file size in bytes
+	Digest string `json:"digest"` // SHA-256 hex digest of the file content
 }
 
 // Validate checks that the UI descriptor fields are well-formed.

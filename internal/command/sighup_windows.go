@@ -10,3 +10,4 @@ func syscallSIGHUP() syscall.Signal { return 0 }
 
 // InstallSIGHUPHandler is a no-op on Windows where SIGHUP is not available.
 func InstallSIGHUPHandler(_, _ string) {}
+
