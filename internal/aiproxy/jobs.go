@@ -128,6 +128,7 @@ func (m *JobManager) Submit(req AutomationRequest) (*Job, error) {
 		close(job.doneCh)
 		m.mu.Unlock()
 		log.Printf("aiproxy: job %s rejected (queue full)", id)
+		m.scheduleEviction(id)
 	}
 
 	// Start timeout goroutine.
@@ -175,12 +176,14 @@ func (m *JobManager) MarkRunning(id string) {
 	log.Printf("aiproxy: job %s running", id)
 }
 
-// Requeue moves a running job back to pending if it was not delivered
-// to the extension (e.g., write failure or client disconnect).
+// Requeue moves a job back to pending if it was not delivered to the
+// extension (e.g., write failure or client disconnect before MarkRunning).
+// Accepts both JobPending (dequeued but not yet marked) and JobRunning
+// (marked but write failed) statuses.
 func (m *JobManager) Requeue(id string) {
 	m.mu.Lock()
 	job := m.jobs[id]
-	if job != nil && job.Status == JobRunning {
+	if job != nil && (job.Status == JobRunning || job.Status == JobPending) {
 		job.Status = JobPending
 		job.UpdatedAt = time.Now().UTC()
 		m.mu.Unlock()
@@ -204,6 +207,16 @@ func (m *JobManager) Requeue(id string) {
 	m.mu.Unlock()
 }
 
+// scheduleEviction schedules a job for deletion after the retention TTL.
+// Must be called after every transition to a terminal state.
+func (m *JobManager) scheduleEviction(id string) {
+	time.AfterFunc(m.retentionTTL, func() {
+		m.mu.Lock()
+		delete(m.jobs, id)
+		m.mu.Unlock()
+	})
+}
+
 // Complete transitions a job to a terminal state with the given result.
 // Called by the long-poll server when the extension returns a result.
 func (m *JobManager) Complete(id string, result *AutomationResult) {
@@ -223,13 +236,7 @@ func (m *JobManager) Complete(id string, result *AutomationResult) {
 	close(job.doneCh)
 	m.mu.Unlock()
 	log.Printf("aiproxy: job %s %s", id, job.Status)
-
-	// Schedule eviction after retention TTL.
-	time.AfterFunc(m.retentionTTL, func() {
-		m.mu.Lock()
-		delete(m.jobs, id)
-		m.mu.Unlock()
-	})
+	m.scheduleEviction(id)
 }
 
 func (m *JobManager) enforceTimeout(job *Job) {
@@ -253,8 +260,11 @@ func (m *JobManager) enforceTimeout(job *Job) {
 			job.UpdatedAt = time.Now().UTC()
 			close(job.doneCh)
 			log.Printf("aiproxy: job %s timed out", job.ID)
+			m.mu.Unlock()
+			m.scheduleEviction(job.ID)
+		} else {
+			m.mu.Unlock()
 		}
-		m.mu.Unlock()
 	}
 }
 
