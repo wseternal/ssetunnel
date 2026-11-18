@@ -23,7 +23,7 @@ import (
 )
 
 // moduleIDRegexp validates a module ID: reverse-DNS, lowercase, max 128 chars.
-var moduleIDRegexp = regexp.MustCompile(`^[a-z][a-z0-9]*(\.[a-z][a-z0-9]*)+$`)
+var moduleIDRegexp = regexp.MustCompile(`^[a-z][a-z0-9]*(-[a-z0-9]+)*(\.[a-z][a-z0-9]*(-[a-z0-9]+)*)+$`)
 
 // semverRegexp validates a semantic version string (major.minor.patch with optional pre-release).
 var semverRegexp = regexp.MustCompile(`^\d+\.\d+\.\d+(-[a-zA-Z0-9]+(\.[a-zA-Z0-9]+)*)?$`)
