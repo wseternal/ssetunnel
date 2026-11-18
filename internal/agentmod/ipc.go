@@ -50,9 +50,10 @@ type IPCServer struct {
 	onDeregister func(moduleID string)
 
 	// onDataStore is called when a module sends a DATASTORE request.
-	// The handler processes the request and returns a JSON response.
+	// The handler receives the authenticated module ID and the raw JSON
+	// request bytes, and returns JSON response bytes.
 	// Returns nil if data store is not configured.
-	onDataStore func(requestJSON []byte) ([]byte, error)
+	onDataStore func(moduleID string, requestJSON []byte) ([]byte, error)
 }
 
 // Registration represents a live module registration from a connected process.
@@ -111,9 +112,10 @@ func (s *IPCServer) SetOnDeregister(fn func(moduleID string)) {
 }
 
 // SetOnDataStore sets the handler for data store requests from modules.
-// The handler receives raw JSON request bytes and returns JSON response
-// bytes. If not set, data store requests return an error.
-func (s *IPCServer) SetOnDataStore(fn func(requestJSON []byte) ([]byte, error)) {
+// The handler receives the authenticated module ID and raw JSON request
+// bytes, and returns JSON response bytes. If not set, data store requests
+// return an error.
+func (s *IPCServer) SetOnDataStore(fn func(moduleID string, requestJSON []byte) ([]byte, error)) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.onDataStore = fn
@@ -249,8 +251,10 @@ func (s *IPCServer) handleConnection(conn net.Conn) {
 
 	// Data store proxy mode: module opens a dedicated connection for
 	// data store requests only (no REG, no health loop).
+	// Format: DATASTORE <module_id> — identifies the calling module.
 	if strings.HasPrefix(firstLine, "DATASTORE ") {
-		s.handleDataStoreConnection(conn, reader, firstLine)
+		moduleID := strings.TrimPrefix(firstLine, "DATASTORE ")
+		s.handleDataStoreConnection(conn, reader, moduleID)
 		return
 	}
 
@@ -468,29 +472,54 @@ func (s *IPCServer) Close() error {
 }
 
 // handleDataStoreConnection processes a data store proxy connection.
-// After AUTH, the module sends DATASTORE commands in a request/response
-// loop. Each command carries a length-prefixed JSON payload; the server
-// forwards it to the data store handler and returns the JSON response.
-func (s *IPCServer) handleDataStoreConnection(conn net.Conn, reader *bufio.Reader, firstLine string) {
+// After AUTH, the module sends "DATASTORE <module_id>" to identify itself,
+// then DATASTORE <len>\n<json> commands in a request/response loop.
+// Responses are framed as DATASTORE_RESP <len>\n<json> for safe framing.
+func (s *IPCServer) handleDataStoreConnection(conn net.Conn, reader *bufio.Reader, moduleID string) {
 	defer conn.Close()
 
+	// Validate module ID: must be a registered module.
 	s.mu.RLock()
 	handler := s.onDataStore
+	registered := s.modules[moduleID] != nil
 	s.mu.RUnlock()
 
 	if handler == nil {
 		log.Printf("ipc: data store request received but no handler configured")
-		conn.Write([]byte(`{"error":"data store not configured"}`))
+		writeDataStoreError(conn, "data store not configured")
+		return
+	}
+	if !registered {
+		log.Printf("ipc: data store connection from unregistered module %q", moduleID)
+		writeDataStoreError(conn, "module not registered")
 		return
 	}
 
-	// Process the first DATASTORE command and then enter a loop.
-	for line := firstLine; ; {
+	log.Printf("ipc: data store connection established for module %s", moduleID)
+
+	// Process DATASTORE commands in a loop.
+	for {
+		conn.SetReadDeadline(time.Now().Add(5 * time.Minute))
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			if !errors.Is(err, io.EOF) {
+				log.Printf("ipc: data store connection closed for %s: %v", moduleID, err)
+			}
+			return
+		}
+		line = strings.TrimSuffix(line, "\n")
+		if !strings.HasPrefix(line, "DATASTORE ") {
+			log.Printf("ipc: unexpected command in data store mode from %s: %q", moduleID, line)
+			return
+		}
+
 		// Parse "DATASTORE <len>".
 		lenStr := strings.TrimPrefix(line, "DATASTORE ")
 		dataLen, err := strconv.Atoi(lenStr)
 		if err != nil || dataLen < 0 || dataLen > maxIPCMessageSize {
-			log.Printf("ipc: invalid DATASTORE length: %q", lenStr)
+			// Module IDs contain dots (a.b format) so Atoi fails — this
+			// distinguishes identity lines from numeric length headers.
+			log.Printf("ipc: invalid DATASTORE length from %s: %q", moduleID, lenStr)
 			return
 		}
 
@@ -498,34 +527,37 @@ func (s *IPCServer) handleDataStoreConnection(conn net.Conn, reader *bufio.Reade
 		dataBuf := make([]byte, dataLen)
 		if dataLen > 0 {
 			if _, err := io.ReadFull(reader, dataBuf); err != nil {
-				log.Printf("ipc: data store payload read error: %v", err)
+				log.Printf("ipc: data store payload read error from %s: %v", moduleID, err)
 				return
 			}
 		}
 
-		// Forward to the data store handler.
+		// Forward to the data store handler with the authenticated module ID.
 		conn.SetDeadline(time.Now().Add(60 * time.Second))
-		respJSON, err := handler(dataBuf)
+		respJSON, err := handler(moduleID, dataBuf)
 		if err != nil {
 			errResp := fmt.Sprintf(`{"error":%q}`, err.Error())
-			conn.Write([]byte(errResp))
+			writeDataStoreResponse(conn, []byte(errResp))
 		} else {
-			conn.Write(respJSON)
-		}
-
-		// Read next command or detect disconnect.
-		conn.SetReadDeadline(time.Now().Add(5 * time.Minute))
-		line, err = reader.ReadString('\n')
-		if err != nil {
-			if !errors.Is(err, io.EOF) {
-				log.Printf("ipc: data store connection closed: %v", err)
-			}
-			return
-		}
-		line = strings.TrimSuffix(line, "\n")
-		if !strings.HasPrefix(line, "DATASTORE ") {
-			log.Printf("ipc: unexpected command in data store mode: %q", line)
-			return
+			writeDataStoreResponse(conn, respJSON)
 		}
 	}
+}
+
+// writeDataStoreResponse writes a length-prefixed data store response.
+func writeDataStoreResponse(conn net.Conn, respJSON []byte) {
+	header := fmt.Sprintf("DATASTORE_RESP %d\n", len(respJSON))
+	if _, err := conn.Write([]byte(header)); err != nil {
+		log.Printf("ipc: data store response header write error: %v", err)
+		return
+	}
+	if _, err := conn.Write(respJSON); err != nil {
+		log.Printf("ipc: data store response body write error: %v", err)
+	}
+}
+
+// writeDataStoreError writes a framed error response.
+func writeDataStoreError(conn net.Conn, message string) {
+	errResp := fmt.Sprintf(`{"error":%q}`, message)
+	writeDataStoreResponse(conn, []byte(errResp))
 }

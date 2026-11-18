@@ -83,6 +83,11 @@ func (s *ExtensionServer) handlePoll(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusServiceUnavailable, "UNAVAILABLE", "job queue closed")
 			return
 		}
+		// If client already disconnected, requeue immediately.
+		if r.Context().Err() != nil {
+			s.jobs.Requeue(job.ID)
+			return
+		}
 		// Mark the job as running before sending to the extension.
 		s.jobs.MarkRunning(job.ID)
 		writeJSON(w, http.StatusOK, pollResponse{
@@ -113,6 +118,7 @@ func (s *ExtensionServer) handleResult(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "request body required")
 		return
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxProxyBodyBytes)
 
 	var req resultRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {

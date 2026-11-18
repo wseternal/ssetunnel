@@ -29,7 +29,7 @@ import (
 func main() {
 	log.SetFlags(log.Ltime | log.Lshortfile)
 
-	listenAddr := flag.String("listen", ":9090", "extension long-poll server listen address")
+	listenAddr := flag.String("listen", "127.0.0.1:9090", "extension long-poll server listen address")
 	jobTimeout := flag.Duration("job-timeout", 5*time.Minute, "default job timeout")
 	flag.Parse()
 

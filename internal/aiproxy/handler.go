@@ -48,11 +48,18 @@ type submitResponse struct {
 	JobID string `json:"job_id"`
 }
 
+const maxProxyBodyBytes = 4 << 20 // 4 MiB
+
+// maxClientWaitTimeout caps how long a client can hold a connection
+// waiting for a job result (W3 fix: prevent indefinite connection pinning).
+const maxClientWaitTimeout = 5 * time.Minute
+
 func (h *ClientHandler) handleSubmit(w http.ResponseWriter, r *http.Request) {
 	if r.Body == nil {
 		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "request body required")
 		return
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxProxyBodyBytes)
 
 	var req submitRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -100,6 +107,9 @@ func (h *ClientHandler) handleGet(w http.ResponseWriter, r *http.Request) {
 			if d, err := time.ParseDuration(v); err == nil && d > 0 {
 				waitTimeout = d
 			}
+		}
+		if waitTimeout > maxClientWaitTimeout {
+			waitTimeout = maxClientWaitTimeout
 		}
 		job = h.jobs.WaitForResult(job, waitTimeout)
 	}

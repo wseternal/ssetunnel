@@ -12,5 +12,6 @@ CREATE TABLE "public"."module_records" (
     CONSTRAINT "module_records_module_record_uniq" UNIQUE ("module_id", "record_id")
 );
 
--- Index for listing records by module.
-CREATE INDEX "module_records_module_id_idx" ON "public"."module_records" ("module_id");
+-- Composite index for listing records by module ordered by time.
+-- Covers the common list query: WHERE module_id = $1 ORDER BY created_at DESC.
+CREATE INDEX "module_records_module_id_created_at_idx" ON "public"."module_records" ("module_id", "created_at" DESC);

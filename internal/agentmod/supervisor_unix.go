@@ -21,6 +21,7 @@ func startModuleProcess(ctx context.Context, executable, credential, endpoint, m
 	cmd.Env = []string{
 		"SSETUNNEL_MODULE_IPC_CREDENTIAL=" + credential,
 		"SSETUNNEL_MODULE_IPC_ENDPOINT=" + endpoint,
+		"SSETUNNEL_MODULE_ID=" + moduleID,
 		"PATH=" + os.Getenv("PATH"),
 		"HOME=" + os.Getenv("HOME"),
 	}
@@ -29,7 +30,11 @@ func startModuleProcess(ctx context.Context, executable, credential, endpoint, m
 		Setpgid: true,
 	}
 	cmd.Stdout = nil
-	stderr, _ := cmd.StderrPipe()
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		log.Printf("module[%s]: stderr pipe unavailable: %v", moduleID, err)
+		return cmd
+	}
 	go func() {
 		scanner := bufio.NewScanner(stderr)
 		for scanner.Scan() {

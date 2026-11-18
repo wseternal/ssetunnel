@@ -217,12 +217,15 @@ func (a *Agent) InitModules(ctx context.Context, dataDir string) error {
 	})
 
 	// Wire IPC data store handler to forward requests through the
-	// control tunnel to the server's database.
-	ipc.SetOnDataStore(func(requestJSON []byte) ([]byte, error) {
+	// control tunnel to the server's database. The authenticated module
+	// ID from the IPC layer overrides the caller-supplied module_id to
+	// prevent cross-module data access (C1 fix).
+	ipc.SetOnDataStore(func(moduleID string, requestJSON []byte) ([]byte, error) {
 		var req moduleproto.DataStoreRequestPayload
 		if err := json.Unmarshal(requestJSON, &req); err != nil {
 			return nil, fmt.Errorf("unmarshal data store request: %w", err)
 		}
+		req.ModuleID = moduleID // enforce authenticated caller identity
 		resp, err := a.DataStoreRequest(req)
 		if err != nil {
 			return nil, err

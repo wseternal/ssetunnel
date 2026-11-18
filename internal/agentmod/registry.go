@@ -229,20 +229,84 @@ func (r *Registry) Uninstall(moduleID string) {
 // when the agent receives SIGHUP to pick up changes made by CLI module
 // commands (install, start, stop, etc.) that modify the on-disk state
 // in a separate process.
+//
+// The load and prune steps happen on local maps without holding r.mu,
+// so concurrent readers (EnabledModules, Package) are unaffected. The
+// final swap is performed under a single write lock for atomicity.
 func (r *Registry) Reload() error {
-	r.mu.Lock()
-	r.packages = make(map[string]*Package)
-	r.desired = make(map[string]DesiredState)
-	r.mu.Unlock()
-
-	if err := r.loadPackages(); err != nil && !os.IsNotExist(err) {
+	pkgs, err := r.readPackagesFromDisk()
+	if err != nil {
 		return fmt.Errorf("reload packages: %w", err)
 	}
-	if err := r.loadDesiredState(); err != nil && !os.IsNotExist(err) {
+	desired, err := r.readDesiredStateFromDisk()
+	if err != nil {
 		return fmt.Errorf("reload desired state: %w", err)
 	}
-	r.pruneOrphanDesiredState()
+	// Prune orphan desired state entries locally.
+	for id := range desired {
+		if _, ok := pkgs[id]; !ok {
+			delete(desired, id)
+		}
+	}
+	// Persist the pruned desired state.
+	data, err := json.MarshalIndent(desired, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal desired state: %w", err)
+	}
+	tmp := r.desiredStatePath() + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		return fmt.Errorf("write desired state: %w", err)
+	}
+	if err := os.Rename(tmp, r.desiredStatePath()); err != nil {
+		os.Remove(tmp)
+		return fmt.Errorf("rename desired state: %w", err)
+	}
+	// Atomic swap under write lock.
+	r.mu.Lock()
+	r.packages = pkgs
+	r.desired = desired
+	r.mu.Unlock()
 	return nil
+}
+
+// readPackagesFromDisk loads package metadata from disk into a new map.
+// Does not mutate r.packages.
+func (r *Registry) readPackagesFromDisk() (map[string]*Package, error) {
+	data, err := os.ReadFile(r.packagesPath())
+	if err != nil {
+		if os.IsNotExist(err) {
+			return make(map[string]*Package), nil
+		}
+		return nil, err
+	}
+	var pkgs map[string]*Package
+	if err := json.Unmarshal(data, &pkgs); err != nil {
+		return nil, err
+	}
+	if pkgs == nil {
+		pkgs = make(map[string]*Package)
+	}
+	return pkgs, nil
+}
+
+// readDesiredStateFromDisk loads desired state from disk into a new map.
+// Does not mutate r.desired.
+func (r *Registry) readDesiredStateFromDisk() (map[string]DesiredState, error) {
+	data, err := os.ReadFile(r.desiredStatePath())
+	if err != nil {
+		if os.IsNotExist(err) {
+			return make(map[string]DesiredState), nil
+		}
+		return nil, err
+	}
+	var desired map[string]DesiredState
+	if err := json.Unmarshal(data, &desired); err != nil {
+		return nil, err
+	}
+	if desired == nil {
+		desired = make(map[string]DesiredState)
+	}
+	return desired, nil
 }
 
 // packagesPath returns the path to the packages persistence file.

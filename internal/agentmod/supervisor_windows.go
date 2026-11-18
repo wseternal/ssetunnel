@@ -20,13 +20,18 @@ func startModuleProcess(ctx context.Context, executable, credential, endpoint, m
 	cmd.Env = append(os.Environ(),
 		"SSETUNNEL_MODULE_IPC_CREDENTIAL="+credential,
 		"SSETUNNEL_MODULE_IPC_ENDPOINT="+endpoint,
+		"SSETUNNEL_MODULE_ID="+moduleID,
 	)
 	// On Windows, we use CREATE_NEW_PROCESS_GROUP to isolate the process.
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		CreationFlags: syscall.CREATE_NEW_PROCESS_GROUP,
 	}
 	cmd.Stdout = nil
-	stderr, _ := cmd.StderrPipe()
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		log.Printf("module[%s]: stderr pipe unavailable: %v", moduleID, err)
+		return cmd
+	}
 	go func() {
 		scanner := bufio.NewScanner(stderr)
 		for scanner.Scan() {

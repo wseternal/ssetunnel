@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log"
 	"sync"
 	"time"
 )
@@ -73,10 +74,11 @@ type Job struct {
 // JobManager manages the job lifecycle: submission, dispatch to the
 // extension, result correlation, and timeout enforcement.
 type JobManager struct {
-	mu       sync.Mutex
-	jobs     map[string]*Job
-	pending  chan *Job
-	timeout  time.Duration
+	mu           sync.Mutex
+	jobs         map[string]*Job
+	pending      chan *Job
+	timeout      time.Duration
+	retentionTTL time.Duration // how long to keep terminal jobs before eviction
 }
 
 // NewJobManager creates a job manager with the given default timeout.
@@ -85,9 +87,10 @@ func NewJobManager(timeout time.Duration) *JobManager {
 		timeout = 5 * time.Minute
 	}
 	return &JobManager{
-		jobs:    make(map[string]*Job),
-		pending: make(chan *Job, 256),
-		timeout: timeout,
+		jobs:         make(map[string]*Job),
+		pending:      make(chan *Job, 256),
+		timeout:      timeout,
+		retentionTTL: 10 * time.Minute,
 	}
 }
 
@@ -108,6 +111,7 @@ func (m *JobManager) Submit(req AutomationRequest) (*Job, error) {
 	m.mu.Lock()
 	m.jobs[id] = job
 	m.mu.Unlock()
+	log.Printf("aiproxy: job %s submitted", id)
 
 	// Enqueue for the extension to pick up.
 	select {
@@ -123,6 +127,7 @@ func (m *JobManager) Submit(req AutomationRequest) (*Job, error) {
 		job.UpdatedAt = time.Now().UTC()
 		close(job.doneCh)
 		m.mu.Unlock()
+		log.Printf("aiproxy: job %s rejected (queue full)", id)
 	}
 
 	// Start timeout goroutine.
@@ -167,6 +172,36 @@ func (m *JobManager) MarkRunning(id string) {
 		job.UpdatedAt = time.Now().UTC()
 	}
 	m.mu.Unlock()
+	log.Printf("aiproxy: job %s running", id)
+}
+
+// Requeue moves a running job back to pending if it was not delivered
+// to the extension (e.g., write failure or client disconnect).
+func (m *JobManager) Requeue(id string) {
+	m.mu.Lock()
+	job := m.jobs[id]
+	if job != nil && job.Status == JobRunning {
+		job.Status = JobPending
+		job.UpdatedAt = time.Now().UTC()
+		m.mu.Unlock()
+		select {
+		case m.pending <- job:
+			log.Printf("aiproxy: job %s requeued", id)
+		default:
+			m.mu.Lock()
+			job.Status = JobFailed
+			job.Result = &AutomationResult{
+				Status: "error",
+				Error:  &AutomationError{Code: "QUEUE_FULL", Message: "requeue failed: queue full"},
+			}
+			job.UpdatedAt = time.Now().UTC()
+			close(job.doneCh)
+			m.mu.Unlock()
+			log.Printf("aiproxy: job %s requeue failed (queue full)", id)
+		}
+		return
+	}
+	m.mu.Unlock()
 }
 
 // Complete transitions a job to a terminal state with the given result.
@@ -187,6 +222,14 @@ func (m *JobManager) Complete(id string, result *AutomationResult) {
 	job.UpdatedAt = time.Now().UTC()
 	close(job.doneCh)
 	m.mu.Unlock()
+	log.Printf("aiproxy: job %s %s", id, job.Status)
+
+	// Schedule eviction after retention TTL.
+	time.AfterFunc(m.retentionTTL, func() {
+		m.mu.Lock()
+		delete(m.jobs, id)
+		m.mu.Unlock()
+	})
 }
 
 func (m *JobManager) enforceTimeout(job *Job) {
@@ -209,6 +252,7 @@ func (m *JobManager) enforceTimeout(job *Job) {
 			}
 			job.UpdatedAt = time.Now().UTC()
 			close(job.doneCh)
+			log.Printf("aiproxy: job %s timed out", job.ID)
 		}
 		m.mu.Unlock()
 	}

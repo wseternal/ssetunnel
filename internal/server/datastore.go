@@ -3,13 +3,16 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/wseternal/ssetunnel/internal/moduleproto"
 	"github.com/wseternal/ssetunnel/internal/mux"
+	"github.com/wseternal/ssetunnel/sdk"
 )
 
 // DataStore handles module data store requests against PostgreSQL.
@@ -53,6 +56,13 @@ func (ds *DataStore) HandleRequest(msg *mux.ControlMessage) *mux.ControlMessage 
 }
 
 func (ds *DataStore) execute(ctx context.Context, req moduleproto.DataStoreRequestPayload) moduleproto.DataStoreResponsePayload {
+	// Validate module_id format to prevent injection.
+	if !sdk.ModuleIDRegexp.MatchString(req.ModuleID) {
+		return moduleproto.DataStoreResponsePayload{
+			RequestID: req.RequestID,
+			Error:     "invalid module_id format",
+		}
+	}
 	switch req.Op {
 	case moduleproto.DataStoreCreate:
 		return ds.create(ctx, req)
@@ -124,9 +134,16 @@ func (ds *DataStore) get(ctx context.Context, req moduleproto.DataStoreRequestPa
 		req.ModuleID, req.RecordID).Scan(
 		&rec.ModuleID, &rec.RecordID, &rec.Data, &createdAt, &updatedAt)
 	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return moduleproto.DataStoreResponsePayload{
+				RequestID: req.RequestID,
+				Error:     "record not found",
+			}
+		}
+		log.Printf("datastore: get(%s, %s) error: %v", req.ModuleID, req.RecordID, err)
 		return moduleproto.DataStoreResponsePayload{
 			RequestID: req.RequestID,
-			Error:     "record not found",
+			Error:     "database error",
 		}
 	}
 	rec.CreatedAt = createdAt.Format(time.RFC3339Nano)
@@ -173,7 +190,7 @@ func (ds *DataStore) list(ctx context.Context, req moduleproto.DataStoreRequestP
 	}
 	defer rows.Close()
 
-	var records []moduleproto.DataStoreRecord
+	records := make([]moduleproto.DataStoreRecord, 0) // initialized to avoid JSON null
 	for rows.Next() {
 		var rec moduleproto.DataStoreRecord
 		var createdAt, updatedAt time.Time
@@ -184,6 +201,13 @@ func (ds *DataStore) list(ctx context.Context, req moduleproto.DataStoreRequestP
 		rec.CreatedAt = createdAt.Format(time.RFC3339Nano)
 		rec.UpdatedAt = updatedAt.Format(time.RFC3339Nano)
 		records = append(records, rec)
+	}
+	if err := rows.Err(); err != nil {
+		log.Printf("datastore: list(%s) iteration error: %v", req.ModuleID, err)
+		return moduleproto.DataStoreResponsePayload{
+			RequestID: req.RequestID,
+			Error:     "database iteration error",
+		}
 	}
 
 	return moduleproto.DataStoreResponsePayload{

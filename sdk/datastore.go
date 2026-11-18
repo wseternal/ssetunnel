@@ -1,12 +1,15 @@
 package sdk
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -21,7 +24,9 @@ import (
 type DataStore struct {
 	endpoint   string
 	credential string
+	moduleID   string
 	conn       net.Conn
+	reader     *bufio.Reader
 	mu         sync.Mutex
 	closed     bool
 }
@@ -32,18 +37,20 @@ type DataStore struct {
 func NewDataStore() (*DataStore, error) {
 	endpoint := os.Getenv("SSETUNNEL_MODULE_IPC_ENDPOINT")
 	credential := os.Getenv("SSETUNNEL_MODULE_IPC_CREDENTIAL")
-	if endpoint == "" || credential == "" {
-		return nil, errors.New("SSETUNNEL_MODULE_IPC_ENDPOINT and SSETUNNEL_MODULE_IPC_CREDENTIAL must be set")
+	moduleID := os.Getenv("SSETUNNEL_MODULE_ID")
+	if endpoint == "" || credential == "" || moduleID == "" {
+		return nil, errors.New("SSETUNNEL_MODULE_IPC_ENDPOINT, SSETUNNEL_MODULE_IPC_CREDENTIAL, and SSETUNNEL_MODULE_ID must be set")
 	}
-	return NewDataStoreWithEndpoint(endpoint, credential)
+	return NewDataStoreWithEndpoint(endpoint, credential, moduleID)
 }
 
 // NewDataStoreWithEndpoint creates a data store client with explicit
 // endpoint and credential.
-func NewDataStoreWithEndpoint(endpoint, credential string) (*DataStore, error) {
+func NewDataStoreWithEndpoint(endpoint, credential, moduleID string) (*DataStore, error) {
 	ds := &DataStore{
 		endpoint:   endpoint,
 		credential: credential,
+		moduleID:   moduleID,
 	}
 	if err := ds.connect(); err != nil {
 		return nil, err
@@ -180,7 +187,7 @@ func (ds *DataStore) connect() error {
 		return fmt.Errorf("write credential: %w", err)
 	}
 	buf := make([]byte, 3)
-	if _, err := conn.Read(buf); err != nil {
+	if _, err := io.ReadFull(conn, buf); err != nil {
 		conn.Close()
 		return fmt.Errorf("read auth response: %w", err)
 	}
@@ -189,7 +196,16 @@ func (ds *DataStore) connect() error {
 		return errors.New("authentication failed")
 	}
 
+	// Identify this connection as belonging to a specific module.
+	// Format: DATASTORE <module_id>\n
+	identLine := fmt.Sprintf("DATASTORE %s\n", ds.moduleID)
+	if _, err := conn.Write([]byte(identLine)); err != nil {
+		conn.Close()
+		return fmt.Errorf("write datastore identity: %w", err)
+	}
+
 	ds.conn = conn
+	ds.reader = bufio.NewReaderSize(conn, 64<<10)
 	return nil
 }
 
@@ -223,34 +239,36 @@ func (ds *DataStore) sendRequest(ctx context.Context, req dataStoreRequest) (*da
 		return nil, fmt.Errorf("write payload: %w", err)
 	}
 
-	// Read response: "DATASTORE_RESP <len>\n<json>" or raw JSON.
-	respBuf := make([]byte, 64*1024)
-	n, err := ds.conn.Read(respBuf)
+	// Read response: "DATASTORE_RESP <len>\n<json>" (length-prefixed framing).
+	respLine, err := ds.reader.ReadString('\n')
 	if err != nil {
-		return nil, fmt.Errorf("read response: %w", err)
+		return nil, fmt.Errorf("read response header: %w", err)
+	}
+	respLine = respLine[:len(respLine)-1] // trim \n
+	if len(respLine) < 15 || respLine[:15] != "DATASTORE_RESP " {
+		return nil, fmt.Errorf("unexpected response header: %q", respLine)
+	}
+	respLen, err := strconv.Atoi(respLine[15:])
+	if err != nil || respLen < 0 || respLen > 16<<20 {
+		return nil, fmt.Errorf("invalid response length: %q", respLine[15:])
+	}
+	respBuf := make([]byte, respLen)
+	if respLen > 0 {
+		if _, err := io.ReadFull(ds.reader, respBuf); err != nil {
+			return nil, fmt.Errorf("read response body: %w", err)
+		}
 	}
 
 	// Clear deadline.
 	ds.conn.SetDeadline(time.Time{})
 
-	// Parse response. The agent sends the response as raw JSON.
+	// Parse response.
 	var resp dataStoreResponse
-	if err := json.Unmarshal(respBuf[:n], &resp); err != nil {
+	if err := json.Unmarshal(respBuf, &resp); err != nil {
 		return nil, fmt.Errorf("unmarshal response: %w", err)
 	}
 	if resp.Error != "" {
 		return &resp, fmt.Errorf("server error: %s", resp.Error)
 	}
 	return &resp, nil
-}
-
-// Reconnect re-establishes the IPC connection.
-func (ds *DataStore) Reconnect() error {
-	ds.mu.Lock()
-	if ds.conn != nil {
-		ds.conn.Close()
-		ds.conn = nil
-	}
-	ds.mu.Unlock()
-	return ds.connect()
 }

@@ -413,9 +413,12 @@ func SendReload(name string) error {
 	}
 	proc, err := os.FindProcess(pid)
 	if err != nil {
+		log.Printf("%s: find process (pid %d): %v", name, pid, err)
 		return nil
 	}
-	_ = proc.Signal(syscallSIGHUP())
+	if err := proc.Signal(syscallSIGHUP()); err != nil {
+		log.Printf("%s: send SIGHUP to pid %d: %v", name, pid, err)
+	}
 	return nil
 }
 
