@@ -201,6 +201,7 @@ func (m *JobManager) Requeue(id string) {
 			close(job.doneCh)
 			m.mu.Unlock()
 			log.Printf("aiproxy: job %s requeue failed (queue full)", id)
+			m.scheduleEviction(id)
 		}
 		return
 	}
