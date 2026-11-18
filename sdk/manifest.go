@@ -10,8 +10,8 @@ import (
 )
 
 // moduleIDRegexp validates a module ID: reverse-DNS, lowercase, max 128 chars.
-// Examples: "com.example.mymodule", "io.github.user.project".
-var moduleIDRegexp = regexp.MustCompile(`^[a-z][a-z0-9]*(\.[a-z][a-z0-9]*)+$`)
+// Segments may contain hyphens (e.g. "com.example.ai-automation-proxy").
+var moduleIDRegexp = regexp.MustCompile(`^[a-z][a-z0-9]*(-[a-z0-9]+)*(\.[a-z][a-z0-9]*(-[a-z0-9]+)*)+$`)
 
 // MaxModuleIDLen caps a module ID at 128 characters.
 const MaxModuleIDLen = 128
