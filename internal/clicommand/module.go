@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/wseternal/ssetunnel/internal/agentmod"
+	"github.com/wseternal/ssetunnel/internal/command"
 )
 
 // BinaryName is the CLI binary name used in help text and usage messages.
@@ -38,6 +39,13 @@ func getRegistry() (*agentmod.Registry, error) {
 		return nil, err
 	}
 	return agentmod.NewRegistry(dataDir)
+}
+
+// signalAgentReload sends SIGHUP to the running agent service so it
+// re-reads module state from disk and reconciles. Best-effort: silent
+// if the agent is not running.
+func signalAgentReload() {
+	_ = command.SendReload("ssetunnel-agent")
 }
 
 // RunModule manages agent module lifecycle (install, start, stop, etc.).
@@ -137,6 +145,7 @@ func moduleInstall(args []string) error {
 
 	fmt.Printf("Installed module %s v%s\n", moduleID, version)
 	fmt.Printf("Note: Use '%s module start' to enable the module.\n", BinaryName)
+	signalAgentReload()
 	return nil
 }
 
@@ -157,6 +166,7 @@ func moduleStart(args []string) error {
 
 	fmt.Printf("Module %s enabled (will start on next agent reconcile)\n", moduleID)
 	fmt.Println("Note: The agent must be running for the module to start.")
+	signalAgentReload()
 	return nil
 }
 
@@ -176,6 +186,7 @@ func moduleStop(args []string) error {
 	}
 
 	fmt.Printf("Module %s disabled (will stop on next agent reconcile)\n", moduleID)
+	signalAgentReload()
 	return nil
 }
 
@@ -204,6 +215,7 @@ func moduleRestart(args []string) error {
 	}
 
 	fmt.Printf("Module %s restarted (will take effect on next agent reconcile)\n", moduleID)
+	signalAgentReload()
 	return nil
 }
 
@@ -255,6 +267,7 @@ func moduleRemove(args []string) error {
 	}
 
 	fmt.Printf("Module %s removed\n", moduleID)
+	signalAgentReload()
 	return nil
 }
 

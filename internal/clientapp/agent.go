@@ -181,6 +181,10 @@ func RunAgent(ctx context.Context, cfg AgentConfig) error {
 	}
 	defer ag.Close()
 
+	// Install SIGHUP handler so CLI module commands can trigger a
+	// reload of module state from disk without restarting the agent.
+	installReloadSignal(ag)
+
 	// Install log capture under the mutex so ag.Run skips its own
 	// unprotected log.SetOutput (see Agent.InitLogCapture).
 	// The MultiWriter tees all log.Printf output to stderr and the

@@ -45,10 +45,6 @@ func RunAgent(ctx context.Context, args []string) error {
 
 	log.Printf("agent: starting (server=%q, id=%q, target=%q)", *serverURL, *agentID, *target)
 
-	// SIGHUP: trigger configuration reload (placeholder; agent has no
-	// runtime-reloadable config today — logs only).
-	command.InstallSIGHUPHandler("agent", "SIGHUP received (no reloadable config)")
-
 	dataDir, dirErr := AgentDataDir()
 	if dirErr != nil {
 		return dirErr

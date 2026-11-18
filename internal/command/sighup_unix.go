@@ -23,3 +23,4 @@ func InstallSIGHUPHandler(role, message string) {
 		}
 	}()
 }
+

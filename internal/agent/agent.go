@@ -238,6 +238,24 @@ func (a *Agent) InitModules(ctx context.Context, dataDir string) error {
 	return nil
 }
 
+// ReloadModules re-reads module packages and desired state from disk,
+// then reconciles the supervisor to start/stop modules as needed.
+// Called when the agent receives SIGHUP after CLI module commands
+// modify the on-disk state.
+func (a *Agent) ReloadModules() error {
+	if a.modRegistry == nil || a.modSupervisor == nil {
+		return fmt.Errorf("modules not initialized")
+	}
+	if err := a.modRegistry.Reload(); err != nil {
+		return fmt.Errorf("reload registry: %w", err)
+	}
+	if err := a.modSupervisor.Reconcile(); err != nil {
+		return fmt.Errorf("reconcile: %w", err)
+	}
+	log.Printf("agent: modules reloaded successfully")
+	return nil
+}
+
 // currentYamuxSession returns the current yamux session, or nil.
 func (a *Agent) currentYamuxSession() *yamux.Session {
 	return a.currentSess.Load()

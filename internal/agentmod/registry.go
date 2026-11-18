@@ -225,6 +225,26 @@ func (r *Registry) Uninstall(moduleID string) {
 	}
 }
 
+// Reload re-reads packages and desired state from disk. This is called
+// when the agent receives SIGHUP to pick up changes made by CLI module
+// commands (install, start, stop, etc.) that modify the on-disk state
+// in a separate process.
+func (r *Registry) Reload() error {
+	r.mu.Lock()
+	r.packages = make(map[string]*Package)
+	r.desired = make(map[string]DesiredState)
+	r.mu.Unlock()
+
+	if err := r.loadPackages(); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("reload packages: %w", err)
+	}
+	if err := r.loadDesiredState(); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("reload desired state: %w", err)
+	}
+	r.pruneOrphanDesiredState()
+	return nil
+}
+
 // packagesPath returns the path to the packages persistence file.
 func (r *Registry) packagesPath() string {
 	return filepath.Join(r.dataDir, "packages.json")

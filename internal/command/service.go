@@ -399,6 +399,26 @@ func sendReload(svcConfig *service.Config) error {
 	return nil
 }
 
+// SendReload sends SIGHUP to the named service process. It is a public
+// wrapper around sendReload for use by CLI module commands that need
+// to notify the running agent of on-disk state changes.
+// Returns nil if the process is not running (no PID file).
+func SendReload(name string) error {
+	if runtime.GOOS == "windows" {
+		return nil // no SIGHUP on Windows
+	}
+	pid, err := readPIDFile(name)
+	if err != nil {
+		return nil // no PID file = agent not running as service
+	}
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return nil
+	}
+	_ = proc.Signal(syscallSIGHUP())
+	return nil
+}
+
 // pidDir returns the directory for PID and args files (~/.ssetunnel/).
 // Tests may override this variable to redirect to a temp directory.
 var pidDir = func() string {
