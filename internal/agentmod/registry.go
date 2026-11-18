@@ -39,10 +39,16 @@ func NewRegistry(dataDir string) (*Registry, error) {
 		packages: make(map[string]*Package),
 		desired:  make(map[string]DesiredState),
 	}
+	if err := r.loadPackages(); err != nil {
+		log.Printf("registry: failed to load packages: %v", err)
+		// Continue with empty packages; will be populated as modules are installed.
+	}
 	if err := r.loadDesiredState(); err != nil {
 		log.Printf("registry: failed to load desired state: %v", err)
 		// Continue with empty state; will be populated as modules are installed.
 	}
+	// Prune desired state entries whose packages were not loaded from disk.
+	r.pruneOrphanDesiredState()
 	return r, nil
 }
 
@@ -67,6 +73,9 @@ func (r *Registry) Install(pkg *Package) error {
 		r.desired[pkg.ModuleID] = DesiredState{Enabled: false, UpdatedAt: time.Now()}
 	}
 
+	if err := r.savePackages(); err != nil {
+		return fmt.Errorf("save packages: %w", err)
+	}
 	return r.saveDesiredState()
 }
 
@@ -87,6 +96,9 @@ func (r *Registry) Remove(moduleID string) error {
 	delete(r.packages, moduleID)
 	delete(r.desired, moduleID)
 
+	if err := r.savePackages(); err != nil {
+		return fmt.Errorf("save packages: %w", err)
+	}
 	return r.saveDesiredState()
 }
 
@@ -191,6 +203,9 @@ func (r *Registry) InstallFromIPC(moduleID, serviceName, version, revision strin
 	// Auto-enable: the module process is already running.
 	r.desired[moduleID] = DesiredState{Enabled: true, UpdatedAt: time.Now()}
 
+	if err := r.savePackages(); err != nil {
+		return fmt.Errorf("save packages: %w", err)
+	}
 	return r.saveDesiredState()
 }
 
@@ -202,8 +217,61 @@ func (r *Registry) Uninstall(moduleID string) {
 
 	delete(r.packages, moduleID)
 	delete(r.desired, moduleID)
+	if err := r.savePackages(); err != nil {
+		log.Printf("registry: failed to save packages after uninstall: %v", err)
+	}
 	if err := r.saveDesiredState(); err != nil {
 		log.Printf("registry: failed to save desired state after uninstall: %v", err)
+	}
+}
+
+// packagesPath returns the path to the packages persistence file.
+func (r *Registry) packagesPath() string {
+	return filepath.Join(r.dataDir, "packages.json")
+}
+
+// loadPackages loads installed package metadata from disk.
+func (r *Registry) loadPackages() error {
+	data, err := os.ReadFile(r.packagesPath())
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil // No packages file yet.
+		}
+		return err
+	}
+	return json.Unmarshal(data, &r.packages)
+}
+
+// savePackages persists installed package metadata to disk atomically.
+func (r *Registry) savePackages() error {
+	data, err := json.MarshalIndent(r.packages, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal packages: %w", err)
+	}
+
+	// Write to a temp file and rename for atomicity.
+	tmp := r.packagesPath() + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		return fmt.Errorf("write temp file: %w", err)
+	}
+	if err := os.Rename(tmp, r.packagesPath()); err != nil {
+		os.Remove(tmp)
+		return fmt.Errorf("rename: %w", err)
+	}
+	return nil
+}
+
+// pruneOrphanDesiredState removes desired state entries that have no
+// corresponding package metadata. This keeps the two maps consistent
+// after a restart where packages.json may be missing or incomplete.
+func (r *Registry) pruneOrphanDesiredState() {
+	for id := range r.desired {
+		if _, ok := r.packages[id]; !ok {
+			delete(r.desired, id)
+		}
+	}
+	if err := r.saveDesiredState(); err != nil {
+		log.Printf("registry: failed to save desired state after prune: %v", err)
 	}
 }
 

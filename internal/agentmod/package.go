@@ -32,32 +32,32 @@ var semverRegexp = regexp.MustCompile(`^\d+\.\d+\.\d+(-[a-zA-Z0-9]+(\.[a-zA-Z0-9
 // the module manifest, executable, OpenAPI YAML, and optional UI assets.
 type Package struct {
 	// ModuleID is the reverse-DNS module identifier.
-	ModuleID string
+	ModuleID string `json:"module_id"`
 
 	// ServiceName is the human-readable service name.
-	ServiceName string
+	ServiceName string `json:"service_name"`
 
 	// ServiceVersion is the semantic version string.
-	ServiceVersion string
+	ServiceVersion string `json:"service_version"`
 
 	// Revision is an optional revision string.
-	Revision string
+	Revision string `json:"revision,omitempty"`
 
 	// Executable is the absolute path to the module executable.
-	Executable string
+	Executable string `json:"executable"`
 
 	// OpenAPIYAML is the raw OpenAPI v3 YAML content.
-	OpenAPIYAML []byte
+	OpenAPIYAML []byte `json:"openapi_yaml"`
 
 	// PackageDir is the directory containing the package files.
-	PackageDir string
+	PackageDir string `json:"package_dir"`
 
 	// UIDescriptors lists optional UI metadata for federation.
-	UIDescriptors []sdk.UIDescriptor
+	UIDescriptors []sdk.UIDescriptor `json:"ui_descriptors,omitempty"`
 
 	// AssetDigests maps relative asset paths to their SHA-256 digests.
 	// Populated during installation for trusted UI assets.
-	AssetDigests map[string]string
+	AssetDigests map[string]string `json:"asset_digests,omitempty"`
 }
 
 // Validate checks that the package fields are well-formed. It does not

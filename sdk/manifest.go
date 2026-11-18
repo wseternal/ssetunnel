@@ -157,21 +157,21 @@ const (
 type UIDescriptor struct {
 	// Kind is "provider" (module-owned UI) or "consumer" (server-local UI
 	// that consumes this module's API).
-	Kind UIKind
+	Kind UIKind `json:"kind"`
 
 	// RemoteName is the federation remote name (e.g. "com.example.mymodule").
-	RemoteName string
+	RemoteName string `json:"remote_name"`
 
 	// PageURL is the module page path within the console (e.g. "/modules/mymodule").
-	PageURL string
+	PageURL string `json:"page_url"`
 
 	// PackageDigest is the SHA-256 hex digest of the trusted UI package.
 	// Required for provider UIs; empty for consumer UIs (which use a local
 	// trust store entry).
-	PackageDigest string
+	PackageDigest string `json:"package_digest,omitempty"`
 
 	// AssetPaths lists the relative paths of all assets in the UI package.
-	AssetPaths []AssetEntry
+	AssetPaths []AssetEntry `json:"asset_paths,omitempty"`
 }
 
 // UIKind identifies whether a UI descriptor is a provider or consumer remote.
@@ -184,9 +184,9 @@ const (
 
 // AssetEntry is one file in a UI package with its expected size and digest.
 type AssetEntry struct {
-	Path   string // relative path within the package (e.g. "assets/index.js")
-	Size   int64  // file size in bytes
-	Digest string // SHA-256 hex digest of the file content
+	Path   string `json:"path"`   // relative path within the package (e.g. "assets/index.js")
+	Size   int64  `json:"size"`   // file size in bytes
+	Digest string `json:"digest"` // SHA-256 hex digest of the file content
 }
 
 // Validate checks that the UI descriptor fields are well-formed.
