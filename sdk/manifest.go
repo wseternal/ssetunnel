@@ -9,9 +9,10 @@ import (
 	"time"
 )
 
-// moduleIDRegexp validates a module ID: reverse-DNS, lowercase, max 128 chars.
+// ModuleIDRegexp validates a module ID: reverse-DNS, lowercase, max 128 chars.
 // Segments may contain hyphens (e.g. "com.example.ai-automation-proxy").
-var moduleIDRegexp = regexp.MustCompile(`^[a-z][a-z0-9]*(-[a-z0-9]+)*(\.[a-z][a-z0-9]*(-[a-z0-9]+)*)+$`)
+// This is the canonical definition used by both the SDK and internal packages.
+var ModuleIDRegexp = regexp.MustCompile(`^[a-z][a-z0-9]*(-[a-z0-9]+)*(\.[a-z][a-z0-9]*(-[a-z0-9]+)*)+$`)
 
 // MaxModuleIDLen caps a module ID at 128 characters.
 const MaxModuleIDLen = 128
@@ -78,7 +79,7 @@ func (m *Manifest) Validate() error {
 	if len(m.ModuleID) > MaxModuleIDLen {
 		return fmt.Errorf("module ID too long: %d characters (max %d)", len(m.ModuleID), MaxModuleIDLen)
 	}
-	if !moduleIDRegexp.MatchString(m.ModuleID) {
+	if !ModuleIDRegexp.MatchString(m.ModuleID) {
 		return fmt.Errorf("module ID %q is not a valid reverse-DNS identifier", m.ModuleID)
 	}
 	if m.ServiceName == "" {

@@ -22,9 +22,6 @@ import (
 	"github.com/wseternal/ssetunnel/sdk"
 )
 
-// moduleIDRegexp validates a module ID: reverse-DNS, lowercase, max 128 chars.
-var moduleIDRegexp = regexp.MustCompile(`^[a-z][a-z0-9]*(-[a-z0-9]+)*(\.[a-z][a-z0-9]*(-[a-z0-9]+)*)+$`)
-
 // semverRegexp validates a semantic version string (major.minor.patch with optional pre-release).
 var semverRegexp = regexp.MustCompile(`^\d+\.\d+\.\d+(-[a-zA-Z0-9]+(\.[a-zA-Z0-9]+)*)?$`)
 
@@ -69,7 +66,7 @@ func (p *Package) Validate() error {
 	if len(p.ModuleID) > moduleproto.MaxModuleIDLen {
 		return fmt.Errorf("module ID too long: %d characters (max %d)", len(p.ModuleID), moduleproto.MaxModuleIDLen)
 	}
-	if !moduleIDRegexp.MatchString(p.ModuleID) {
+	if !sdk.ModuleIDRegexp.MatchString(p.ModuleID) {
 		return fmt.Errorf("module ID %q is not a valid reverse-DNS identifier", p.ModuleID)
 	}
 	if p.ServiceName == "" {
