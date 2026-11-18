@@ -1,5 +1,21 @@
 # Changelog
 
+## [1.15.0](https://github.com/wseternal/ssetunnel/compare/v1.14.0...v1.15.0) (2026-11-18)
+
+
+### Features
+
+* ai automation proxy and data storage api ([#98](https://github.com/wseternal/ssetunnel/issues/98)) ([4dee56c](https://github.com/wseternal/ssetunnel/commit/4dee56ca65cd4c294fca638436b9f70be1784591))
+
+
+### Bug Fixes
+
+* detect externally running agents in cli ui ([#96](https://github.com/wseternal/ssetunnel/issues/96)) ([71baa8f](https://github.com/wseternal/ssetunnel/commit/71baa8f9b02523279aee0f5806f58cccfa411560))
+* **server:** add version subcommand ([#97](https://github.com/wseternal/ssetunnel/issues/97)) ([201eaf7](https://github.com/wseternal/ssetunnel/commit/201eaf7952aac56d077a48c1a5fe1762d0508e3f))
+* show service actions in --help for server, agent, and connect ([#95](https://github.com/wseternal/ssetunnel/issues/95)) ([1227e52](https://github.com/wseternal/ssetunnel/commit/1227e52235c6603eed6ea4ff493fec8ee50cb167))
+* tweak sign to wrap the `cli` bin ([6a255d3](https://github.com/wseternal/ssetunnel/commit/6a255d3f3c91ebc0ed3bb6dc41a1c2283c71ccbe))
+* tweaks on sse and console paths ([#92](https://github.com/wseternal/ssetunnel/issues/92)) ([7bb35e2](https://github.com/wseternal/ssetunnel/commit/7bb35e2fbbb33c767f92834ba3b5c8102d3d3c6c))
+
 ## [1.14.0](https://github.com/wseternal/ssetunnel/compare/v1.13.1...v1.14.0) (2026-11-07)
 
 
