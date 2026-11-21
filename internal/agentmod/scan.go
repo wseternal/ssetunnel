@@ -21,8 +21,15 @@ import (
 // package directory.
 const openAPIFileName = "openapi.yaml"
 
-// manifestProbeTimeout bounds how long one manifest probe may run.
-const manifestProbeTimeout = 10 * time.Second
+// manifestProbeTimeout bounds how long one manifest probe may run. A healthy
+// module prints one JSON line and exits, so the budget stays short: a probe
+// runs for every package during startup and reload, serially.
+const manifestProbeTimeout = 2 * time.Second
+
+// maxManifestBytes caps the manifest output a probed binary may write. The
+// identity is a single small JSON line, so anything larger is a broken package
+// not worth buffering in the agent process.
+const maxManifestBytes = 64 << 10
 
 // ScanModules registers module packages installed under dir. Each immediate
 // subdirectory holds one package: an executable and an openapi.yaml file. The
@@ -95,6 +102,15 @@ func samePackage(a, b *Package) bool {
 // readPackage builds a package from one installed module directory.
 func readPackage(dir string) (*Package, error) {
 	openapiPath := filepath.Join(dir, openAPIFileName)
+	// Check the size before reading so an oversized document never enters
+	// memory. The read path re-checks the length in case the file grew.
+	specInfo, err := os.Stat(openapiPath)
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", openapiPath, err)
+	}
+	if specInfo.Size() > moduleproto.MaxOpenAPISize {
+		return nil, fmt.Errorf("%s is too large: %d bytes (max %d)", openapiPath, specInfo.Size(), moduleproto.MaxOpenAPISize)
+	}
 	openapiYAML, err := os.ReadFile(openapiPath)
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", openapiPath, err)
@@ -181,18 +197,67 @@ func probeManifest(executable string) (*sdk.ManifestInfo, error) {
 		"HOME=" + os.Getenv("HOME"),
 	}
 
-	out, err := cmd.Output()
+	probe := &manifestWriter{}
+	cmd.Stdout = probe
+	stderr := &cappedBuffer{max: maxManifestBytes}
+	cmd.Stderr = stderr
+	// A module that leaves a child holding its stdout must not block the probe.
+	// WaitDelay closes the output pipe once the context has killed the process.
+	cmd.WaitDelay = time.Second
+
+	err := cmd.Run()
+	if probe.overflow {
+		return nil, fmt.Errorf("probe %s: manifest output exceeds %d bytes", executable, maxManifestBytes)
+	}
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, fmt.Errorf("probe %s: %w", executable, ctxErr)
+		}
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
-			return nil, fmt.Errorf("probe %s: %w: %s", executable, err, strings.TrimSpace(string(exitErr.Stderr)))
+			return nil, fmt.Errorf("probe %s: %w: %s", executable, err, strings.TrimSpace(stderr.buf.String()))
 		}
 		return nil, fmt.Errorf("probe %s: %w", executable, err)
 	}
 
 	var info sdk.ManifestInfo
-	if err := json.Unmarshal(out, &info); err != nil {
+	if err := json.Unmarshal(probe.buf.Bytes(), &info); err != nil {
 		return nil, fmt.Errorf("parse manifest from %s: %w", executable, err)
 	}
 	return &info, nil
+}
+
+// manifestWriter collects a probed binary's stdout and rejects output past
+// maxManifestBytes. A manifest is one small JSON line, so a larger stream is a
+// broken package.
+type manifestWriter struct {
+	buf      bytes.Buffer
+	overflow bool
+}
+
+func (w *manifestWriter) Write(p []byte) (int, error) {
+	if w.buf.Len()+len(p) > maxManifestBytes {
+		w.overflow = true
+		return 0, fmt.Errorf("manifest output exceeds %d bytes", maxManifestBytes)
+	}
+	return w.buf.Write(p)
+}
+
+// cappedBuffer keeps the first max bytes of output and drops the rest without
+// failing the write, so a noisy process cannot grow agent memory while its
+// exit status stays reportable.
+type cappedBuffer struct {
+	buf bytes.Buffer
+	max int
+}
+
+func (b *cappedBuffer) Write(p []byte) (int, error) {
+	written := len(p)
+	if room := b.max - b.buf.Len(); room > 0 {
+		if len(p) > room {
+			p = p[:room]
+		}
+		b.buf.Write(p)
+	}
+	return written, nil
 }

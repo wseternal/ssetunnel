@@ -125,6 +125,7 @@ tasks:
     desc: Run Go tests with race detector
     cmds:
       - go test -race -count=1 -timeout 120s ./...
+
   go:test:cover:
     desc: Run Go tests with coverage report
     cmds:

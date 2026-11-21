@@ -51,6 +51,8 @@ Builtin modules live under `cmd/modules/<name>/` in the repository. `task module
 
 At startup the agent scans `~/.ssetunnel/modules`. For each subdirectory it reads `openapi.yaml`, runs `<binary> -print-manifest`, registers the package, and enables it. A module that is already registered keeps its desired state.
 
+Placing a binary and its `openapi.yaml` in `~/.ssetunnel/modules/<name>/` is equivalent to installing the module. The agent picks it up on the next scan. An agent reload (SIGHUP) also rescans the directory, so a new package loads without a full restart.
+
 ### Registry and Desired State
 
 The registry tracks installed packages and their desired lifecycle state (enabled/disabled). State persists to `~/.ssetunnel/agent/desired_state.json` so modules restart after agent process restarts.
@@ -69,11 +71,13 @@ ssetunnel module stop com.example.weather
 ssetunnel module list
 ssetunnel module status com.example.weather
 
-# Uninstall: delete the package directory, then restart the agent
-rm -rf ~/.ssetunnel/modules/weather
+# Uninstall: unregister first, then delete the files
+ssetunnel module stop com.example.weather     # a running module must stop first
+ssetunnel module remove com.example.weather   # drops the registry entry
+rm -rf ~/.ssetunnel/modules/weather           # deletes the package directory
 ```
 
-An agent reload (SIGHUP) rescans the modules directory, so a new package loads without a full restart.
+`module remove` unregisters the module. Deleting the directory alone leaves a registry entry that the agent keeps trying to start, so always remove the entry first.
 
 ### Catalog Snapshots
 
