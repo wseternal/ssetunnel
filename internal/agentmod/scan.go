@@ -17,8 +17,8 @@ import (
 	"github.com/wseternal/ssetunnel/sdk"
 )
 
-// OpenAPIFileName is the OpenAPI document inside an installed module package
-// directory.
+// OpenAPIFileName is the OpenAPI document inside an installed module
+// package directory.
 const OpenAPIFileName = "openapi.yaml"
 
 // manifestProbeTimeout bounds how long one manifest probe may run.
@@ -58,6 +58,13 @@ func (r *Registry) ScanModules(dir string) ([]string, error) {
 
 		previous := r.Package(pkg.ModuleID)
 		if previous != nil && samePackage(previous, pkg) {
+			continue
+		}
+
+		// Same check as the CLI install path: reject symlinks that escape
+		// the package directory before the supervisor can start the binary.
+		if err := pkg.ValidateExecutable(); err != nil {
+			log.Printf("registry: skip module %s from %s: %v", pkg.ModuleID, pkgDir, err)
 			continue
 		}
 
