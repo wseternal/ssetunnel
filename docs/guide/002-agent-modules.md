@@ -4,6 +4,8 @@
 
 Agent modules extend the SSE tunnel with pluggable HTTP services that run as separate processes alongside the agent. Each module exposes an OpenAPI-defined HTTP API that consumers can invoke through the tunnel's secure transport.
 
+For the operational walkthrough — build and install the builtin packages, load them, verify, invoke, update, and troubleshoot — see [004-builtin-modules-quickstart.md](004-builtin-modules-quickstart.md).
+
 ## Architecture
 
 ```
