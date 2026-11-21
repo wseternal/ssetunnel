@@ -10,10 +10,14 @@
 //
 // The agent's supervisor starts this binary as a child process and provides
 // the IPC endpoint and credential via environment variables.
+//
+// The binary also answers sdk.ManifestFlag: the agent runs it that way to
+// learn the module identity when it scans the installed module directory.
 package main
 
 import (
 	"context"
+	_ "embed"
 	"flag"
 	"log"
 	"net/http"
@@ -26,7 +30,20 @@ import (
 	"github.com/wseternal/ssetunnel/sdk"
 )
 
+//go:embed openapi.yaml
+var openapiYAML []byte
+
 func main() {
+	m := sdk.Manifest{
+		ModuleID:       "com.wseternal.ai-automation-proxy",
+		ServiceName:    "ai-automation-proxy",
+		ServiceVersion: "0.1.0",
+		OpenAPIYAML:    openapiYAML,
+	}
+	if sdk.PrintManifest(m) {
+		return
+	}
+
 	log.SetFlags(log.Ltime | log.Lshortfile)
 
 	listenAddr := flag.String("listen", "127.0.0.1:9090", "extension long-poll server listen address")
@@ -50,14 +67,8 @@ func main() {
 	// Create the client API handler (served through SDK invocation).
 	clientHandler := aiproxy.NewClientHandler(jobs)
 
-	m := sdk.Manifest{
-		ModuleID:       "com.wseternal.ai-automation-proxy",
-		ServiceName:    "ai-automation-proxy",
-		ServiceVersion: "0.1.0",
-		OpenAPIYAML:    aiproxy.OpenAPIYAML,
-	}
-
 	log.Printf("aiproxy: starting module %s (extension server on %s)", m.ModuleID, *listenAddr)
+
 	if err := sdk.Serve(ctx, m, clientHandler); err != nil {
 		log.Fatalf("aiproxy: %v", err)
 	}

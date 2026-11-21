@@ -88,3 +88,7 @@ The agent captures recent `log.Printf` output into a bounded ring buffer (`logBu
 `Agent.SendTrace(streamID, eventType, ...)` sends diagnostic trace events via the control stream (`MsgTrace`). Non-blocking: drops if the control stream is unavailable (logs a warning on first drop per control stream cycle). Reserved for future shell and data stream lifecycle instrumentation.
 
 Shell sessions can enable verbose tracing (`Agent.Verbose`) which adds lifecycle and byte-count logging via `tracedReader`/`tracedWriter`/`tracedCopy` wrappers.
+
+## Modules
+
+`InitModules(ctx, dataDir)` builds the registry, IPC server, supervisor, and module manager. It then scans the directory next to the data directory (`~/.ssetunnel/modules` for the default data dir) with `Registry.ScanModules`, which registers and enables every installed package. `ReloadModules` (SIGHUP from the CLI) reloads the registry, rescans that directory, and reconciles the supervisor.

@@ -37,38 +37,43 @@ Consumer (SDK/HTTP)
 ### Module Package
 
 A module package is a directory containing:
-- `module.json` — manifest with ID, version, executable path
+- Executable binary — answers `-print-manifest` with its identity
 - `openapi.yaml` — OpenAPI v3.0 or v3.1 specification
-- Executable binary
 - Optional UI assets for federation
 
-```json
-{
-  "module_id": "com.example.weather",
-  "service_name": "Weather Service",
-  "service_version": "1.2.0",
-  "revision": "abc123",
-  "executable": "./weather-server"
-}
+Builtin modules live under `cmd/modules/<name>/` in the repository. `task modules:install` builds each one and installs it to `~/.ssetunnel/modules/<name>/`:
+
 ```
+~/.ssetunnel/modules/ai-automation-proxy/
+├── ai-automation-proxy     # binary, named after the directory
+└── openapi.yaml
+```
+
+At startup the agent scans `~/.ssetunnel/modules`. For each subdirectory it reads `openapi.yaml`, runs `<binary> -print-manifest`, registers the package, and enables it. A module that is already registered keeps its desired state.
 
 ### Registry and Desired State
 
 The registry tracks installed packages and their desired lifecycle state (enabled/disabled). State persists to `~/.ssetunnel/agent/desired_state.json` so modules restart after agent process restarts.
 
 ```bash
-# Install a module
-ssetunnel module install --package ./weather-module/
+# Build and install all builtin modules into ~/.ssetunnel/modules
+task modules:install
 
 # Enable (starts the process)
-ssetunnel module start weather
+ssetunnel module start com.example.weather
 
-# Disable (stops the process)  
-ssetunnel module stop weather
+# Disable (stops the process)
+ssetunnel module stop com.example.weather
 
-# Uninstall
-ssetunnel module remove weather
+# Inspect installed modules
+ssetunnel module list
+ssetunnel module status com.example.weather
+
+# Uninstall: delete the package directory, then restart the agent
+rm -rf ~/.ssetunnel/modules/weather
 ```
+
+An agent reload (SIGHUP) rescans the modules directory, so a new package loads without a full restart.
 
 ### Catalog Snapshots
 
@@ -132,27 +137,42 @@ Module authors implement a standard `http.Handler`:
 package main
 
 import (
+    "context"
+    _ "embed"
+    "log"
     "net/http"
+
     "github.com/wseternal/ssetunnel/sdk"
 )
 
+//go:embed openapi.yaml
+var openapiYAML []byte
+
 func main() {
-    manifest := &sdk.Manifest{
+    manifest := sdk.Manifest{
         ModuleID:       "com.example.weather",
-        ServiceName:    "Weather Service",
+        ServiceName:    "weather",
         ServiceVersion: "1.2.0",
+        OpenAPIYAML:    openapiYAML,
     }
-    
+
+    // Answer the agent's manifest probe, then serve.
+    if sdk.PrintManifest(manifest) {
+        return
+    }
+
     handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
         // Handle requests per OpenAPI spec
         w.Write([]byte(`{"temperature": 72}`))
     })
-    
+
     if err := sdk.Serve(context.Background(), manifest, handler); err != nil {
         log.Fatal(err)
     }
 }
 ```
+
+`PrintManifest` must run before flag parsing and before any other stdout output. The agent reads the identity from stdout.
 
 The SDK handles IPC connection, registration, health reporting, and asset serving.
 
@@ -229,11 +249,11 @@ The consumer's cached revision doesn't match the agent's current revision. Call 
 ### Agent Configuration
 
 ```bash
-# Install and enable modules
-ssetunnel module install --package ./modules/weather/
-ssetunnel module start com.example.weather
+# Install builtin modules into ~/.ssetunnel/modules
+task modules:install
 
-# Agent will publish catalog on next connect
+# Start the agent. It scans the modules directory and enables
+# every package it finds.
 ssetunnel agent --server https://tunnel.example.com --agent mybox
 ```
 

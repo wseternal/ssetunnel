@@ -83,6 +83,12 @@ func (m *ModuleManager) OnRegistryChange() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	// No control stream yet: OnConnect publishes the full snapshot, so a
+	// pre-connect change needs no separate publish.
+	if m.sendControl == nil {
+		return
+	}
+
 	m.pendingUpdate = true
 
 	// Coalesce updates: wait 100ms before publishing.

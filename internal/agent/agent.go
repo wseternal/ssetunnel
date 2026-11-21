@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -92,6 +93,8 @@ type Agent struct {
 	modRegistry   *agentmod.Registry
 	modIPC        *agentmod.IPCServer
 	modSupervisor *agentmod.Supervisor
+	// modulesDir holds the builtin module packages scanned at startup.
+	modulesDir string
 
 	// Data store forwarder correlates module data store requests with
 	// server responses through the control tunnel.
@@ -233,12 +236,36 @@ func (a *Agent) InitModules(ctx context.Context, dataDir string) error {
 		return json.Marshal(resp)
 	})
 
+	// Load builtin module packages installed next to the agent data
+	// directory (e.g. ~/.ssetunnel/modules). Each package is registered and
+	// enabled the first time it is seen.
+	a.modulesDir = filepath.Join(filepath.Dir(filepath.Clean(dataDir)), "modules")
+	a.loadModulePackages()
+
 	// Reconcile desired state: start enabled modules.
 	if err := supervisor.Reconcile(); err != nil {
 		log.Printf("agent: module reconcile: %v", err)
 	}
 
 	return nil
+}
+
+// loadModulePackages scans the modules directory, registers the packages it
+// finds, and publishes a catalog update when anything changed.
+func (a *Agent) loadModulePackages() {
+	if a.modulesDir == "" {
+		return
+	}
+	ids, err := a.modRegistry.ScanModules(a.modulesDir)
+	if err != nil {
+		log.Printf("agent: scan modules %s: %v", a.modulesDir, err)
+		return
+	}
+	if len(ids) == 0 {
+		return
+	}
+	log.Printf("agent: loaded %d module package(s) from %s", len(ids), a.modulesDir)
+	a.moduleManager.OnRegistryChange()
 }
 
 // ReloadModules re-reads module packages and desired state from disk,
@@ -252,6 +279,7 @@ func (a *Agent) ReloadModules() error {
 	if err := a.modRegistry.Reload(); err != nil {
 		return fmt.Errorf("reload registry: %w", err)
 	}
+	a.loadModulePackages()
 	if err := a.modSupervisor.Reconcile(); err != nil {
 		return fmt.Errorf("reconcile: %w", err)
 	}

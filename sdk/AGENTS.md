@@ -22,6 +22,9 @@ Module consumers discover and invoke modules through the tunnel server.
 ### Manifest (`manifest.go`)
 Module identity and validation. Reverse-DNS module IDs, OpenAPI YAML, UI descriptors.
 
+- `PrintManifest(m)` prints the module identity as JSON when the process was started with `-print-manifest`, and reports whether it printed. The agent uses it to register an installed package before it starts the module.
+- Module main functions call `PrintManifest` before flag parsing and before any other stdout output. The agent reads the identity from stdout.
+
 ### Errors (`errors.go`)
 Structured error types with HTTP status codes for consumer-facing error handling.
 

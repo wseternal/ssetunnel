@@ -54,8 +54,10 @@ go build -o ./build/server ./cmd/server
 go build -o ./build/cli ./cmd/cli
 
 # Build the AI automation proxy module
-go build -o ./build/ai-automation-proxy ./cmd/ai-automation-proxy
+go build -o ./build/ai-automation-proxy ./cmd/modules/ai-automation-proxy
 ```
+
+To build and install every builtin module in one step, run `task modules:install`.
 
 ---
 
@@ -204,14 +206,15 @@ go run /tmp/test-datastore.go
 ### 4.1 Install the Module
 
 ```bash
-# Copy the proxy binary to a location the agent can find
-cp ./build/ai-automation-proxy ~/.ssetunnel/agent/modules/
+# Build and install every builtin module. Each module lands in its own
+# directory under ~/.ssetunnel/modules, with the binary and openapi.yaml:
+#   ~/.ssetunnel/modules/ai-automation-proxy/ai-automation-proxy
+#   ~/.ssetunnel/modules/ai-automation-proxy/openapi.yaml
+task modules:install
 
-# Or register via the agent's module install command:
-./build/cli module install \
-  --agent-id test-agent \
-  --module-id com.wseternal.ai-automation-proxy \
-  --executable /path/to/build/ai-automation-proxy
+# The agent scans ~/.ssetunnel/modules at startup and enables every
+# package it finds. Restart the agent, or reload it with SIGHUP:
+./build/cli agent restart
 ```
 
 ### 4.2 Start the Module Manually

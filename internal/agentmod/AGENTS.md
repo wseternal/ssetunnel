@@ -18,6 +18,13 @@ Persistent module registry backed by JSON file in agent data dir. Tracks install
 - `InstallFromIPC()` also validates OpenAPI (modules registering via IPC get the same validation).
 - `Supervisor` manages module process lifecycle with exponential backoff restart (500ms → 30s with jitter).
 
+### Module Scan (`scan.go`)
+`Registry.ScanModules(dir)` registers packages installed under a directory, one subdirectory per package. Each package holds an executable and `openapi.yaml`.
+
+- The scanner runs `<binary> -print-manifest` to read the module identity. Module IDs come from the binary, never from a manifest file.
+- A package found for the first time is installed and enabled. A registered package keeps its desired state, so an explicit stop survives an agent restart.
+- A broken package is logged and skipped, and the other packages still load.
+
 ### OpenAPI Validation (`openapi.go`)
 Parses and validates OpenAPI v3.0/v3.1 YAML. Extracts operations, rejects external `$ref` and path traversal.
 
