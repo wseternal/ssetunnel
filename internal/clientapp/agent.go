@@ -218,28 +218,19 @@ const statusFileMaxAge = 7 * 24 * time.Hour
 // The expected payload is ~200 bytes; 4 KiB provides ample headroom.
 const statusFileMaxBytes = 4096
 
-// agentStatusPath caches the status file path so os.UserHomeDir is
-// resolved once per process lifetime.
-var (
-	agentStatusPath     string
-	agentStatusPathOnce sync.Once
-	agentStatusPathErr  error
-)
-
 // agentStatusFilePath returns ~/.ssetunnel/ssetunnel-agent.json.
 // This mirrors the service PID file location (~/.ssetunnel/ssetunnel-agent.pid)
 // but carries additional config fields for the UI to display.
+// The home directory is resolved on every call. HOME can change during a
+// process lifetime, and a cached path would keep writing to the directory
+// that was current when the first caller ran.
 // Returns an error when the home directory is unavailable (no /tmp fallback).
 func agentStatusFilePath() (string, error) {
-	agentStatusPathOnce.Do(func() {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			agentStatusPathErr = fmt.Errorf("cannot determine home directory: %w", err)
-			return
-		}
-		agentStatusPath = filepath.Join(home, ".ssetunnel", "ssetunnel-agent.json")
-	})
-	return agentStatusPath, agentStatusPathErr
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("cannot determine home directory: %w", err)
+	}
+	return filepath.Join(home, ".ssetunnel", "ssetunnel-agent.json"), nil
 }
 
 func writeAgentStatusFile(path string, info AgentStatusInfo) {
