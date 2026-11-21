@@ -17,9 +17,9 @@ import (
 	"github.com/wseternal/ssetunnel/sdk"
 )
 
-// OpenAPIFileName is the OpenAPI document inside an installed module
+// openAPIFileName is the OpenAPI document inside an installed module
 // package directory.
-const OpenAPIFileName = "openapi.yaml"
+const openAPIFileName = "openapi.yaml"
 
 // manifestProbeTimeout bounds how long one manifest probe may run.
 const manifestProbeTimeout = 10 * time.Second
@@ -94,7 +94,7 @@ func samePackage(a, b *Package) bool {
 
 // readPackage builds a package from one installed module directory.
 func readPackage(dir string) (*Package, error) {
-	openapiPath := filepath.Join(dir, OpenAPIFileName)
+	openapiPath := filepath.Join(dir, openAPIFileName)
 	openapiYAML, err := os.ReadFile(openapiPath)
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", openapiPath, err)
@@ -143,7 +143,7 @@ func findExecutable(dir string) (string, error) {
 
 	var candidates []string
 	for _, entry := range entries {
-		if entry.IsDir() || entry.Name() == OpenAPIFileName || strings.HasPrefix(entry.Name(), ".") {
+		if entry.IsDir() || entry.Name() == openAPIFileName || strings.HasPrefix(entry.Name(), ".") {
 			continue
 		}
 		path := filepath.Join(dir, entry.Name())
