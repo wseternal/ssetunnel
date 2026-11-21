@@ -49,6 +49,14 @@ type Package struct {
 	// PackageDir is the directory containing the package files.
 	PackageDir string `json:"package_dir"`
 
+	// BinarySize and BinaryModTime record the executable's size and
+	// modification time in Unix nanoseconds when the package was registered.
+	// Scanning compares them with the file on disk and reuses the recorded
+	// identity when both match, so an unchanged package is not executed
+	// again on every startup and reload.
+	BinarySize    int64 `json:"binary_size,omitempty"`
+	BinaryModTime int64 `json:"binary_mtime,omitempty"`
+
 	// UIDescriptors lists optional UI metadata for federation.
 	UIDescriptors []sdk.UIDescriptor `json:"ui_descriptors,omitempty"`
 
@@ -126,8 +134,8 @@ func (p *Package) ValidateExecutable() error {
 	if info.IsDir() {
 		return fmt.Errorf("executable is a directory")
 	}
-	if info.Mode()&0o111 == 0 {
-		return fmt.Errorf("executable is not executable")
+	if err := validateExecutableMode(p.Executable, info); err != nil {
+		return err
 	}
 
 	// Reject symlinked executables (C9 fix: prevent arbitrary code execution).
@@ -149,6 +157,25 @@ func (p *Package) ValidateExecutable() error {
 		return fmt.Errorf("executable is outside package directory (after symlink resolution)")
 	}
 	return nil
+}
+
+// stampBinary records the executable's size and modification time so a later
+// scan can tell whether the file changed without running it. A stat failure
+// leaves the fields at zero, and zero means "unknown", so the next scan probes
+// the package rather than trusting a stale record.
+func (p *Package) stampBinary() {
+	info, err := os.Stat(p.Executable)
+	if err != nil {
+		return
+	}
+	p.BinarySize = info.Size()
+	p.BinaryModTime = info.ModTime().UnixNano()
+}
+
+// binaryUnchanged reports whether the executable still matches the recorded
+// size and modification time. Zero recorded metadata counts as a mismatch.
+func (p *Package) binaryUnchanged(size, modTime int64) bool {
+	return p.BinarySize != 0 && p.BinarySize == size && p.BinaryModTime == modTime
 }
 
 // isSubPath checks that child is a sub-path of parent (no symlink traversal).

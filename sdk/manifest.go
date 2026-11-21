@@ -3,7 +3,9 @@ package sdk
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"os"
 	"regexp"
 	"strings"
 	"time"
@@ -242,4 +244,55 @@ func (a *AssetEntry) Validate() error {
 func DigestAsset(content []byte) string {
 	h := sha256.Sum256(content)
 	return hex.EncodeToString(h[:])
+}
+
+// ManifestFlag asks a module binary to print its manifest identity as JSON
+// and exit. The agent uses it to register an installed module package before
+// it starts the module process.
+const ManifestFlag = "-print-manifest"
+
+// ManifestInfo is the module identity that a binary prints for ManifestFlag.
+// The OpenAPI document stays in the package's openapi.yaml file.
+type ManifestInfo struct {
+	ModuleID       string `json:"module_id"`
+	ServiceName    string `json:"service_name"`
+	ServiceVersion string `json:"service_version"`
+	Revision       string `json:"revision,omitempty"`
+}
+
+// PrintManifest prints m as one JSON line when the process was started with
+// ManifestFlag. It reports whether it printed, so a module main function can
+// exit at once:
+//
+//	if sdk.PrintManifest(m) {
+//	    return
+//	}
+//
+// Call it before flag parsing and before any other stdout output, because the
+// agent reads the manifest from stdout.
+func PrintManifest(m Manifest) bool {
+	if !hasManifestFlag(os.Args[1:]) {
+		return false
+	}
+	info := ManifestInfo{
+		ModuleID:       m.ModuleID,
+		ServiceName:    m.ServiceName,
+		ServiceVersion: m.ServiceVersion,
+		Revision:       m.Revision,
+	}
+	if err := json.NewEncoder(os.Stdout).Encode(info); err != nil {
+		fmt.Fprintf(os.Stderr, "sdk: print manifest: %v\n", err)
+	}
+	return true
+}
+
+// hasManifestFlag reports whether args contain the manifest flag in either
+// the single-dash or double-dash form.
+func hasManifestFlag(args []string) bool {
+	for _, arg := range args {
+		if arg == ManifestFlag || arg == "-"+ManifestFlag {
+			return true
+		}
+	}
+	return false
 }

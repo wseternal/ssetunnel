@@ -33,6 +33,7 @@ func RunAgent(ctx context.Context, args []string) error {
 	compress := fs.Bool("compress", false, "negotiate gzip-per-batch upstream encoding")
 	noAutoTune := fs.Bool("no-auto-tune", false, "disable server auto-tuning (keep static CLI flags)")
 	verbose := fs.Bool("verbose", false, "enable detailed shell/control tracing logs")
+	moduleProbeTimeout := fs.Duration("module-probe-timeout", 0, "budget for one module manifest probe during a scan (0 = 2s default)")
 	base := command.AcceptDeprecatedBaseFlag(fs)
 
 	if err := fs.Parse(args); err != nil {
@@ -61,6 +62,8 @@ func RunAgent(ctx context.Context, args []string) error {
 		Verbose:     *verbose,
 		Version:     command.BuildVersion(),
 		DataDir:     dataDir,
+
+		ModuleProbeTimeout: *moduleProbeTimeout,
 	})
 }
 

@@ -58,6 +58,9 @@ type AgentConfig struct {
 	Version string
 	// DataDir is the agent data directory for module storage.
 	DataDir string
+	// ModuleProbeTimeout bounds one module manifest probe during a scan.
+	// Zero uses the agentmod default.
+	ModuleProbeTimeout time.Duration
 }
 
 // RunAgent starts the agent with the given configuration and blocks until
@@ -155,17 +158,18 @@ func RunAgent(ctx context.Context, cfg AgentConfig) error {
 	}
 
 	ag := &agent.Agent{
-		ServerURL:       sess.URL,
-		Target:          cfg.Target,
-		AgentID:         cfg.AgentID,
-		Token:           sess.Token,
-		RequestModifier: reqMod,
-		BatchSize:       batch,
-		Concurrency:     conc,
-		Compress:        cfg.Compress,
-		NoAutoTune:      cfg.NoAutoTune,
-		Verbose:         cfg.Verbose,
-		OnTokenRefresh:  refreshFn,
+		ServerURL:          sess.URL,
+		Target:             cfg.Target,
+		AgentID:            cfg.AgentID,
+		Token:              sess.Token,
+		RequestModifier:    reqMod,
+		BatchSize:          batch,
+		Concurrency:        conc,
+		Compress:           cfg.Compress,
+		NoAutoTune:         cfg.NoAutoTune,
+		Verbose:            cfg.Verbose,
+		OnTokenRefresh:     refreshFn,
+		ModuleProbeTimeout: cfg.ModuleProbeTimeout,
 	}
 
 	dataDir := cfg.DataDir
@@ -218,28 +222,19 @@ const statusFileMaxAge = 7 * 24 * time.Hour
 // The expected payload is ~200 bytes; 4 KiB provides ample headroom.
 const statusFileMaxBytes = 4096
 
-// agentStatusPath caches the status file path so os.UserHomeDir is
-// resolved once per process lifetime.
-var (
-	agentStatusPath     string
-	agentStatusPathOnce sync.Once
-	agentStatusPathErr  error
-)
-
 // agentStatusFilePath returns ~/.ssetunnel/ssetunnel-agent.json.
 // This mirrors the service PID file location (~/.ssetunnel/ssetunnel-agent.pid)
 // but carries additional config fields for the UI to display.
+// The home directory is resolved on every call. HOME can change during a
+// process lifetime, and a cached path would keep writing to the directory
+// that was current when the first caller ran.
 // Returns an error when the home directory is unavailable (no /tmp fallback).
 func agentStatusFilePath() (string, error) {
-	agentStatusPathOnce.Do(func() {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			agentStatusPathErr = fmt.Errorf("cannot determine home directory: %w", err)
-			return
-		}
-		agentStatusPath = filepath.Join(home, ".ssetunnel", "ssetunnel-agent.json")
-	})
-	return agentStatusPath, agentStatusPathErr
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("cannot determine home directory: %w", err)
+	}
+	return filepath.Join(home, ".ssetunnel", "ssetunnel-agent.json"), nil
 }
 
 func writeAgentStatusFile(path string, info AgentStatusInfo) {

@@ -18,11 +18,20 @@ Persistent module registry backed by JSON file in agent data dir. Tracks install
 - `InstallFromIPC()` also validates OpenAPI (modules registering via IPC get the same validation).
 - `Supervisor` manages module process lifecycle with exponential backoff restart (500ms → 30s with jitter).
 
+### Module Scan (`scan.go`)
+`Registry.ScanModules(dir)` registers packages installed under a directory, one subdirectory per package. Each package holds an executable and `openapi.yaml`.
+
+- The scanner runs `<binary> -print-manifest` to read the module identity. Module IDs come from the binary, never from a manifest file.
+- A probed package records the executable's size and mtime (`binary_size`, `binary_mtime` in `packages.json`). A later scan whose stat and spec match reuses that record instead of probing again; any difference re-probes. Comparison is stat-based, so a replacement that preserves both size and mtime is invisible.
+- The probe budget defaults to 2 s and is overridable per registry (`SetManifestProbeTimeout`, `--module-probe-timeout` on the agent). Output past 64 KiB cancels the probe immediately; a child holding the output pipe adds up to the 1 s `cmd.WaitDelay` after a kill.
+- A package found for the first time is installed and enabled. A registered package keeps its desired state, so an explicit stop survives an agent restart.
+- A broken package is logged and skipped, and the other packages still load. `openapi.yaml` must be a regular file, not a symlink.
+
 ### OpenAPI Validation (`openapi.go`)
 Parses and validates OpenAPI v3.0/v3.1 YAML. Extracts operations, rejects external `$ref` and path traversal.
 
 ### Package (`package.go`)
-Module package metadata with `ValidateExecutable()` — rejects symlinks escaping the package directory.
+Module package metadata with `ValidateExecutable()` — rejects symlinks escaping the package directory. The executability check is platform-specific (`executable_unix.go`, `executable_windows.go`): the permission bit on Unix, the `.exe` extension on Windows.
 
 ## Platform Notes
 - Unix: IPC via Unix domain sockets at `<datadir>/module.sock`.
