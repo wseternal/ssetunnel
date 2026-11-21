@@ -37,7 +37,7 @@ Consumer (SDK/HTTP)
 ### Module Package
 
 A module package is a directory containing:
-- Executable binary — answers `-print-manifest` with its identity (on Windows the file must end in `.exe`, because Windows has no executable bit to check)
+- Executable binary — answers `-print-manifest` with its identity, as a regular file (a symlink is refused). On Windows the file must end in `.exe`, because Windows has no executable bit to check
 - `openapi.yaml` — OpenAPI v3.0 or v3.1 specification, as a regular file (a symlink is refused)
 - Optional UI assets for federation
 

@@ -3,6 +3,7 @@ package agentmod
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -57,7 +58,13 @@ func TestPackageValidate(t *testing.T) {
 
 func TestPackageValidateExecutable(t *testing.T) {
 	dir := t.TempDir()
-	exe := filepath.Join(dir, "mymodule")
+	// Windows rejects a binary only by extension, so the valid case needs one
+	// there; the same name with mode 0755 stays valid on Unix.
+	name := "mymodule"
+	if runtime.GOOS == "windows" {
+		name = "mymodule.exe"
+	}
+	exe := filepath.Join(dir, name)
 	if err := os.WriteFile(exe, []byte("#!/bin/sh\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}

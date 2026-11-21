@@ -141,9 +141,18 @@ func readPackageFiles(dir string) (*packageFiles, error) {
 	if err != nil {
 		return nil, err
 	}
-	info, err := os.Stat(executable)
+	// The executable must be a regular file, for the same reason as the spec.
+	// Lstat also supplies the size and mtime the skip rule compares, so the
+	// recorded identity describes the file itself rather than a link target.
+	info, err := os.Lstat(executable)
 	if err != nil {
 		return nil, fmt.Errorf("stat %s: %w", executable, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("%s is a symlink (not allowed)", executable)
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s is not a regular file", executable)
 	}
 
 	return &packageFiles{

@@ -25,7 +25,7 @@ Persistent module registry backed by JSON file in agent data dir. Tracks install
 - A probed package records the executable's size and mtime (`binary_size`, `binary_mtime` in `packages.json`). A later scan whose stat and spec match reuses that record instead of probing again; any difference re-probes. Comparison is stat-based, so a replacement that preserves both size and mtime is invisible.
 - The probe budget defaults to 2 s and is overridable per registry (`SetManifestProbeTimeout`, `--module-probe-timeout` on the agent). Output past 64 KiB cancels the probe immediately; a child holding the output pipe adds up to the 1 s `cmd.WaitDelay` after a kill.
 - A package found for the first time is installed and enabled. A registered package keeps its desired state, so an explicit stop survives an agent restart.
-- A broken package is logged and skipped, and the other packages still load. `openapi.yaml` must be a regular file, not a symlink.
+- A broken package is logged and skipped, and the other packages still load. Both the executable and `openapi.yaml` must be regular files; symlinks are refused before the probe runs.
 
 ### OpenAPI Validation (`openapi.go`)
 Parses and validates OpenAPI v3.0/v3.1 YAML. Extracts operations, rejects external `$ref` and path traversal.
