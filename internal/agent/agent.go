@@ -59,6 +59,10 @@ type Agent struct {
 	// channel activity. Useful for diagnosing cloud shell issues.
 	Verbose bool
 
+	// ModuleProbeTimeout bounds one manifest probe during a module scan.
+	// Zero uses the agentmod default of 2 s.
+	ModuleProbeTimeout time.Duration
+
 	// OnTokenRefresh, when set, is called before each reconnect attempt
 	// to refresh the session token. It returns the new raw token or an
 	// error. On success the agent's Token field is updated; on failure
@@ -165,6 +169,7 @@ func (a *Agent) InitModules(ctx context.Context, dataDir string) error {
 	if err != nil {
 		return fmt.Errorf("create registry: %w", err)
 	}
+	registry.SetManifestProbeTimeout(a.ModuleProbeTimeout)
 
 	ipc, err := agentmod.NewIPCServer()
 	if err != nil {

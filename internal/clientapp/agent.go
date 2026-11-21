@@ -58,6 +58,9 @@ type AgentConfig struct {
 	Version string
 	// DataDir is the agent data directory for module storage.
 	DataDir string
+	// ModuleProbeTimeout bounds one module manifest probe during a scan.
+	// Zero uses the agentmod default.
+	ModuleProbeTimeout time.Duration
 }
 
 // RunAgent starts the agent with the given configuration and blocks until
@@ -155,17 +158,18 @@ func RunAgent(ctx context.Context, cfg AgentConfig) error {
 	}
 
 	ag := &agent.Agent{
-		ServerURL:       sess.URL,
-		Target:          cfg.Target,
-		AgentID:         cfg.AgentID,
-		Token:           sess.Token,
-		RequestModifier: reqMod,
-		BatchSize:       batch,
-		Concurrency:     conc,
-		Compress:        cfg.Compress,
-		NoAutoTune:      cfg.NoAutoTune,
-		Verbose:         cfg.Verbose,
-		OnTokenRefresh:  refreshFn,
+		ServerURL:          sess.URL,
+		Target:             cfg.Target,
+		AgentID:            cfg.AgentID,
+		Token:              sess.Token,
+		RequestModifier:    reqMod,
+		BatchSize:          batch,
+		Concurrency:        conc,
+		Compress:           cfg.Compress,
+		NoAutoTune:         cfg.NoAutoTune,
+		Verbose:            cfg.Verbose,
+		OnTokenRefresh:     refreshFn,
+		ModuleProbeTimeout: cfg.ModuleProbeTimeout,
 	}
 
 	dataDir := cfg.DataDir

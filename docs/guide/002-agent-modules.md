@@ -37,8 +37,8 @@ Consumer (SDK/HTTP)
 ### Module Package
 
 A module package is a directory containing:
-- Executable binary — answers `-print-manifest` with its identity
-- `openapi.yaml` — OpenAPI v3.0 or v3.1 specification
+- Executable binary — answers `-print-manifest` with its identity (on Windows the file must end in `.exe`, because Windows has no executable bit to check)
+- `openapi.yaml` — OpenAPI v3.0 or v3.1 specification, as a regular file (a symlink is refused)
 - Optional UI assets for federation
 
 Builtin modules live under `cmd/modules/<name>/` in the repository. `task modules:install` builds each one and installs it to `~/.ssetunnel/modules/<name>/`:
@@ -49,9 +49,11 @@ Builtin modules live under `cmd/modules/<name>/` in the repository. `task module
 └── openapi.yaml
 ```
 
-At startup the agent scans `~/.ssetunnel/modules`. For each subdirectory it reads `openapi.yaml`, runs `<binary> -print-manifest`, registers the package, and enables it. A module that is already registered keeps its desired state.
+At startup the agent scans `~/.ssetunnel/modules`. For each subdirectory it reads `openapi.yaml` and stats the binary. A package whose binary size, modification time, and spec are unchanged since it was registered keeps its recorded identity and is not executed again. A new or changed package is run with `-print-manifest` and then registered. On first registration the package is enabled; an already-registered module keeps its desired state.
 
-Placing a binary and its `openapi.yaml` in `~/.ssetunnel/modules/<name>/` is equivalent to installing the module. The agent picks it up on the next scan. An agent reload (SIGHUP) also rescans the directory, so a new package loads without a full restart.
+Placing a binary and its `openapi.yaml` in `~/.ssetunnel/modules/<name>/` is equivalent to installing the module. The agent picks it up on the next scan. An agent reload (SIGHUP) also rescans the directory, so a new package loads without a full restart. `task modules:install` replaces the binary, which changes its modification time, so the next scan probes it again. The comparison uses size and modification time only; a binary replaced in place with both preserved would be missed.
+
+Each probe gets 2 seconds. A module that needs longer on a cold start (Gatekeeper assessment, cold page cache) is skipped with a log line and retried on the next scan; raise the budget with `cli agent --module-probe-timeout 5s`. A probe that writes more than 64 KiB is rejected and cancelled without waiting out the budget.
 
 ### Registry and Desired State
 

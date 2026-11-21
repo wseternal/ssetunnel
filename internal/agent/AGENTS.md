@@ -91,4 +91,4 @@ Shell sessions can enable verbose tracing (`Agent.Verbose`) which adds lifecycle
 
 ## Modules
 
-`InitModules(ctx, dataDir)` builds the registry, IPC server, supervisor, and module manager. It then scans the directory next to the data directory (`~/.ssetunnel/modules` for the default data dir) with `Registry.ScanModules`, which registers and enables every installed package. `ReloadModules` (SIGHUP from the CLI) reloads the registry, rescans that directory, and reconciles the supervisor.
+`InitModules(ctx, dataDir)` builds the registry, IPC server, supervisor, and module manager. It applies `Agent.ModuleProbeTimeout` to the registry, then scans the directory next to the data directory (`~/.ssetunnel/modules` for the default data dir) with `Registry.ScanModules`, which registers and enables every installed package. `ReloadModules` (SIGHUP from the CLI) reloads the registry, rescans that directory, and reconciles the supervisor.

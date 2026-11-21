@@ -19,13 +19,16 @@ import (
 type Registry struct {
 	mu       sync.RWMutex
 	dataDir  string
-	packages map[string]*Package    // moduleID → installed package
+	packages map[string]*Package     // moduleID → installed package
 	desired  map[string]DesiredState // moduleID → enabled/disabled
+	// probeTimeout is the budget for one manifest probe during a scan.
+	// Zero means defaultManifestProbeTimeout.
+	probeTimeout time.Duration
 }
 
 // DesiredState represents the user's desired state for a module.
 type DesiredState struct {
-	Enabled bool      `json:"enabled"`
+	Enabled   bool      `json:"enabled"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
@@ -52,6 +55,42 @@ func NewRegistry(dataDir string) (*Registry, error) {
 	return r, nil
 }
 
+// SetManifestProbeTimeout sets the budget for one manifest probe during a
+// scan. Values of zero or below restore the default.
+func (r *Registry) SetManifestProbeTimeout(d time.Duration) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if d <= 0 {
+		d = defaultManifestProbeTimeout
+	}
+	r.probeTimeout = d
+}
+
+// manifestProbeBudget returns the probe budget, falling back to the default
+// when the registry was not configured.
+func (r *Registry) manifestProbeBudget() time.Duration {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.probeTimeout <= 0 {
+		return defaultManifestProbeTimeout
+	}
+	return r.probeTimeout
+}
+
+// packageForPath returns the registered package whose executable and package
+// directory match the given paths, or nil. Scanning uses it to recognize an
+// already-registered package before probing it.
+func (r *Registry) packageForPath(packageDir, executable string) *Package {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for _, pkg := range r.packages {
+		if pkg.PackageDir == packageDir && pkg.Executable == executable {
+			return pkg
+		}
+	}
+	return nil
+}
+
 // Install registers a new module package. The package is validated and
 // its OpenAPI YAML is parsed. If a package with the same module ID already
 // exists, it is replaced (version upgrade).
@@ -62,6 +101,9 @@ func (r *Registry) Install(pkg *Package) error {
 	if _, err := ValidateOpenAPI(pkg.OpenAPIYAML); err != nil {
 		return fmt.Errorf("validate openapi: %w", err)
 	}
+	// Record the executable's size and mtime so the next scan can skip the
+	// manifest probe while the file stays unchanged.
+	pkg.stampBinary()
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -399,24 +441,24 @@ func (r *Registry) saveDesiredState() error {
 // modules, stops disabled ones, and restarts crashed modules with jittered
 // backoff.
 type Supervisor struct {
-	mu       sync.Mutex
-	registry *Registry
-	ipc      *IPCServer
+	mu        sync.Mutex
+	registry  *Registry
+	ipc       *IPCServer
 	processes map[string]*ProcessHandle
 	restarts  map[string]int // cumulative restart count per module ID
-	ctx      context.Context
-	cancel   context.CancelFunc
-	wg       sync.WaitGroup
+	ctx       context.Context
+	cancel    context.CancelFunc
+	wg        sync.WaitGroup
 }
 
 // ProcessHandle tracks a running module process.
 type ProcessHandle struct {
-	ModuleID   string
-	Package    *Package
-	Process    *os.Process
-	StartedAt  time.Time
-	LastExit   time.Time
-	cancel     context.CancelFunc
+	ModuleID  string
+	Package   *Package
+	Process   *os.Process
+	StartedAt time.Time
+	LastExit  time.Time
+	cancel    context.CancelFunc
 }
 
 // NewSupervisor creates a supervisor that manages processes for the given

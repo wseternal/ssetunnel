@@ -21,10 +21,12 @@ import (
 // package directory.
 const openAPIFileName = "openapi.yaml"
 
-// manifestProbeTimeout bounds how long one manifest probe may run. A healthy
-// module prints one JSON line and exits, so the budget stays short: a probe
-// runs for every package during startup and reload, serially.
-const manifestProbeTimeout = 2 * time.Second
+// defaultManifestProbeTimeout bounds how long one manifest probe may run. A
+// healthy module prints one JSON line and exits, so the budget stays short: a
+// probe runs for every package whose files changed during startup and reload,
+// serially. The agent can raise it with --module-probe-timeout when a module
+// needs longer on a cold start.
+const defaultManifestProbeTimeout = 2 * time.Second
 
 // maxManifestBytes caps the manifest output a probed binary may write. The
 // identity is a single small JSON line, so anything larger is a broken package
@@ -35,10 +37,11 @@ const maxManifestBytes = 64 << 10
 // subdirectory holds one package: an executable and an openapi.yaml file. The
 // executable prints its identity for sdk.ManifestFlag.
 //
-// A package found for the first time is enabled. A package that is already
-// registered keeps its desired state, so an explicit stop survives an agent
-// restart. A broken package is logged and skipped, and the other packages
-// still load.
+// A package whose executable and spec are unchanged since it was registered
+// keeps its recorded identity and is not executed again. A package found for
+// the first time is enabled. A package that is already registered keeps its
+// desired state, so an explicit stop survives an agent restart. A broken
+// package is logged and skipped, and the other packages still load.
 //
 // The returned IDs list the packages that were installed or updated.
 func (r *Registry) ScanModules(dir string) ([]string, error) {
@@ -57,7 +60,22 @@ func (r *Registry) ScanModules(dir string) ([]string, error) {
 		}
 
 		pkgDir := filepath.Join(dir, entry.Name())
-		pkg, err := readPackage(pkgDir)
+		files, err := readPackageFiles(pkgDir)
+		if err != nil {
+			log.Printf("registry: skip module package %s: %v", pkgDir, err)
+			continue
+		}
+
+		// Reuse the registered package when the files on disk are unchanged.
+		// The probe is a child process per package on every startup and
+		// reload, so it is worth avoiding when the answer cannot differ.
+		if previous := r.packageForPath(files.dir, files.executable); previous != nil &&
+			previous.binaryUnchanged(files.size, files.modTime) &&
+			bytes.Equal(previous.OpenAPIYAML, files.openapiYAML) {
+			continue
+		}
+
+		pkg, err := files.probe(r.manifestProbeBudget())
 		if err != nil {
 			log.Printf("registry: skip module package %s: %v", pkgDir, err)
 			continue
@@ -96,17 +114,60 @@ func samePackage(a, b *Package) bool {
 		a.Revision == b.Revision &&
 		a.Executable == b.Executable &&
 		a.PackageDir == b.PackageDir &&
+		a.BinarySize == b.BinarySize &&
+		a.BinaryModTime == b.BinaryModTime &&
 		bytes.Equal(a.OpenAPIYAML, b.OpenAPIYAML)
 }
 
-// readPackage builds a package from one installed module directory.
-func readPackage(dir string) (*Package, error) {
+// packageFiles holds the on-disk facts about one package directory. Reading
+// them costs one small file read and two stats, and never runs the module.
+type packageFiles struct {
+	dir         string
+	executable  string
+	size        int64
+	modTime     int64
+	openapiYAML []byte
+}
+
+// readPackageFiles collects the spec and locates the executable of one
+// installed module directory.
+func readPackageFiles(dir string) (*packageFiles, error) {
+	openapiYAML, err := readOpenAPI(dir)
+	if err != nil {
+		return nil, err
+	}
+
+	executable, err := findExecutable(dir)
+	if err != nil {
+		return nil, err
+	}
+	info, err := os.Stat(executable)
+	if err != nil {
+		return nil, fmt.Errorf("stat %s: %w", executable, err)
+	}
+
+	return &packageFiles{
+		dir:         dir,
+		executable:  executable,
+		size:        info.Size(),
+		modTime:     info.ModTime().UnixNano(),
+		openapiYAML: openapiYAML,
+	}, nil
+}
+
+// readOpenAPI reads the package's OpenAPI document. The document must be a
+// regular file: a symlinked spec would point outside the package, which is the
+// same escape the executable check rejects.
+func readOpenAPI(dir string) ([]byte, error) {
 	openapiPath := filepath.Join(dir, openAPIFileName)
 	// Check the size before reading so an oversized document never enters
 	// memory. The read path re-checks the length in case the file grew.
-	specInfo, err := os.Stat(openapiPath)
+	specInfo, err := os.Lstat(openapiPath)
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", openapiPath, err)
+	}
+	if !specInfo.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s is not a regular file", openapiPath)
 	}
 	if specInfo.Size() > moduleproto.MaxOpenAPISize {
 		return nil, fmt.Errorf("%s is too large: %d bytes (max %d)", openapiPath, specInfo.Size(), moduleproto.MaxOpenAPISize)
@@ -118,26 +179,30 @@ func readPackage(dir string) (*Package, error) {
 	if len(openapiYAML) > moduleproto.MaxOpenAPISize {
 		return nil, fmt.Errorf("%s is too large: %d bytes (max %d)", openapiPath, len(openapiYAML), moduleproto.MaxOpenAPISize)
 	}
+	return openapiYAML, nil
+}
 
-	executable, err := findExecutable(dir)
+// probe runs the executable's manifest probe and builds the package from the
+// identity it prints.
+func (f *packageFiles) probe(timeout time.Duration) (*Package, error) {
+	info, err := probeManifest(f.executable, timeout)
 	if err != nil {
 		return nil, err
 	}
 
-	info, err := probeManifest(executable)
-	if err != nil {
-		return nil, err
-	}
-
-	return &Package{
+	pkg := &Package{
 		ModuleID:       info.ModuleID,
 		ServiceName:    info.ServiceName,
 		ServiceVersion: info.ServiceVersion,
 		Revision:       info.Revision,
-		Executable:     executable,
-		OpenAPIYAML:    openapiYAML,
-		PackageDir:     dir,
-	}, nil
+		Executable:     f.executable,
+		OpenAPIYAML:    f.openapiYAML,
+		PackageDir:     f.dir,
+	}
+	// Stamp the file as it is after the probe, so the next scan compares
+	// against the version that actually answered.
+	pkg.stampBinary()
+	return pkg, nil
 }
 
 // findExecutable locates the module binary in a package directory. It prefers
@@ -185,9 +250,10 @@ func isRegularFile(path string) bool {
 }
 
 // probeManifest runs the module binary with sdk.ManifestFlag and reads the
-// identity it prints.
-func probeManifest(executable string) (*sdk.ManifestInfo, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), manifestProbeTimeout)
+// identity it prints. The budget bounds a package that hangs; an overflowing
+// writer cancels it sooner.
+func probeManifest(executable string, timeout time.Duration) (*sdk.ManifestInfo, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, executable, sdk.ManifestFlag)
@@ -197,7 +263,7 @@ func probeManifest(executable string) (*sdk.ManifestInfo, error) {
 		"HOME=" + os.Getenv("HOME"),
 	}
 
-	probe := &manifestWriter{}
+	probe := &manifestWriter{cancel: cancel}
 	cmd.Stdout = probe
 	stderr := &cappedBuffer{max: maxManifestBytes}
 	cmd.Stderr = stderr
@@ -229,15 +295,20 @@ func probeManifest(executable string) (*sdk.ManifestInfo, error) {
 
 // manifestWriter collects a probed binary's stdout and rejects output past
 // maxManifestBytes. A manifest is one small JSON line, so a larger stream is a
-// broken package.
+// broken package. Overflow cancels the probe instead of waiting out the
+// budget for a process that keeps writing.
 type manifestWriter struct {
 	buf      bytes.Buffer
 	overflow bool
+	cancel   context.CancelFunc
 }
 
 func (w *manifestWriter) Write(p []byte) (int, error) {
 	if w.buf.Len()+len(p) > maxManifestBytes {
 		w.overflow = true
+		if w.cancel != nil {
+			w.cancel()
+		}
 		return 0, fmt.Errorf("manifest output exceeds %d bytes", maxManifestBytes)
 	}
 	return w.buf.Write(p)
