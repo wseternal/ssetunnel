@@ -188,6 +188,11 @@ func RunServer(ctx context.Context, args []string) error {
 
 		srv.SetAuthStore(store)
 
+		// Modules reach the database only through the control tunnel; this
+		// installs the server side of that path. Sessions attached before this
+		// call keep a nil handler, so it must happen before serving starts.
+		srv.SetDataStore(server.NewDataStore(pool))
+
 		// Seed an admin user on first startup so the console is accessible.
 		if adminPW, err := store.EnsureAdminUser(ctx); err != nil {
 			if consoleLn != nil {
