@@ -19,6 +19,7 @@ import (
 type fakeIPC struct {
 	t        *testing.T
 	listener net.Listener
+	opts     fakeIPCOptions
 
 	mu       sync.Mutex
 	conns    int
@@ -29,14 +30,27 @@ type fakeIPC struct {
 	wg     sync.WaitGroup
 }
 
+// fakeIPCOptions tunes failure injection for one fake endpoint.
+type fakeIPCOptions struct {
+	// stallAfterConns makes every connection after the given ordinal accept
+	// the credential and then stay silent, so the client must bound the
+	// handshake itself. Zero never stalls.
+	stallAfterConns int
+}
+
 func newFakeIPC(t *testing.T, handle func(conn net.Conn, n int, req dataStoreRequest) error) *fakeIPC {
+	t.Helper()
+	return newFakeIPCWithOptions(t, fakeIPCOptions{}, handle)
+}
+
+func newFakeIPCWithOptions(t *testing.T, opts fakeIPCOptions, handle func(conn net.Conn, n int, req dataStoreRequest) error) *fakeIPC {
 	t.Helper()
 	endpoint := fmt.Sprintf("/tmp/sdk-ds-%s.sock", randomHex(4))
 	ln, err := net.Listen("unix", endpoint)
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	f := &fakeIPC{t: t, listener: ln, handle: handle}
+	f := &fakeIPC{t: t, listener: ln, opts: opts, handle: handle}
 	f.wg.Add(1)
 	go f.serve()
 	t.Cleanup(func() {
@@ -64,12 +78,13 @@ func (f *fakeIPC) serve() {
 		}
 		f.mu.Lock()
 		f.conns++
+		connOrdinal := f.conns
 		f.mu.Unlock()
 		f.wg.Add(1)
 		go func() {
 			defer f.wg.Done()
 			defer conn.Close()
-			br, err := f.handshake(conn)
+			br, err := f.handshake(conn, connOrdinal)
 			if err != nil {
 				return
 			}
@@ -90,7 +105,7 @@ func (f *fakeIPC) serve() {
 	}
 }
 
-func (f *fakeIPC) handshake(conn net.Conn) (*bufio.Reader, error) {
+func (f *fakeIPC) handshake(conn net.Conn, connOrdinal int) (*bufio.Reader, error) {
 	br := bufio.NewReader(conn)
 	line, err := br.ReadString('\n')
 	if err != nil {
@@ -102,6 +117,15 @@ func (f *fakeIPC) handshake(conn net.Conn) (*bufio.Reader, error) {
 	}
 	if _, err := io.ReadFull(br, make([]byte, n)); err != nil {
 		return nil, err
+	}
+	if f.opts.stallAfterConns > 0 && connOrdinal > f.opts.stallAfterConns {
+		// Stay silent after consuming the credential. Draining blocks until the
+		// client gives up, so the test proves the client's own deadline bounds
+		// the handshake; the server-side deadline only keeps a regressed client
+		// from wedging the test cleanup forever.
+		_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+		_, _ = io.Copy(io.Discard, conn)
+		return nil, fmt.Errorf("client closed a stalled handshake")
 	}
 	if _, err := conn.Write([]byte("OK\n")); err != nil {
 		return nil, err
@@ -125,9 +149,6 @@ func readDataStoreRequest(br *bufio.Reader) (dataStoreRequest, error) {
 	}
 	body := make([]byte, n)
 	if _, err := io.ReadFull(br, body); err != nil {
-		return req, err
-	}
-	if err != nil {
 		return req, err
 	}
 	if err := json.Unmarshal(body, &req); err != nil {
@@ -250,5 +271,48 @@ func TestDataStore_ClosedDoesNotReconnect(t *testing.T) {
 	conns, _ := fake.stats()
 	if conns != 1 {
 		t.Fatalf("closed store must not redial; connections = %d", conns)
+	}
+}
+
+// TestDataStore_ReconnectHandshakeHonoursContextDeadline proves the redial is
+// bounded by the caller's context: an agent that accepts the credential and
+// then goes silent must not block the request (and ds.mu) past its deadline.
+func TestDataStore_ReconnectHandshakeHonoursContextDeadline(t *testing.T) {
+	fake := newFakeIPCWithOptions(t, fakeIPCOptions{stallAfterConns: 1},
+		func(conn net.Conn, n int, req dataStoreRequest) error {
+			// Poison the first connection so the next call must redial.
+			conn.Write([]byte("DATASTORE_RESP 9\n{\"rec"))
+			return fmt.Errorf("drop after partial frame")
+		})
+
+	ds, err := NewDataStoreWithEndpoint(fake.endpoint(), "cred", "mod.test")
+	if err != nil {
+		t.Fatalf("new data store: %v", err)
+	}
+	defer ds.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if _, err := ds.Get(ctx, "mod.test", "rec-1"); err == nil {
+		t.Fatal("first get: expected frame error, got nil")
+	}
+
+	// The redial hits the stalled handshake. Run it off the test goroutine so a
+	// regression shows up as a failure, not a hung suite.
+	stalledCtx, stalledCancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer stalledCancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := ds.Get(stalledCtx, "mod.test", "rec-1")
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("get against a stalled handshake: expected an error, got nil")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("reconnect ignored the context deadline: the handshake did not return within 2s")
 	}
 }

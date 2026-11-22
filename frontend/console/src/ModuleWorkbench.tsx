@@ -219,6 +219,9 @@ export default function ModuleWorkbench({ apiBase, agentId, module, authHeaders,
   const checkAuthRef = useRef(checkAuth);
   checkAuthRef.current = checkAuth;
   const loadAbortRef = useRef<AbortController | null>(null);
+  const sendAbortRef = useRef<AbortController | null>(null);
+  // Which module the state below belongs to; a switch clears it before loading.
+  const loadedModuleRef = useRef('');
 
   // Initialise the form for an operation: defaults for every parameter, a body
   // template from the schema, and a content-type header when a body exists.
@@ -248,6 +251,23 @@ export default function ModuleWorkbench({ apiBase, agentId, module, authHeaders,
     loadAbortRef.current?.abort();
     const controller = new AbortController();
     loadAbortRef.current = controller;
+
+    if (loadedModuleRef.current !== module.module_id) {
+      // A different module: drop the previous list and form before the new
+      // request lands, so a failed load cannot leave stale operations live.
+      loadedModuleRef.current = module.module_id;
+      setOperations([]);
+      setTitle('');
+      setSelectedKey('');
+      setValues({});
+      setHeadersText('');
+      setBodyText('');
+      setResult(null);
+      setSendError('');
+      // The switch aborted any in-flight response, so its finally clause no
+      // longer owns the sending state.
+      setSending(false);
+    }
 
     setLoading(true);
     setLoadError('');
@@ -291,6 +311,9 @@ export default function ModuleWorkbench({ apiBase, agentId, module, authHeaders,
       // Dropping the ref also stops the aborted request's finally clause from
       // touching state after unmount.
       loadAbortRef.current = null;
+      // A slow response for the module being left must not paint the next one.
+      sendAbortRef.current?.abort();
+      sendAbortRef.current = null;
     };
   }, [loadOperations]);
 
@@ -357,6 +380,12 @@ export default function ModuleWorkbench({ apiBase, agentId, module, authHeaders,
     const request = resolveRequest();
     if (!request) return;
 
+    // One response at a time: a retry replaces the previous request instead of
+    // letting both paint the panel.
+    sendAbortRef.current?.abort();
+    const controller = new AbortController();
+    sendAbortRef.current = controller;
+
     setSending(true);
     setResult(null);
     const started = performance.now();
@@ -365,11 +394,13 @@ export default function ModuleWorkbench({ apiBase, agentId, module, authHeaders,
         method: selected.method,
         headers: request.headers,
         body: request.body,
+        signal: controller.signal,
       });
       if (!checkAuthRef.current(res)) return;
       const headers: Record<string, string> = {};
       res.headers.forEach((v, k) => { headers[k] = v; });
       const { text: rawBody, truncated } = await readCappedBody(res);
+      if (controller.signal.aborted) return;
       setResult({
         status: res.status,
         statusText: res.statusText,
@@ -379,9 +410,11 @@ export default function ModuleWorkbench({ apiBase, agentId, module, authHeaders,
         truncated,
       });
     } catch (e) {
+      if (controller.signal.aborted || (e instanceof DOMException && e.name === 'AbortError')) return;
       setSendError(e instanceof Error ? e.message : 'Request failed');
     } finally {
-      setSending(false);
+      // Only the current request owns the sending state.
+      if (sendAbortRef.current === controller) setSending(false);
     }
   };
 
@@ -419,7 +452,15 @@ export default function ModuleWorkbench({ apiBase, agentId, module, authHeaders,
     if (navigator.clipboard) navigator.clipboard.writeText(curlCommand());
   };
 
+  // Only a spec-declared JSON body gets templated and JSON-validated; a multipart
+  // or binary body must never be dressed as a JSON document.
+  const bodyIsJSON = () => {
+    const body = selected?.request_body;
+    return Boolean(body && isJSONContentType(body.content_type ?? '') && body.schema);
+  };
+
   const formatBody = () => {
+    if (!bodyIsJSON()) return;
     try {
       setBodyText(JSON.stringify(JSON.parse(bodyText), null, 2));
       setSendError('');
@@ -430,7 +471,8 @@ export default function ModuleWorkbench({ apiBase, agentId, module, authHeaders,
 
   const resetBody = () => {
     if (!selected?.request_body) return;
-    setBodyText(JSON.stringify(sampleValue(selected.request_body.schema), null, 2));
+    const body = selected.request_body;
+    setBodyText(bodyIsJSON() ? JSON.stringify(sampleValue(body.schema), null, 2) : '');
   };
 
   return (
@@ -463,51 +505,53 @@ export default function ModuleWorkbench({ apiBase, agentId, module, authHeaders,
             <Typography variant="caption" color="text.secondary" sx={{ px: 1, display: 'block', mb: 0.5 }}>
               {title || 'Operations'} · {operations.length}
             </Typography>
-            {operations.map((op) => {
-              const active = operationKey(op) === selectedKey;
-              return (
-                <Box
-                  key={operationKey(op)}
-                  role="button"
-                  tabIndex={0}
-                  aria-pressed={active}
-                  onClick={() => selectOperation(op)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' || e.key === ' ') {
-                      e.preventDefault();
-                      selectOperation(op);
-                    }
-                  }}
-                  sx={{
-                    display: 'flex',
-                    gap: 1,
-                    alignItems: 'center',
-                    px: 1,
-                    py: 0.75,
-                    borderRadius: 1,
-                    cursor: 'pointer',
-                    bgcolor: active ? 'action.selected' : 'transparent',
-                    '&:hover, &:focus-visible': { bgcolor: 'action.hover' },
-                    '&:focus-visible': { outline: '2px solid', outlineColor: 'primary.main' },
-                  }}
-                >
-                  <Chip
-                    size="small"
-                    label={op.method}
-                    color={METHOD_TONE[op.method] || 'default'}
-                    sx={{ fontFamily: 'monospace', fontSize: 11, height: 20 }}
-                  />
-                  <Box sx={{ minWidth: 0 }}>
-                    <Typography variant="body2" sx={{ fontFamily: 'monospace', fontSize: 12, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                      {op.path}
-                    </Typography>
-                    <Typography variant="caption" color="text.secondary" sx={{ display: 'block', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                      {op.summary || op.operation_id || ''}
-                    </Typography>
+            <Box role="listbox" aria-label={title ? `${title} operations` : 'Operations'}>
+              {operations.map((op) => {
+                const active = operationKey(op) === selectedKey;
+                return (
+                  <Box
+                    key={operationKey(op)}
+                    role="option"
+                    tabIndex={0}
+                    aria-selected={active}
+                    onClick={() => selectOperation(op)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        selectOperation(op);
+                      }
+                    }}
+                    sx={{
+                      display: 'flex',
+                      gap: 1,
+                      alignItems: 'center',
+                      px: 1,
+                      py: 0.75,
+                      borderRadius: 1,
+                      cursor: 'pointer',
+                      bgcolor: active ? 'action.selected' : 'transparent',
+                      '&:hover, &:focus-visible': { bgcolor: 'action.hover' },
+                      '&:focus-visible': { outline: '2px solid', outlineColor: 'primary.main' },
+                    }}
+                  >
+                    <Chip
+                      size="small"
+                      label={op.method}
+                      color={METHOD_TONE[op.method] || 'default'}
+                      sx={{ fontFamily: 'monospace', fontSize: 11, height: 20 }}
+                    />
+                    <Box sx={{ minWidth: 0 }}>
+                      <Typography variant="body2" sx={{ fontFamily: 'monospace', fontSize: 12, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                        {op.path}
+                      </Typography>
+                      <Typography variant="caption" color="text.secondary" sx={{ display: 'block', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                        {op.summary || op.operation_id || ''}
+                      </Typography>
+                    </Box>
                   </Box>
-                </Box>
-              );
-            })}
+                );
+              })}
+            </Box>
           </Paper>
 
           {/* Request builder */}
@@ -592,8 +636,12 @@ export default function ModuleWorkbench({ apiBase, agentId, module, authHeaders,
                         <Chip size="small" variant="outlined" label={selected.request_body.content_type} />
                       )}
                       <Box sx={{ flex: 1 }} />
-                      <Button size="small" onClick={formatBody}>Format</Button>
-                      <Button size="small" onClick={resetBody}>Reset template</Button>
+                      {bodyIsJSON() && (
+                        <>
+                          <Button size="small" onClick={formatBody}>Format</Button>
+                          <Button size="small" onClick={resetBody}>Reset template</Button>
+                        </>
+                      )}
                     </Box>
                     {(selected.request_body.schema?.truncated || selected.request_body.schema?.recursive) && (
                       <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 0.5 }}>
@@ -668,11 +716,10 @@ export default function ModuleWorkbench({ apiBase, agentId, module, authHeaders,
                   <Paper variant="outlined" sx={{ p: 1, maxHeight: 360, overflow: 'auto' }}>
                     <pre style={{ fontSize: 12, margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
                       {(() => {
-                        const text = result.truncated ? result.body.slice(0, MAX_RENDER_BYTES) : result.body;
                         try {
-                          return JSON.stringify(JSON.parse(text), null, 2);
+                          return JSON.stringify(JSON.parse(result.body), null, 2);
                         } catch {
-                          return text || '(empty body)';
+                          return result.body || '(empty body)';
                         }
                       })()}
                     </pre>

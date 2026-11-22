@@ -2,7 +2,6 @@ package agentmod
 
 import (
 	"bytes"
-	"fmt"
 	"log"
 	"strings"
 	"testing"
@@ -109,6 +108,6 @@ func TestModuleLogWriter_EmptyWrite(t *testing.T) {
 		t.Errorf("Write(nil) = (%d,%v), want (0,nil)", n, err)
 	}
 	if buf.Len() != 0 {
-		t.Errorf("expected no log record, got %q", fmt.Sprintf("%s", buf.String()))
+		t.Errorf("expected no log record, got %q", buf.String())
 	}
 }

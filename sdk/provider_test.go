@@ -2,8 +2,6 @@ package sdk
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"io"
 	"net"
 	"net/http"
@@ -11,13 +9,6 @@ import (
 	"testing"
 	"time"
 )
-
-// randomHex returns a random hex string of the given byte length.
-func randomHex(n int) string {
-	b := make([]byte, n)
-	rand.Read(b)
-	return hex.EncodeToString(b)
-}
 
 // TestProvider_InvocationListener verifies that the provider's invocation
 // listener accepts HTTP connections over a Unix socket and serves requests.

@@ -7,12 +7,17 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"os"
 	"strconv"
 	"sync"
 	"time"
 )
+
+// handshakeTimeout bounds the dial-and-authenticate exchange when the caller's
+// context carries no deadline.
+const handshakeTimeout = 30 * time.Second
 
 // DataStore provides CRUD operations for module records stored in the
 // server's database through the control tunnel. Modules call these
@@ -23,7 +28,8 @@ import (
 // Each DataStore opens its own dedicated connection to the agent.
 //
 // Recovery: a wire, framing or decode error drops the connection and the
-// next call redials transparently, matching Provider's reconnect behaviour.
+// next call redials it transparently, so module authors never manage
+// connection state themselves.
 type DataStore struct {
 	endpoint   string
 	credential string
@@ -55,7 +61,7 @@ func NewDataStoreWithEndpoint(endpoint, credential, moduleID string) (*DataStore
 		credential: credential,
 		moduleID:   moduleID,
 	}
-	if err := ds.connect(); err != nil {
+	if err := ds.connectContext(context.Background()); err != nil {
 		return nil, err
 	}
 	return ds, nil
@@ -177,17 +183,23 @@ func (ds *DataStore) Close() error {
 	return err
 }
 
-func (ds *DataStore) connect() error {
-	return ds.connectContext(context.Background())
-}
-
 // connectContext dials and authenticates a fresh IPC connection. The caller
-// holds ds.mu; on success it swaps in the new connection and reader.
+// owns the connection state: sendRequest holds ds.mu, and the constructor calls
+// it before the struct is shared. On success it swaps in the new connection and
+// reader.
 func (ds *DataStore) connectContext(ctx context.Context) error {
 	var d net.Dialer
 	conn, err := d.DialContext(ctx, ipcNetwork, ds.endpoint)
 	if err != nil {
 		return fmt.Errorf("dial: %w", err)
+	}
+	// The dial honours ctx, but the AUTH exchange below is blocking I/O, so
+	// bound it here: a stalled agent must not hold the caller past its own
+	// deadline while ds.mu is held. sendRequest sets the request deadline.
+	if deadline, ok := ctx.Deadline(); ok {
+		_ = conn.SetDeadline(deadline)
+	} else {
+		_ = conn.SetDeadline(time.Now().Add(handshakeTimeout))
 	}
 
 	// Authenticate using the same protocol as Provider.
@@ -221,6 +233,7 @@ func (ds *DataStore) connectContext(ctx context.Context) error {
 
 	ds.conn = conn
 	ds.reader = bufio.NewReaderSize(conn, 64<<10)
+	_ = conn.SetDeadline(time.Time{})
 	return nil
 }
 
@@ -237,6 +250,7 @@ func (ds *DataStore) sendRequest(ctx context.Context, req dataStoreRequest) (*da
 		if err := ds.connectContext(ctx); err != nil {
 			return nil, fmt.Errorf("data store: reconnect: %w", err)
 		}
+		log.Printf("data store: reconnected to %s", ds.endpoint)
 	}
 
 	// Set deadline from context or default 30s.
