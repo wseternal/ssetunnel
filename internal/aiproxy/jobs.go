@@ -111,11 +111,24 @@ func NewJobManager(timeout time.Duration, store *sdk.DataStore, moduleID string)
 
 // Close waits for in-flight persistence writes. New writes are rejected once
 // closing starts, so this is safe to call while timeout goroutines still run.
+// The wait is bounded: writes serialize on one IPC connection, so an unreachable
+// server would otherwise multiply the timeout by the number of pending writes
+// and stall module shutdown.
 func (m *JobManager) Close() {
 	m.mu.Lock()
 	m.closing = true
 	m.mu.Unlock()
-	m.persistWG.Wait()
+
+	drained := make(chan struct{})
+	go func() {
+		m.persistWG.Wait()
+		close(drained)
+	}()
+	select {
+	case <-drained:
+	case <-time.After(closeGrace):
+		log.Printf("aiproxy: closing with persistence writes still in flight")
+	}
 }
 
 // schedulePersist captures the job's current state and registers the write
@@ -355,6 +368,9 @@ func isTerminal(s JobStatus) bool {
 
 // jobIDLength is the hex length of a generated job id.
 const jobIDLength = 32
+
+// closeGrace bounds how long Close waits for persistence writes at shutdown.
+const closeGrace = 5 * time.Second
 
 func generateJobID() string {
 	var buf [16]byte
