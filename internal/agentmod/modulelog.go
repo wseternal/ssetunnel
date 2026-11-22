@@ -11,9 +11,10 @@ const maxModuleLogLine = 1 << 20
 
 // moduleLogWriter forwards one module output stream to the agent log, one
 // line per record, prefixed with the module id and a tag naming the stream.
-// The exec package owns the pipe and joins the copying goroutines before Wait
-// returns, so a module that exits cannot lose buffered output the way a
-// reader-owned pipe can when Wait closes it.
+// exec.Cmd owns the pipe and its copy goroutine, so the writer never reads
+// from a descriptor the module lifecycle can close underneath it. Nothing
+// waits for that goroutine on the supervisor path (the supervisor waits on
+// *os.Process), which is why no WaitDelay is set.
 type moduleLogWriter struct {
 	moduleID string
 	stream   string // "" for stderr, " out" for stdout

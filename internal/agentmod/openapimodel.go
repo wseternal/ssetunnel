@@ -266,9 +266,8 @@ func mergeParameters(common, own []APIParameter) []APIParameter {
 			out = append(out, p)
 		}
 	}
-	if out == nil {
-		return []APIParameter{}
-	}
+	// out is always a non-nil slice from make, so it marshals as [] rather
+	// than null; no nil fallback is needed.
 	return out
 }
 
@@ -277,6 +276,13 @@ func parseRequestBody(doc map[string]interface{}, raw interface{}) *APIRequestBo
 	m, ok := raw.(map[string]interface{})
 	if !ok {
 		return nil
+	}
+	// A body may be declared as a $ref to components.requestBodies; without
+	// resolving it the node has neither required nor content.
+	if ref, ok := m["$ref"].(string); ok {
+		if target, _ := resolveRef(doc, ref); target != nil {
+			m = target
+		}
 	}
 	body := &APIRequestBody{Required: boolField(m, "required")}
 	content, ok := m["content"].(map[string]interface{})
@@ -290,18 +296,29 @@ func parseRequestBody(doc map[string]interface{}, raw interface{}) *APIRequestBo
 	}
 	sort.Strings(mediaTypes)
 	chosen := mediaTypes[0]
+	isJSON := isJSONMediaType(chosen)
 	for _, mt := range mediaTypes {
-		if mt == "application/json" || strings.HasSuffix(mt, "+json") {
+		if isJSONMediaType(mt) {
 			chosen = mt
+			isJSON = true
 			break
 		}
 	}
 
 	body.ContentType = chosen
-	if media, ok := content[chosen].(map[string]interface{}); ok {
-		body.Schema = buildSchema(doc, media["schema"], nil, 0)
+	// Only JSON bodies get a schema: the console templates JSON from it, and
+	// handing a JSON skeleton to a multipart operation misrepresents the call.
+	if isJSON {
+		if media, ok := content[chosen].(map[string]interface{}); ok {
+			body.Schema = buildSchema(doc, media["schema"], nil, 0)
+		}
 	}
 	return body
+}
+
+// isJSONMediaType reports whether a media type carries a JSON document.
+func isJSONMediaType(mt string) bool {
+	return mt == "application/json" || strings.HasSuffix(mt, "+json")
 }
 
 // resolveRef resolves a local reference like "#/components/schemas/Foo".
@@ -472,15 +489,18 @@ func mergeAllOf(doc map[string]interface{}, parent map[string]interface{}, membe
 			if k == "properties" {
 				existing, _ := merged["properties"].(map[string]interface{})
 				incoming, _ := v.(map[string]interface{})
-				if existing == nil {
-					existing = make(map[string]interface{}, len(incoming))
-					merged["properties"] = existing
+				// merged only holds shallow copies of parent values, so the
+				// first merge must copy the map before writing to it.
+				fresh := make(map[string]interface{}, len(existing)+len(incoming))
+				for name, prop := range existing {
+					fresh[name] = prop
 				}
 				for name, prop := range incoming {
-					if _, present := existing[name]; !present {
-						existing[name] = prop
+					if _, present := fresh[name]; !present {
+						fresh[name] = prop
 					}
 				}
+				merged["properties"] = fresh
 				continue
 			}
 			if k == "required" {
@@ -492,7 +512,10 @@ func mergeAllOf(doc map[string]interface{}, parent map[string]interface{}, membe
 						seen[name] = true
 					}
 				}
-				combined := existing
+				// A fresh slice guarantees append never writes into the
+				// parent document's spare capacity.
+				combined := make([]interface{}, 0, len(existing)+len(incoming))
+				combined = append(combined, existing...)
 				for _, entry := range incoming {
 					name, ok := entry.(string)
 					if !ok || seen[name] {

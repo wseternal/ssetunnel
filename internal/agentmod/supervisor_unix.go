@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"syscall"
-	"time"
 )
 
 // startModuleProcess creates an exec.Cmd for launching a module process.
@@ -31,8 +30,8 @@ func startModuleProcess(ctx context.Context, executable, credential, endpoint, m
 	}
 	cmd.Stdout = &moduleLogWriter{moduleID: moduleID, stream: " out"}
 	cmd.Stderr = &moduleLogWriter{moduleID: moduleID}
-	// A module that leaves a child holding its output must not stall Wait:
-	// once the command itself has exited, the pipes are closed.
-	cmd.WaitDelay = time.Second
+	// No WaitDelay: the supervisor waits on the *os.Process, not on this
+	// exec.Cmd, so exec's pipe bookkeeping never runs and the field would be
+	// inert (see registry.stopProcess).
 	return cmd
 }

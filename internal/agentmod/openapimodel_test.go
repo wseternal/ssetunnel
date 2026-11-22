@@ -289,3 +289,132 @@ func TestBuildOperationModelsOpenAPI31(t *testing.T) {
 		t.Errorf("text schema = %+v, want string + nullable", text.Schema)
 	}
 }
+
+// A requestBody may be a $ref to components.requestBodies; before resolution
+// the node carries neither required nor content, so the console lost the whole
+// body model.
+const operationModelsRequestBodyRefFixture = `
+openapi: 3.0.3
+info:
+  title: Body Ref API
+  version: 1.0.0
+paths:
+  /submit:
+    post:
+      operationId: submit
+      requestBody:
+        $ref: '#/components/requestBodies/SubmitBody'
+  /upload:
+    post:
+      operationId: upload
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file:
+                  type: string
+                  format: binary
+components:
+  requestBodies:
+    SubmitBody:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [prompt]
+            properties:
+              prompt:
+                type: string
+`
+
+func TestBuildOperationModelsRequestBodyRef(t *testing.T) {
+	_, ops, err := BuildOperationModels([]byte(operationModelsRequestBodyRefFixture))
+	if err != nil {
+		t.Fatalf("BuildOperationModels: %v", err)
+	}
+	var submit, upload *APIOperation
+	for i := range ops {
+		switch ops[i].Path {
+		case "/submit":
+			submit = &ops[i]
+		case "/upload":
+			upload = &ops[i]
+		}
+	}
+	if submit == nil || submit.RequestBody == nil {
+		t.Fatalf("POST /submit missing body model: %+v", ops)
+	}
+	if !submit.RequestBody.Required {
+		t.Error("required from the referenced requestBody was lost")
+	}
+	if submit.RequestBody.ContentType != "application/json" {
+		t.Errorf("content type = %q, want application/json", submit.RequestBody.ContentType)
+	}
+	if submit.RequestBody.Schema == nil {
+		t.Fatal("referenced requestBody produced no schema")
+	}
+	if props := submit.RequestBody.Schema.Properties; len(props) != 1 || props[0].Name != "prompt" || !props[0].Required {
+		t.Errorf("properties = %+v, want required prompt", props)
+	}
+
+	if upload == nil || upload.RequestBody == nil {
+		t.Fatalf("POST /upload missing body model: %+v", ops)
+	}
+	if upload.RequestBody.ContentType != "multipart/form-data" {
+		t.Errorf("content type = %q, want multipart/form-data", upload.RequestBody.ContentType)
+	}
+	if upload.RequestBody.Schema != nil {
+		t.Error("non-JSON body must not carry a JSON schema template")
+	}
+}
+
+// mergeAllOf must not write through the parent document's maps or slices.
+func TestMergeAllOfDoesNotMutateParent(t *testing.T) {
+	props := map[string]interface{}{
+		"keep": map[string]interface{}{"type": "string"},
+	}
+	// Spare capacity is where a naive append would corrupt the parent slice.
+	required := make([]interface{}, 1, 4)
+	required[0] = "keep"
+	parent := map[string]interface{}{
+		"type":       "object",
+		"properties": props,
+		"required":   required,
+	}
+	members := []interface{}{
+		map[string]interface{}{
+			"properties": map[string]interface{}{
+				"added": map[string]interface{}{"type": "integer"},
+			},
+			"required": []interface{}{"added"},
+		},
+	}
+
+	merged := mergeAllOf(map[string]interface{}{}, parent, members)
+
+	if _, present := props["added"]; present {
+		t.Error("mergeAllOf wrote a merged property into the parent map")
+	}
+	if len(required) != 1 || required[0] != "keep" {
+		t.Errorf("parent required slice changed: %v", required)
+	}
+	if spare := required[:cap(required)][1:4]; spare[0] != nil || spare[1] != nil || spare[2] != nil {
+		t.Errorf("mergeAllOf wrote into the parent slice backing array: %v", spare)
+	}
+
+	mergedProps, _ := merged["properties"].(map[string]interface{})
+	if _, present := mergedProps["added"]; !present {
+		t.Error("merged properties missing the member's field")
+	}
+	if _, present := mergedProps["keep"]; !present {
+		t.Error("merged properties missing the parent's field")
+	}
+	mergedRequired, _ := merged["required"].([]interface{})
+	if len(mergedRequired) != 2 {
+		t.Errorf("merged required = %v, want keep + added", mergedRequired)
+	}
+}
