@@ -2,8 +2,11 @@
 
 ## Status
 
-Accepted. **Implemented** as commit `17e6a00` in ssetunnel and `35a0e28` in
-gemini-automation-extension.
+Accepted. **Implemented** as commit `4dee56c` (PR #98) in ssetunnel and `35a0e28` in
+gemini-automation-extension. The framework's server-side attachment was completed and
+`ai-automation-proxy` started persisting job history once the proxy shipped; see
+"Job persistence" below. (This document previously cited `17e6a00`, the pre-merge hash of the
+same work — that object is unreachable after the merge.)
 
 ## Context
 
@@ -121,6 +124,30 @@ ds.Delete(ctx, "com.example.module", "record-1")
 - `Create` uses upsert semantics (`ON CONFLICT DO UPDATE`)
 - No module isolation at the database level — modules can read/write any `module_id`
 
+### Job persistence
+
+`ai-automation-proxy` persists its job history through the SDK client, keyed by job id under
+its own `module_id`. Semantics:
+
+- **Terminal states only.** `completed`, `failed`, and `timeout` are written once; `pending`
+  and `running` stay in memory. In-flight jobs are not resumable after a restart, so writing
+  intermediate states would only create rows that no reader can act on.
+- **Attachment bytes are redacted.** The stored request keeps `name`, `mime_type`, and
+  `byte_length` but clears `file.data_base64`. History must not duplicate multi-megabyte
+  blobs; the bytes are only useful while the job is in flight.
+- **Read-through on miss.** `GET /jobs/{id}` checks memory first (in-flight work plus the
+  10-minute retention window), then reads the row back. A stored non-terminal status can
+  only come from a process that stopped mid-job, so it is reported as `failed` with code
+  `ABANDONED` instead of pretending the job still runs.
+- **Best effort.** A failed write is logged with the job id and never changes the job outcome;
+  the module continues memory-only. When the data store cannot be reached at startup (older
+  agent, missing IPC environment), the module logs once and runs with nil store.
+- **Rows are permanent.** No TTL exists in `module_records`; retention cleanup is an
+  operational decision, not module behavior.
+
+Server-side attachment lives in `internal/command/command.go` (`srv.SetDataStore`): sessions
+capture the handler when they attach, so the call must happen before serving starts.
+
 ### WXT Extension Integration
 
 Added a long-polling client (`utils/long-poll-client.ts`) that:
@@ -139,8 +166,9 @@ unchanged. Long-polling is additive and only active when explicitly enabled.
   without exposing the extension to inbound connections
 - Modules gain persistent storage without direct database access, reducing
   deployment complexity and improving security posture
-- The `module_records` table is generic and reusable for any future module
-  (job history, configuration, audit logs)
+- The `module_records` table is generic and reusable for any future module;
+  `ai-automation-proxy` uses it to keep terminal job history across the 10-minute memory
+  window and process restarts
 - Extension long-polling is compatible with Manifest V3 service workers (no
   persistent WebSocket required)
 - No module isolation in the data store — any module can read/write any other

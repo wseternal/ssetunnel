@@ -53,8 +53,21 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
+	// Job history is persisted through the tunnel-backed data store. The agent
+	// provides the IPC endpoint and credential; without them (older agent, or a
+	// manual run) the module keeps jobs in memory and still serves requests.
+	var dataStore *sdk.DataStore
+	if ds, err := sdk.NewDataStore(); err != nil {
+		log.Printf("aiproxy: data store unavailable, job history is memory-only: %v", err)
+	} else {
+		dataStore = ds
+		defer dataStore.Close()
+		log.Printf("aiproxy: job history persisted via data store")
+	}
+
 	// Create job manager shared by both HTTP surfaces.
-	jobs := aiproxy.NewJobManager(*jobTimeout)
+	jobs := aiproxy.NewJobManager(*jobTimeout, dataStore, m.ModuleID)
+	defer jobs.Close()
 
 	// Start the extension long-polling server on a separate port.
 	extServer := aiproxy.NewExtensionServer(jobs)
