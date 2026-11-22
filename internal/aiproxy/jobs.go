@@ -4,6 +4,7 @@
 package aiproxy
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -11,6 +12,8 @@ import (
 	"log"
 	"sync"
 	"time"
+
+	"github.com/wseternal/ssetunnel/sdk"
 )
 
 // JobStatus represents the lifecycle state of an automation job.
@@ -35,19 +38,19 @@ type AutomationRequest struct {
 
 // FilePayload is a base64-encoded file attached to the automation request.
 type FilePayload struct {
-	Name      string `json:"name"`
-	MimeType  string `json:"mime_type"`
+	Name       string `json:"name"`
+	MimeType   string `json:"mime_type"`
 	DataBase64 string `json:"data_base64"`
 	ByteLength int    `json:"byte_length"`
 }
 
 // AutomationResult is the extension-returned job result.
 type AutomationResult struct {
-	Status   string          `json:"status"` // "ok" or "error"
-	Text     string          `json:"text,omitempty"`
-	Markdown string          `json:"markdown,omitempty"`
+	Status   string           `json:"status"` // "ok" or "error"
+	Text     string           `json:"text,omitempty"`
+	Markdown string           `json:"markdown,omitempty"`
 	Error    *AutomationError `json:"error,omitempty"`
-	Meta     json.RawMessage `json:"meta,omitempty"`
+	Meta     json.RawMessage  `json:"meta,omitempty"`
 }
 
 // AutomationError describes a failure from the extension.
@@ -59,12 +62,12 @@ type AutomationError struct {
 
 // Job represents one automation job in the system.
 type Job struct {
-	ID        string             `json:"id"`
-	Status    JobStatus          `json:"status"`
-	Request   AutomationRequest  `json:"request"`
-	Result    *AutomationResult  `json:"result,omitempty"`
-	CreatedAt time.Time          `json:"created_at"`
-	UpdatedAt time.Time          `json:"updated_at"`
+	ID        string            `json:"id"`
+	Status    JobStatus         `json:"status"`
+	Request   AutomationRequest `json:"request"`
+	Result    *AutomationResult `json:"result,omitempty"`
+	CreatedAt time.Time         `json:"created_at"`
+	UpdatedAt time.Time         `json:"updated_at"`
 
 	// doneCh is closed when the job reaches a terminal state.
 	// Clients waiting for the result select on this channel.
@@ -79,10 +82,20 @@ type JobManager struct {
 	pending      chan *Job
 	timeout      time.Duration
 	retentionTTL time.Duration // how long to keep terminal jobs before eviction
+
+	// store persists terminal jobs so history outlives the in-memory
+	// retention window and process restarts. Nil means memory-only.
+	store    *sdk.DataStore
+	moduleID string
+
+	persistWG sync.WaitGroup
+	closing   bool
 }
 
 // NewJobManager creates a job manager with the given default timeout.
-func NewJobManager(timeout time.Duration) *JobManager {
+// A nil store keeps jobs in memory only, which is what happens when the
+// data store is not reachable at startup.
+func NewJobManager(timeout time.Duration, store *sdk.DataStore, moduleID string) *JobManager {
 	if timeout <= 0 {
 		timeout = 5 * time.Minute
 	}
@@ -91,7 +104,58 @@ func NewJobManager(timeout time.Duration) *JobManager {
 		pending:      make(chan *Job, 256),
 		timeout:      timeout,
 		retentionTTL: 10 * time.Minute,
+		store:        store,
+		moduleID:     moduleID,
 	}
+}
+
+// Close waits for in-flight persistence writes. New writes are rejected once
+// closing starts, so this is safe to call while timeout goroutines still run.
+// The wait is bounded: writes serialize on one IPC connection, so an unreachable
+// server would otherwise multiply the timeout by the number of pending writes
+// and stall module shutdown.
+func (m *JobManager) Close() {
+	m.mu.Lock()
+	m.closing = true
+	m.mu.Unlock()
+
+	drained := make(chan struct{})
+	go func() {
+		m.persistWG.Wait()
+		close(drained)
+	}()
+	select {
+	case <-drained:
+	case <-time.After(closeGrace):
+		log.Printf("aiproxy: closing with persistence writes still in flight")
+	}
+}
+
+// schedulePersist captures the job's current state and registers the write
+// with the wait group. Callers must hold m.mu; the returned snapshot is written
+// by writeSnapshot after the lock is released.
+func (m *JobManager) schedulePersist(job *Job) *persistedJob {
+	if m.store == nil || m.closing {
+		return nil
+	}
+	snap := snapshotJob(job)
+	m.persistWG.Add(1)
+	return &snap
+}
+
+// writeSnapshot performs the store write off the caller's goroutine. Only
+// terminal states are persisted, so a job produces at most one write and
+// ordering between writes for the same id cannot invert.
+func (m *JobManager) writeSnapshot(snap *persistedJob) {
+	if snap == nil {
+		return
+	}
+	go func() {
+		defer m.persistWG.Done()
+		ctx, cancel := context.WithTimeout(context.Background(), persistTimeout)
+		defer cancel()
+		saveJob(ctx, m.store, m.moduleID, *snap)
+	}()
 }
 
 // Submit creates a new job and enqueues it for the extension.
@@ -126,8 +190,10 @@ func (m *JobManager) Submit(req AutomationRequest) (*Job, error) {
 		}
 		job.UpdatedAt = time.Now().UTC()
 		close(job.doneCh)
+		snap := m.schedulePersist(job)
 		m.mu.Unlock()
 		log.Printf("aiproxy: job %s rejected (queue full)", id)
+		m.writeSnapshot(snap)
 		m.scheduleEviction(id)
 	}
 
@@ -137,11 +203,32 @@ func (m *JobManager) Submit(req AutomationRequest) (*Job, error) {
 	return job, nil
 }
 
-// Get retrieves a job by ID. Returns nil if not found.
+// Get retrieves a job by ID. Memory holds the job while it is in flight and
+// for the retention window after it finishes; older history is read back from
+// the data store. Returns nil if neither has it.
 func (m *JobManager) Get(id string) *Job {
 	m.mu.Lock()
 	job := m.jobs[id]
 	m.mu.Unlock()
+	if job != nil {
+		return job
+	}
+	return m.load(id)
+}
+
+// load fetches a stored job. Errors are not surfaced: the client sees the same
+// "not found" whether the record never existed or the store is unavailable.
+// Ids that cannot be generated ones skip the store round trip.
+func (m *JobManager) load(id string) *Job {
+	if m.store == nil || len(id) != jobIDLength {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), loadTimeout)
+	defer cancel()
+	job, ok := loadJob(ctx, m.store, m.moduleID, id)
+	if !ok {
+		return nil
+	}
 	return job
 }
 
@@ -199,8 +286,10 @@ func (m *JobManager) Requeue(id string) {
 			}
 			job.UpdatedAt = time.Now().UTC()
 			close(job.doneCh)
+			snap := m.schedulePersist(job)
 			m.mu.Unlock()
 			log.Printf("aiproxy: job %s requeue failed (queue full)", id)
+			m.writeSnapshot(snap)
 			m.scheduleEviction(id)
 		}
 		return
@@ -235,8 +324,10 @@ func (m *JobManager) Complete(id string, result *AutomationResult) {
 	job.Result = result
 	job.UpdatedAt = time.Now().UTC()
 	close(job.doneCh)
+	snap := m.schedulePersist(job)
 	m.mu.Unlock()
 	log.Printf("aiproxy: job %s %s", id, job.Status)
+	m.writeSnapshot(snap)
 	m.scheduleEviction(id)
 }
 
@@ -260,8 +351,10 @@ func (m *JobManager) enforceTimeout(job *Job) {
 			}
 			job.UpdatedAt = time.Now().UTC()
 			close(job.doneCh)
+			snap := m.schedulePersist(job)
 			log.Printf("aiproxy: job %s timed out", job.ID)
 			m.mu.Unlock()
+			m.writeSnapshot(snap)
 			m.scheduleEviction(job.ID)
 		} else {
 			m.mu.Unlock()
@@ -272,6 +365,12 @@ func (m *JobManager) enforceTimeout(job *Job) {
 func isTerminal(s JobStatus) bool {
 	return s == JobCompleted || s == JobFailed || s == JobTimeout
 }
+
+// jobIDLength is the hex length of a generated job id.
+const jobIDLength = 32
+
+// closeGrace bounds how long Close waits for persistence writes at shutdown.
+const closeGrace = 5 * time.Second
 
 func generateJobID() string {
 	var buf [16]byte

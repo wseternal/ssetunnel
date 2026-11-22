@@ -235,6 +235,7 @@ func NewConsoleHandler(ctx context.Context, store *auth.Store, reg *server.Regis
 		r.Handle("/api/v1/modules/openapi/{agent-id}/{module-id}", userAuth(http.HandlerFunc(modRoutes.handleGetOpenAPI))).Methods("GET")
 		r.Handle("/api/v1/modules/invoke/{agent-id}/{module-id}/{path:.*}", userAuth(http.HandlerFunc(modRoutes.handleInvoke)))
 		r.Handle("/api/v1/modules/invoke/{agent-id}/{module-id}", userAuth(http.HandlerFunc(modRoutes.handleInvoke)))
+		r.Handle("/api/v1/modules/{agent-id}/{module-id}/operations", userAuth(http.HandlerFunc(modRoutes.handleGetOperationModels))).Methods("GET")
 		r.Handle("/api/v1/modules/{agent-id}/{module-id}", userAuth(http.HandlerFunc(modRoutes.handleGetModule))).Methods("GET")
 
 		// Module UI routes: asset serving for federation.

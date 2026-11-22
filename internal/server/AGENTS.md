@@ -83,6 +83,14 @@ Thread-safe `map[string]*Session`. `Replace` closes stale sessions on reconnect.
 
 All validation happens **before** opening the stream, so errors are reported as HTTP errors.
 
+### `DataStore` (`datastore.go`)
+Server half of the module persistence path: `HandleRequest` executes `create`/`get`/`list`/`delete`
+against `module_records` and wraps the result in a `MsgDataStoreResp`. The agent overwrites the
+payload's `module_id` with the authenticated IPC caller, so module identity cannot be spoofed at
+this layer. `Server.SetDataStore` must run before any session attaches (`internal/command` does
+this right after `SetAuthStore`) — a session captures the handler pointer at attach time and
+keeps nil otherwise, which makes module requests fail with "no data store configured".
+
 ## Middleware
 - **`AgentAuthMiddleware`**: Bearer token (or query token for SSE) → `ValidateToken` → checks `PermAgent` → fallback user-session validation → `X-SSET-Token` response header on upgrade.
 - **`ConnectAuthMiddleware`**: Bearer token (or query token for SSE) → `ValidateToken` → checks `PermConnect` → fallback to user session validation.

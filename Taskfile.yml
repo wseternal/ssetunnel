@@ -7,6 +7,8 @@ vars:
   BUILD_DIR: build
   FRONTEND_DIR: frontend/console
   CLIENT_DIR: frontend/client
+  MODULES_DIR:
+    sh: echo "$HOME/.ssetunnel/modules"
   GIT_SHA:
     sh: git rev-parse --short HEAD 2>/dev/null || echo unknown
   VERSION:
@@ -87,6 +89,37 @@ tasks:
     cmds:
       - mkdir -p {{.BUILD_DIR}}
       - go build -ldflags "{{.LDFLAGS}}" -o {{.BUILD_DIR}}/{{.CLI_BIN}} ./cmd/cli
+
+  # ── Builtin Modules ──────────────────────────────────────────────────
+  # A builtin module lives under cmd/modules/<name>/. Each directory holds a
+  # main package and its openapi.yaml. The installed layout is
+  # <MODULES_DIR>/<name>/ with the binary and openapi.yaml, which the agent
+  # scans when it starts.
+
+  modules:install:
+    desc: Build every builtin module and install it into {{.MODULES_DIR}}
+    cmds:
+      - |
+        set -euo pipefail
+        dest="{{.MODULES_DIR}}"
+        count=0
+        for src in cmd/modules/*/; do
+          name=$(basename "$src")
+          if [ ! -f "$src/openapi.yaml" ]; then
+            echo "ERROR: $src has no openapi.yaml" >&2
+            exit 1
+          fi
+          mkdir -p "$dest/$name"
+          go build -trimpath -o "$dest/$name/$name" "./cmd/modules/$name"
+          cp "$src/openapi.yaml" "$dest/$name/openapi.yaml"
+          echo "installed $dest/$name/$name"
+          count=$((count + 1))
+        done
+        if [ "$count" -eq 0 ]; then
+          echo "ERROR: no builtin modules found under cmd/modules" >&2
+          exit 1
+        fi
+        echo "installed $count module(s) into $dest — restart the agent to load them"
 
   go:test:
     desc: Run Go tests with race detector

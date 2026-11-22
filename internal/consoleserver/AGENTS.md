@@ -62,6 +62,16 @@ func NewConsoleHandler(ctx context.Context, store *auth.Store, reg *server.Regis
 
 `mc` may be nil when metrics are disabled. `srv` provides the tunnel handler for cloud shell proxying; when it is nil the shell, remote-desktop and module routes are not registered. `store` may be nil (see the `--disable-auth` rule below). There is deliberately no database parameter: with `EmbeddedContent` set `litespaserver` locks to the embedded version and never queries, so `NewServer` is called with a nil pool. `CDNVersion: "embedded"` is what makes that safe: without it `resolveEmbedded` rejects a `console/dist` with no `index.html` and `NewManager` falls through to the DB provider, which panics on a nil pool inside `NewConsoleHandler` and takes the whole server down at startup.
 
+## Module Invocation Models
+
+`GET /api/v1/modules/{agent-id}/{module-id}/operations` (registered before the
+two-segment module detail route) answers the console workbench's form model.
+It resolves the user session, reads the module's `OpenAPIYAML` from the session
+catalog, and runs `agentmod.BuildOperationModels` per request — the model is
+presentation-only, so it is never cached on `ModuleInfo` and never affects
+validation or the invoke path. Errors mean the stored contract cannot be
+rendered (500), not that the request was wrong.
+
 ## Cloud Shell Proxy
 
 Shell endpoints are registered **before** the `/api/v1/` prefix catch-all (gorilla/mux matches the first route). They use `UserSessionMiddleware` for auth. The `ShellConnectHandler` forces `target=__shell__` and validates user-scoped agent access (non-admin users can only shell into their own agents).
