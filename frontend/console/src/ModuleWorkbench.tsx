@@ -413,8 +413,12 @@ export default function ModuleWorkbench({ apiBase, agentId, module, authHeaders,
       if (controller.signal.aborted || (e instanceof DOMException && e.name === 'AbortError')) return;
       setSendError(e instanceof Error ? e.message : 'Request failed');
     } finally {
-      // Only the current request owns the sending state.
-      if (sendAbortRef.current === controller) setSending(false);
+      // Only the current request owns the sending state; dropping its ref marks
+      // the panel idle again.
+      if (sendAbortRef.current === controller) {
+        sendAbortRef.current = null;
+        setSending(false);
+      }
     }
   };
 
