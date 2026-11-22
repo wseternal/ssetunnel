@@ -288,7 +288,12 @@ export default function ModuleWorkbench({ apiBase, agentId, module, authHeaders,
 
   useEffect(() => {
     loadOperations();
-    return () => loadAbortRef.current?.abort();
+    return () => {
+      loadAbortRef.current?.abort();
+      // Dropping the ref also stops the aborted request's finally clause from
+      // touching state after unmount.
+      loadAbortRef.current = null;
+    };
   }, [loadOperations]);
 
   const selected = operations.find((op) => operationKey(op) === selectedKey) || null;

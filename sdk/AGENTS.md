@@ -29,6 +29,6 @@ Module identity and validation. Reverse-DNS module IDs, OpenAPI YAML, UI descrip
 Structured error types with HTTP status codes for consumer-facing error handling.
 
 ## Rules
-- Provider reconnection is automatic — module authors should not manage connection state.
+- Provider and DataStore reconnection are automatic — a poisoned IPC connection is dropped and redialed on the next call, so module authors should not manage connection state.
 - Consumers must use the catalog epoch from `Discover` for subsequent invocations (stale epochs → 409).
 - SDK constants are intentionally duplicated from `internal/moduleproto` (public API isolation from internal types).
