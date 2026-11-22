@@ -12,6 +12,7 @@ import (
 	"time"
 
 	gmux "github.com/gorilla/mux"
+	"github.com/wseternal/ssetunnel/internal/agentmod"
 	"github.com/wseternal/ssetunnel/internal/server"
 )
 
@@ -170,6 +171,71 @@ func (m *moduleRoutes) handleGetOpenAPI(w http.ResponseWriter, r *http.Request) 
 	w.Header().Set("Content-Type", "application/x-yaml")
 	w.Header().Set("X-Module-Revision", mod.Revision)
 	w.Write(mod.OpenAPIYAML)
+}
+
+// moduleOperationsResponse is the payload consumed by the console's generic
+// module API workbench. Operations are rendered as forms, so they carry
+// parameters and a flattened request-body schema rather than raw YAML.
+type moduleOperationsResponse struct {
+	ModuleID   string                  `json:"module_id"`
+	Revision   string                  `json:"revision,omitempty"`
+	Title      string                  `json:"title"`
+	Operations []agentmod.APIOperation `json:"operations"`
+}
+
+// handleGetOperationModels returns the invocation model for a module, derived
+// on demand from the OpenAPI document already stored in the catalog.
+// GET /api/v1/modules/<agent-id>/<module-id>/operations
+func (m *moduleRoutes) handleGetOperationModels(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	sessInfo := server.UserSessionFromContext(r)
+	if sessInfo == nil {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	vars := gmux.Vars(r)
+	agentID := vars["agent-id"]
+	moduleID := vars["module-id"]
+
+	session := m.server.FindSessionByAgent(agentID, sessInfo)
+	if session == nil {
+		http.Error(w, "agent not found", http.StatusNotFound)
+		return
+	}
+
+	catalog := session.ModuleCatalog()
+	if catalog == nil {
+		http.Error(w, "no catalog available", http.StatusServiceUnavailable)
+		return
+	}
+
+	mod := catalog.GetModule(moduleID)
+	if mod == nil {
+		http.Error(w, "module not found", http.StatusNotFound)
+		return
+	}
+
+	title, operations, err := agentmod.BuildOperationModels(mod.OpenAPIYAML)
+	if err != nil {
+		// The document was validated at catalog commit, so this signals a
+		// contract the model builder cannot understand rather than user error.
+		log.Printf("module %s: build operation models: %v", moduleID, err)
+		http.Error(w, "module OpenAPI document cannot be rendered", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("X-Module-Revision", mod.Revision)
+	writeJSON(w, http.StatusOK, moduleOperationsResponse{
+		ModuleID:   mod.ModuleID,
+		Revision:   mod.Revision,
+		Title:      title,
+		Operations: operations,
+	})
 }
 
 // handleInvoke invokes a module operation.
