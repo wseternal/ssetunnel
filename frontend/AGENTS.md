@@ -17,6 +17,7 @@ frontend/
 │   │   └── assets/     # JS/CSS bundles (standard Vite output)
 │   ├── src/
 │   │   ├── App.tsx          # Main application component
+│   │   ├── ModuleWorkbench.tsx # OpenAPI-driven module API request builder
 │   │   ├── main.tsx         # Entry point
 │   │   └── theme/
 │   │       └── theme.ts     # Mercury Console design tokens
@@ -154,6 +155,12 @@ Login state is persisted to `localStorage` (sessionToken + userRole) and validat
 ## Integration
 
 The SPA is served by `consoleserver.NewConsoleHandler` at `/` on the console listen address (`:8081`). Hashed assets under `/assets/**` are served by a dedicated handler in `consoleserver.go` that reads them from the embedded FS and marks them `immutable` — it deliberately bypasses `litespaserver`, which would force `no-store` on them, while the security headers that library applies are declared once for the whole router by the `consoleHeaders` wrapper. API routes under `/api/v1/` are handled by `consoleapi`. Shell routes under `/api/v1/shell/` are registered by `consoleserver` and proxy to the server's cloud shell handlers. Unmatched `/api/` and bare `/assets` paths hit explicit not-found guards registered before the SPA catch-all, so a wrong prefix surfaces as a 404 rather than as `index.html` with a 200. Route order and per-class headers are pinned by `internal/consoleserver/console_routes_test.go`.
+
+## Module API Workbench
+
+The Modules tab renders `ModuleWorkbench.tsx` for every registered module — no module-specific code. It loads its form model from `GET /api/v1/modules/<agent-id>/<module-id>/operations`, which `consoleserver` derives on demand from the module's stored `openapi.yaml` via `agentmod.BuildOperationModels` (parameters, request-body schema with local `$ref`s flattened, recursion truncated). Requests are sent through the existing console proxy `POST /api/v1/modules/invoke/<agent-id>/<module-id>/<path>`.
+
+Contract for the component: operations are ordered by path then method; path parameters are always required; query values left blank are omitted; a JSON content type enables client-side JSON validation before sending; responses are rendered up to 200 KiB with a truncation notice. The raw OpenAPI YAML stays visible below the workbench for contract debugging.
 
 ## Rules
 * Always rebuild `dist/` before committing changes that touch `src/` — CI enforces it with `task fe:build` + `git diff --exit-code -- frontend/console/dist`.

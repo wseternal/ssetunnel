@@ -118,12 +118,14 @@ Registry state lives next to the socket, in the agent data directory:
 
 Invocations travel through the server, so a module never opens a port that you dial directly — the kernel-side listeners belong to the agent. (The `ai-automation-proxy` module additionally binds a local port for the browser extension, default `:9090`; that is the extension's own channel, not the invocation path.)
 
-Given a module card in the console, the **Try It** panel sends a request against the operations in `openapi.yaml`:
+Given a module card in the console, the **Module API Workbench** builds its request form from the operations in `openapi.yaml`, so there is nothing module-specific to install:
 
 1. Select the agent and module in the **Modules** tab
-2. Pick a method and path from the spec
-3. Add headers or a JSON body
-4. Click **Send**
+2. Pick an operation from the list on the left — path is the template from the spec
+3. Fill the path/query fields (path parameters are always required) and the JSON body, which is pre-filled from the spec's schema (examples, defaults, and enum values are used when present)
+4. **Send**, or copy the generated cURL and replay it from a shell
+
+Responses show status, timing, headers, and a pretty-printed body; bodies larger than 200 KiB are truncated in the pane. Query fields left blank are omitted, and the JSON body is validated locally before the request leaves the console. If an operation's schema is nested or recursive, the template stops after a few levels and the body stays freely editable.
 
 The same request as an HTTP call against the console API. The console port is 8081 by default; behind a reverse proxy add whatever path prefix the proxy expects:
 

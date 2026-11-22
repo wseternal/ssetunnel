@@ -33,6 +33,9 @@ A module's stdout and stderr both reach the agent log: stderr as `module[<id>]: 
 ### OpenAPI Validation (`openapi.go`)
 Parses and validates OpenAPI v3.0/v3.1 YAML. Extracts operations, rejects external `$ref` and path traversal.
 
+### Operation Models (`openapimodel.go`)
+`BuildOperationModels` turns the same YAML into form-friendly operations for the console's module workbench: parameters, a single request body media type (JSON preferred), and a flattened schema with local `$ref`s resolved, `allOf` merged, and cycles marked `Recursive` instead of expanded. It is presentation-only and never feeds validation or the catalog — the console re-derives it per request from the stored YAML.
+
 ### Package (`package.go`)
 Module package metadata with `ValidateExecutable()` — rejects symlinks escaping the package directory. The executability check is platform-specific (`executable_unix.go`, `executable_windows.go`): the permission bit on Unix, the `.exe` extension on Windows.
 
