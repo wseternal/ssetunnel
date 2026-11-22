@@ -93,6 +93,43 @@ interface ModuleWorkbenchProps {
 
 const MAX_RENDER_BYTES = 200 * 1024;
 
+const isJSONContentType = (ct: string) => ct === 'application/json' || ct.endsWith('+json');
+
+// readCappedBody streams the response and stops once MAX_RENDER_BYTES is
+// collected, so a multi-megabyte artifact never lands in tab memory whole.
+// Chunks are decoded incrementally to keep split multi-byte characters intact.
+async function readCappedBody(res: Response): Promise<{ text: string; truncated: boolean }> {
+  if (!res.body) {
+    // 204 No Content and HEAD responses expose no stream.
+    return { text: '', truncated: false };
+  }
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let text = '';
+  let totalBytes = 0;
+  let truncated = false;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value || value.byteLength === 0) continue;
+      totalBytes += value.byteLength;
+      if (totalBytes > MAX_RENDER_BYTES) {
+        const keep = value.byteLength - (totalBytes - MAX_RENDER_BYTES);
+        text += decoder.decode(value.subarray(0, keep), { stream: true });
+        truncated = true;
+        // The remainder is only ever discarded, so stop pulling it.
+        void reader.cancel().catch(() => undefined);
+        break;
+      }
+      text += decoder.decode(value, { stream: true });
+    }
+  } finally {
+    text += decoder.decode();
+  }
+  return { text, truncated };
+}
+
 const METHOD_TONE: Record<string, 'success' | 'primary' | 'warning' | 'error' | 'default'> = {
   GET: 'success',
   POST: 'primary',
@@ -183,6 +220,7 @@ export default function ModuleWorkbench({ apiBase, agentId, module, authHeaders,
   authRef.current = authHeaders;
   const checkAuthRef = useRef(checkAuth);
   checkAuthRef.current = checkAuth;
+  const loadAbortRef = useRef<AbortController | null>(null);
 
   // Initialise the form for an operation: defaults for every parameter, a body
   // template from the schema, and a content-type header when a body exists.
@@ -192,9 +230,12 @@ export default function ModuleWorkbench({ apiBase, agentId, module, authHeaders,
       seeded[`${param.in}:${param.name}`] = fieldDefault(param.schema);
     }
     setValues(seeded);
-    if (op.request_body && op.request_body.content_type) {
-      setHeadersText(`Content-Type: ${op.request_body.content_type}`);
-      setBodyText(JSON.stringify(sampleValue(op.request_body.schema), null, 2));
+    const body = op.request_body;
+    if (body && body.content_type) {
+      setHeadersText(`Content-Type: ${body.content_type}`);
+      // A JSON body is templated from its schema; any other media type would
+      // be misrepresented by a JSON skeleton, so the editor starts empty.
+      setBodyText(isJSONContentType(body.content_type) && body.schema ? JSON.stringify(sampleValue(body.schema), null, 2) : '');
     } else {
       setHeadersText('');
       setBodyText('');
@@ -204,12 +245,18 @@ export default function ModuleWorkbench({ apiBase, agentId, module, authHeaders,
   }, []);
 
   const loadOperations = useCallback(async () => {
+    // The component stays mounted across module switches, so a slow request
+    // for the previous module must not repaint the new one.
+    loadAbortRef.current?.abort();
+    const controller = new AbortController();
+    loadAbortRef.current = controller;
+
     setLoading(true);
     setLoadError('');
     try {
       const res = await fetch(
         `${apiBase}/api/v1/modules/${encodeURIComponent(agentId)}/${encodeURIComponent(module.module_id)}/operations`,
-        { headers: authRef.current() },
+        { headers: authRef.current(), signal: controller.signal },
       );
       if (!checkAuthRef.current(res)) return;
       if (!res.ok) {
@@ -217,6 +264,7 @@ export default function ModuleWorkbench({ apiBase, agentId, module, authHeaders,
         return;
       }
       const payload: OperationsResponse = await res.json();
+      if (controller.signal.aborted) return;
       setTitle(payload.title || '');
       setOperations(payload.operations || []);
       if (payload.operations && payload.operations.length > 0) {
@@ -229,14 +277,18 @@ export default function ModuleWorkbench({ apiBase, agentId, module, authHeaders,
         setBodyText('');
       }
     } catch (e) {
+      if (controller.signal.aborted || (e instanceof DOMException && e.name === 'AbortError')) return;
       setLoadError(e instanceof Error ? e.message : 'Failed to load operations');
     } finally {
-      setLoading(false);
+      // Only the current request may end the loading state; an aborted one
+      // finishes while its successor is still in flight.
+      if (loadAbortRef.current === controller) setLoading(false);
     }
   }, [apiBase, agentId, module.module_id, seedForm]);
 
   useEffect(() => {
     loadOperations();
+    return () => loadAbortRef.current?.abort();
   }, [loadOperations]);
 
   const selected = operations.find((op) => operationKey(op) === selectedKey) || null;
@@ -314,14 +366,14 @@ export default function ModuleWorkbench({ apiBase, agentId, module, authHeaders,
       if (!checkAuthRef.current(res)) return;
       const headers: Record<string, string> = {};
       res.headers.forEach((v, k) => { headers[k] = v; });
-      const rawBody = await res.text();
+      const { text: rawBody, truncated } = await readCappedBody(res);
       setResult({
         status: res.status,
         statusText: res.statusText,
         headers,
         body: rawBody,
         durationMs: Math.round(performance.now() - started),
-        truncated: rawBody.length > MAX_RENDER_BYTES,
+        truncated,
       });
     } catch (e) {
       setSendError(e instanceof Error ? e.message : 'Request failed');
@@ -413,7 +465,16 @@ export default function ModuleWorkbench({ apiBase, agentId, module, authHeaders,
               return (
                 <Box
                   key={operationKey(op)}
+                  role="button"
+                  tabIndex={0}
+                  aria-pressed={active}
                   onClick={() => selectOperation(op)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault();
+                      selectOperation(op);
+                    }
+                  }}
                   sx={{
                     display: 'flex',
                     gap: 1,
@@ -423,7 +484,8 @@ export default function ModuleWorkbench({ apiBase, agentId, module, authHeaders,
                     borderRadius: 1,
                     cursor: 'pointer',
                     bgcolor: active ? 'action.selected' : 'transparent',
-                    '&:hover': { bgcolor: 'action.hover' },
+                    '&:hover, &:focus-visible': { bgcolor: 'action.hover' },
+                    '&:focus-visible': { outline: '2px solid', outlineColor: 'primary.main' },
                   }}
                 >
                   <Chip

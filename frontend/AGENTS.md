@@ -160,7 +160,7 @@ The SPA is served by `consoleserver.NewConsoleHandler` at `/` on the console lis
 
 The Modules tab renders `ModuleWorkbench.tsx` for every registered module — no module-specific code. It loads its form model from `GET /api/v1/modules/<agent-id>/<module-id>/operations`, which `consoleserver` derives on demand from the module's stored `openapi.yaml` via `agentmod.BuildOperationModels` (parameters, request-body schema with local `$ref`s flattened, recursion truncated). Requests are sent through the existing console proxy `POST /api/v1/modules/invoke/<agent-id>/<module-id>/<path>`.
 
-Contract for the component: operations are ordered by path then method; path parameters are always required; query values left blank are omitted; a JSON content type enables client-side JSON validation before sending; responses are rendered up to 200 KiB with a truncation notice. The raw OpenAPI YAML stays visible below the workbench for contract debugging.
+Contract for the component: operations are ordered by path then method; path parameters are always required; query values left blank are omitted; a JSON content type enables client-side JSON validation before sending; responses are streamed and read up to 200 KiB, then cancelled and shown with a truncation notice, so an oversized artifact never lands in tab memory whole. Non-JSON bodies open empty with only a `Content-Type` header, and every module switch aborts the previous operation-list fetch. The raw OpenAPI YAML stays visible below the workbench for contract debugging.
 
 ## Rules
 * Always rebuild `dist/` before committing changes that touch `src/` — CI enforces it with `task fe:build` + `git diff --exit-code -- frontend/console/dist`.

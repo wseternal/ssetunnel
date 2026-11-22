@@ -55,7 +55,7 @@ At startup the agent scans `~/.ssetunnel/modules` before it reconciles the super
 ```
 agent: module IPC listening on /Users/you/.ssetunnel/agent/module.sock
 agent: loaded 1 module package(s) from /Users/you/.ssetunnel/modules
-module[com.wseternal.ai-automation-proxy]: aiproxy: starting module com.wseternal.ai-automation-proxy (extension server on :9090)
+module[com.wseternal.ai-automation-proxy]: aiproxy: starting module com.wseternal.ai-automation-proxy (extension server on 127.0.0.1:9090)
 ```
 
 A module's output has two paths into that log: stderr keeps the plain `module[<module-id>]:` prefix, and stdout is tagged `module[<module-id>] out:`. Both are forwarded line by line, so a module can log to whichever stream it prefers and the agent's log stays the single place its output lives. Lines from the two streams can interleave; each stream's own order is preserved.
@@ -125,7 +125,7 @@ Given a module card in the console, the **Module API Workbench** builds its requ
 3. Fill the path/query fields (path parameters are always required) and the JSON body, which is pre-filled from the spec's schema (examples, defaults, and enum values are used when present)
 4. **Send**, or copy the generated cURL and replay it from a shell
 
-Responses show status, timing, headers, and a pretty-printed body; bodies larger than 200 KiB are truncated in the pane. Query fields left blank are omitted, and the JSON body is validated locally before the request leaves the console. If an operation's schema is nested or recursive, the template stops after a few levels and the body stays freely editable.
+Responses show status, timing, headers, and a pretty-printed body; the pane streams the body and stops at 200 KiB, so a large artifact is never held in the tab in full. Query fields left blank are omitted, and the JSON body is validated locally before the request leaves the console. If an operation's schema is nested or recursive, the template stops after a few levels and the body stays freely editable. A body the spec declares as non-JSON (for example `multipart/form-data`) opens empty with only its `Content-Type` header set, because a JSON skeleton would misdescribe the call.
 
 The same request as an HTTP call against the console API. The console port is 8081 by default; behind a reverse proxy add whatever path prefix the proxy expects:
 
