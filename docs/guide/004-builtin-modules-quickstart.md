@@ -58,7 +58,7 @@ agent: loaded 1 module package(s) from /Users/you/.ssetunnel/modules
 module[com.wseternal.ai-automation-proxy]: aiproxy: starting module com.wseternal.ai-automation-proxy (extension server on :9090)
 ```
 
-Anything the module writes to stderr after that keeps the same `module[<module-id>]:` prefix, so its own log lines and the agent's are distinguishable.
+A module's output has two paths into that log: stderr keeps the plain `module[<module-id>]:` prefix, and stdout is tagged `module[<module-id>] out:`. Both are forwarded line by line, so a module can log to whichever stream it prefers and the agent's log stays the single place its output lives. Lines from the two streams can interleave; each stream's own order is preserved.
 
 For each package directory the scan:
 

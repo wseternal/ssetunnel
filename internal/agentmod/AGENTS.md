@@ -18,6 +18,9 @@ Persistent module registry backed by JSON file in agent data dir. Tracks install
 - `InstallFromIPC()` also validates OpenAPI (modules registering via IPC get the same validation).
 - `Supervisor` manages module process lifecycle with exponential backoff restart (500ms → 30s with jitter).
 
+### Module Output (`modulelog.go`, `supervisor_*.go`)
+A module's stdout and stderr both reach the agent log: stderr as `module[<id>]: <line>`, stdout as `module[<id>] out: <line>`. The writer is assigned to `cmd.Stdout`/`cmd.Stderr` rather than read from a pipe, so `Wait` joins the copy goroutines instead of closing the pipe on them; a reader-owned pipe loses output buffered at exit. An unterminated tail is logged as its own record, and `cmd.WaitDelay` keeps a module that hands its output to a child from stalling `Wait`.
+
 ### Module Scan (`scan.go`)
 `Registry.ScanModules(dir)` registers packages installed under a directory, one subdirectory per package. Each package holds an executable and `openapi.yaml`.
 

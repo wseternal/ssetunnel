@@ -3,18 +3,18 @@
 package agentmod
 
 import (
-	"bufio"
 	"context"
-	"log"
 	"os"
 	"os/exec"
 	"syscall"
+	"time"
 )
 
 // startModuleProcess creates an exec.Cmd for launching a module process.
 // The process is started directly (no shell) with the IPC credential and
 // endpoint passed as environment variables.
-// Module stderr is captured and forwarded to the agent log with a module prefix.
+// Both output streams are forwarded to the agent log with a module prefix;
+// stdout is tagged so its lines stay distinguishable.
 func startModuleProcess(ctx context.Context, executable, credential, endpoint, moduleID string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, executable)
 	cmd.Env = append(os.Environ(),
@@ -26,17 +26,10 @@ func startModuleProcess(ctx context.Context, executable, credential, endpoint, m
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		CreationFlags: syscall.CREATE_NEW_PROCESS_GROUP,
 	}
-	cmd.Stdout = nil
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		log.Printf("module[%s]: stderr pipe unavailable: %v", moduleID, err)
-		return cmd
-	}
-	go func() {
-		scanner := bufio.NewScanner(stderr)
-		for scanner.Scan() {
-			log.Printf("module[%s]: %s", moduleID, scanner.Text())
-		}
-	}()
+	cmd.Stdout = &moduleLogWriter{moduleID: moduleID, stream: " out"}
+	cmd.Stderr = &moduleLogWriter{moduleID: moduleID}
+	// A module that leaves a child holding its output must not stall Wait:
+	// once the command itself has exited, the pipes are closed.
+	cmd.WaitDelay = time.Second
 	return cmd
 }
