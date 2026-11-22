@@ -477,7 +477,7 @@ export default function App() {
   const [desktopTooltip, setDesktopTooltip] = useState<string>('');
   const desktopTooltipTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const authHeaders = (): HeadersInit => sessionToken ? { Authorization: `Bearer ${sessionToken}` } : {};
+  const authHeaders = (): Record<string, string> => sessionToken ? { Authorization: `Bearer ${sessionToken}` } : {};
 
   // Format an InputAck into a brief human-readable tooltip label.
   const formatInputAckLabel = (ack: { type?: string; detail?: string }): string => {

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Alert,
   Box,
@@ -87,7 +87,7 @@ interface ModuleWorkbenchProps {
   apiBase: string;
   agentId: string;
   module: WorkbenchModule;
-  authHeaders: () => HeadersInit;
+  authHeaders: () => Record<string, string>;
   checkAuth: (res: Response) => boolean;
 }
 
@@ -176,6 +176,14 @@ export default function ModuleWorkbench({ apiBase, agentId, module, authHeaders,
   const [sendError, setSendError] = useState('');
   const [result, setResult] = useState<InvokeResult | null>(null);
 
+  // Keep the auth callbacks in refs: App recreates them on every render, and
+  // depending on their identity would refetch the operation list — wiping the
+  // operator's form — each time the parent re-rendered.
+  const authRef = useRef(authHeaders);
+  authRef.current = authHeaders;
+  const checkAuthRef = useRef(checkAuth);
+  checkAuthRef.current = checkAuth;
+
   // Initialise the form for an operation: defaults for every parameter, a body
   // template from the schema, and a content-type header when a body exists.
   const seedForm = useCallback((op: APIOperation) => {
@@ -201,9 +209,9 @@ export default function ModuleWorkbench({ apiBase, agentId, module, authHeaders,
     try {
       const res = await fetch(
         `${apiBase}/api/v1/modules/${encodeURIComponent(agentId)}/${encodeURIComponent(module.module_id)}/operations`,
-        { headers: authHeaders() },
+        { headers: authRef.current() },
       );
-      if (!checkAuth(res)) return;
+      if (!checkAuthRef.current(res)) return;
       if (!res.ok) {
         setLoadError((await res.text()) || `Failed to load operations (${res.status})`);
         return;
@@ -225,7 +233,7 @@ export default function ModuleWorkbench({ apiBase, agentId, module, authHeaders,
     } finally {
       setLoading(false);
     }
-  }, [apiBase, agentId, module.module_id, authHeaders, checkAuth, seedForm]);
+  }, [apiBase, agentId, module.module_id, seedForm]);
 
   useEffect(() => {
     loadOperations();
@@ -265,7 +273,7 @@ export default function ModuleWorkbench({ apiBase, agentId, module, authHeaders,
     const queryString = query.toString();
     const url = `${apiBase}/api/v1/modules/invoke/${encodeURIComponent(agentId)}/${encodeURIComponent(module.module_id)}${path}${queryString ? `?${queryString}` : ''}`;
 
-    const headers = { ...authHeaders(), ...parseHeaderLines(headersText) } as Record<string, string>;
+    const headers: Record<string, string> = { ...authRef.current(), ...parseHeaderLines(headersText) };
     for (const param of headerParams) {
       const raw = values[`header:${param.name}`] ?? '';
       if (raw !== '') headers[param.name] = raw;
@@ -303,7 +311,7 @@ export default function ModuleWorkbench({ apiBase, agentId, module, authHeaders,
         headers: request.headers,
         body: request.body,
       });
-      if (!checkAuth(res)) return;
+      if (!checkAuthRef.current(res)) return;
       const headers: Record<string, string> = {};
       res.headers.forEach((v, k) => { headers[k] = v; });
       const rawBody = await res.text();
