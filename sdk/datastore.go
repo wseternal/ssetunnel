@@ -21,6 +21,9 @@ import (
 // Transport: connects to the agent's IPC endpoint and uses the
 // DATASTORE command to forward requests through the agent → server path.
 // Each DataStore opens its own dedicated connection to the agent.
+//
+// Recovery: a wire, framing or decode error drops the connection and the
+// next call redials transparently, matching Provider's reconnect behaviour.
 type DataStore struct {
 	endpoint   string
 	credential string
@@ -157,20 +160,32 @@ func (ds *DataStore) Delete(ctx context.Context, moduleID, recordID string) erro
 	return err
 }
 
+// errDataStoreClosed is returned by a DataStore whose Close has been called.
+var errDataStoreClosed = errors.New("data store: connection closed")
+
 // Close releases the data store connection.
 func (ds *DataStore) Close() error {
 	ds.mu.Lock()
 	defer ds.mu.Unlock()
 	ds.closed = true
+	var err error
 	if ds.conn != nil {
-		return ds.conn.Close()
+		err = ds.conn.Close()
+		ds.conn = nil
 	}
-	return nil
+	ds.reader = nil
+	return err
 }
 
 func (ds *DataStore) connect() error {
+	return ds.connectContext(context.Background())
+}
+
+// connectContext dials and authenticates a fresh IPC connection. The caller
+// holds ds.mu; on success it swaps in the new connection and reader.
+func (ds *DataStore) connectContext(ctx context.Context) error {
 	var d net.Dialer
-	conn, err := d.DialContext(context.Background(), ipcNetwork, ds.endpoint)
+	conn, err := d.DialContext(ctx, ipcNetwork, ds.endpoint)
 	if err != nil {
 		return fmt.Errorf("dial: %w", err)
 	}
@@ -213,8 +228,15 @@ func (ds *DataStore) sendRequest(ctx context.Context, req dataStoreRequest) (*da
 	ds.mu.Lock()
 	defer ds.mu.Unlock()
 
-	if ds.closed || ds.conn == nil {
-		return nil, errors.New("data store: connection closed")
+	if ds.closed {
+		return nil, errDataStoreClosed
+	}
+	// A previous request poisoned the connection; redial before sending.
+	// Reconnecting under the lock keeps a concurrent Close() serialized.
+	if ds.conn == nil {
+		if err := ds.connectContext(ctx); err != nil {
+			return nil, fmt.Errorf("data store: reconnect: %w", err)
+		}
 	}
 
 	// Set deadline from context or default 30s.
@@ -233,42 +255,61 @@ func (ds *DataStore) sendRequest(ctx context.Context, req dataStoreRequest) (*da
 	// Send: "DATASTORE <len>\n<json>"
 	cmd := fmt.Sprintf("DATASTORE %d\n", len(data))
 	if _, err := ds.conn.Write([]byte(cmd)); err != nil {
+		ds.resetConnLocked()
 		return nil, fmt.Errorf("write command: %w", err)
 	}
 	if _, err := ds.conn.Write(data); err != nil {
+		ds.resetConnLocked()
 		return nil, fmt.Errorf("write payload: %w", err)
 	}
 
 	// Read response: "DATASTORE_RESP <len>\n<json>" (length-prefixed framing).
 	respLine, err := ds.reader.ReadString('\n')
 	if err != nil {
+		ds.resetConnLocked()
 		return nil, fmt.Errorf("read response header: %w", err)
 	}
 	respLine = respLine[:len(respLine)-1] // trim \n
 	if len(respLine) < 15 || respLine[:15] != "DATASTORE_RESP " {
+		ds.resetConnLocked()
 		return nil, fmt.Errorf("unexpected response header: %q", respLine)
 	}
 	respLen, err := strconv.Atoi(respLine[15:])
 	if err != nil || respLen < 0 || respLen > 16<<20 {
+		ds.resetConnLocked()
 		return nil, fmt.Errorf("invalid response length: %q", respLine[15:])
 	}
 	respBuf := make([]byte, respLen)
 	if respLen > 0 {
 		if _, err := io.ReadFull(ds.reader, respBuf); err != nil {
+			ds.resetConnLocked()
 			return nil, fmt.Errorf("read response body: %w", err)
 		}
 	}
 
-	// Clear deadline.
+	// Clear deadline: the frame was consumed in full, so the stream is clean.
 	ds.conn.SetDeadline(time.Time{})
 
 	// Parse response.
 	var resp dataStoreResponse
 	if err := json.Unmarshal(respBuf, &resp); err != nil {
+		ds.resetConnLocked()
 		return nil, fmt.Errorf("unmarshal response: %w", err)
 	}
+	// Application-level errors keep the stream healthy, so the connection
+	// stays usable and the caller sees the server's message.
 	if resp.Error != "" {
 		return &resp, fmt.Errorf("server error: %s", resp.Error)
 	}
 	return &resp, nil
+}
+
+// resetConnLocked drops the connection and its buffered reader so the next
+// request starts from a fresh, synchronized stream. Callers hold ds.mu.
+func (ds *DataStore) resetConnLocked() {
+	if ds.conn != nil {
+		_ = ds.conn.Close()
+		ds.conn = nil
+	}
+	ds.reader = nil
 }

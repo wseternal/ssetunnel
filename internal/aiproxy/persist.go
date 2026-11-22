@@ -77,9 +77,15 @@ func loadJob(ctx context.Context, store *sdk.DataStore, moduleID, id string) (*J
 	if err != nil || record == nil {
 		return nil, false
 	}
+	return decodeStoredJob(id, record.Data)
+}
 
+// decodeStoredJob turns a stored row into a Job. It is deliberately pure — no
+// store access and no clock — so the decoding and abandoned-job rules can be
+// tested directly. id names the row and fills in a snapshot that omitted it.
+func decodeStoredJob(id string, data []byte) (*Job, bool) {
 	var snap persistedJob
-	if err := json.Unmarshal(record.Data, &snap); err != nil {
+	if err := json.Unmarshal(data, &snap); err != nil {
 		log.Printf("aiproxy: load job %s: decode: %v", id, err)
 		return nil, false
 	}
