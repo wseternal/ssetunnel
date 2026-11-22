@@ -108,25 +108,23 @@ async function readCappedBody(res: Response): Promise<{ text: string; truncated:
   let text = '';
   let totalBytes = 0;
   let truncated = false;
-  try {
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      if (!value || value.byteLength === 0) continue;
-      totalBytes += value.byteLength;
-      if (totalBytes > MAX_RENDER_BYTES) {
-        const keep = value.byteLength - (totalBytes - MAX_RENDER_BYTES);
-        text += decoder.decode(value.subarray(0, keep), { stream: true });
-        truncated = true;
-        // The remainder is only ever discarded, so stop pulling it.
-        void reader.cancel().catch(() => undefined);
-        break;
-      }
-      text += decoder.decode(value, { stream: true });
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (!value || value.byteLength === 0) continue;
+    totalBytes += value.byteLength;
+    if (totalBytes > MAX_RENDER_BYTES) {
+      const keep = value.byteLength - (totalBytes - MAX_RENDER_BYTES);
+      text += decoder.decode(value.subarray(0, keep), { stream: true });
+      truncated = true;
+      // The remainder is only ever discarded, so stop pulling it.
+      void reader.cancel().catch(() => undefined);
+      break;
     }
-  } finally {
-    text += decoder.decode();
+    text += decoder.decode(value, { stream: true });
   }
+  // Flush any multi-byte character left pending by the last chunk.
+  text += decoder.decode();
   return { text, truncated };
 }
 

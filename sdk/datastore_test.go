@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"sync"
@@ -99,7 +100,7 @@ func (f *fakeIPC) handshake(conn net.Conn) (*bufio.Reader, error) {
 	if _, err := fmt.Sscanf(line, "AUTH %d", &n); err != nil {
 		return nil, fmt.Errorf("bad auth header %q: %w", line, err)
 	}
-	if _, err := ioReadFull(br, n); err != nil {
+	if _, err := io.ReadFull(br, make([]byte, n)); err != nil {
 		return nil, err
 	}
 	if _, err := conn.Write([]byte("OK\n")); err != nil {
@@ -112,18 +113,6 @@ func (f *fakeIPC) handshake(conn net.Conn) (*bufio.Reader, error) {
 	return br, nil
 }
 
-func ioReadFull(br *bufio.Reader, n int) ([]byte, error) {
-	buf := make([]byte, n)
-	for i := 0; i < n; i++ {
-		b, err := br.ReadByte()
-		if err != nil {
-			return nil, err
-		}
-		buf[i] = b
-	}
-	return buf, nil
-}
-
 func readDataStoreRequest(br *bufio.Reader) (dataStoreRequest, error) {
 	var req dataStoreRequest
 	line, err := br.ReadString('\n')
@@ -134,7 +123,10 @@ func readDataStoreRequest(br *bufio.Reader) (dataStoreRequest, error) {
 	if _, err := fmt.Sscanf(line, "DATASTORE %d", &n); err != nil {
 		return req, fmt.Errorf("bad request header %q: %w", line, err)
 	}
-	body, err := ioReadFull(br, n)
+	body := make([]byte, n)
+	if _, err := io.ReadFull(br, body); err != nil {
+		return req, err
+	}
 	if err != nil {
 		return req, err
 	}
