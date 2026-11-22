@@ -238,3 +238,54 @@ func TestBuildOperationModelsRejectsOversize(t *testing.T) {
 		t.Fatal("expected size error")
 	}
 }
+
+// OpenAPI 3.1 allows array types and referenced path items; both must survive
+// the flattening step or the console would hide operations or mis-type fields.
+const operationModelsFixture31 = `
+openapi: 3.1.0
+info:
+  title: V31 API
+  version: 1.0.0
+components:
+  pathItems:
+    Ping:
+      get:
+        operationId: ping
+        responses: {}
+paths:
+  /ping:
+    $ref: '#/components/pathItems/Ping'
+  /note:
+    post:
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                text:
+                  type: [string, null]
+`
+
+func TestBuildOperationModelsOpenAPI31(t *testing.T) {
+	_, ops, err := BuildOperationModels([]byte(operationModelsFixture31))
+	if err != nil {
+		t.Fatalf("BuildOperationModels: %v", err)
+	}
+	if len(ops) != 2 {
+		t.Fatalf("len(ops) = %d, want 2 (path item $ref must be followed): %+v", len(ops), ops)
+	}
+	var note *APIOperation
+	for i := range ops {
+		if ops[i].Path == "/note" {
+			note = &ops[i]
+		}
+	}
+	if note == nil || note.Method != "POST" {
+		t.Fatalf("missing POST /note: %+v", ops)
+	}
+	text := note.RequestBody.Schema.Properties[0]
+	if text.Schema.Type != "string" || !text.Schema.Nullable {
+		t.Errorf("text schema = %+v, want string + nullable", text.Schema)
+	}
+}

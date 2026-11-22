@@ -106,6 +106,12 @@ func BuildOperationModels(data []byte) (string, []APIOperation, error) {
 		if !ok {
 			continue
 		}
+		// A path item may itself be a reference (OpenAPI 3.1 pathItems).
+		if ref, ok := pathMap["$ref"].(string); ok {
+			if target, _ := resolveRef(doc, ref); target != nil {
+				pathMap = target
+			}
+		}
 
 		// Parameters declared on the path item apply to every operation
 		// under it, unless the operation overrides the same name+location.
@@ -164,6 +170,40 @@ func methodRank(method string) int {
 func stringField(m map[string]interface{}, key string) string {
 	s, _ := m[key].(string)
 	return s
+}
+
+// schemaType reads "type" in both spec dialects: OpenAPI 3.0 uses a string,
+// while 3.1 allows an array such as ["string", "null"].
+func schemaType(m map[string]interface{}) string {
+	switch v := m["type"].(type) {
+	case string:
+		return v
+	case []interface{}:
+		for _, entry := range v {
+			if s, ok := entry.(string); ok && s != "null" {
+				return s
+			}
+		}
+	}
+	return ""
+}
+
+// hasNullType reports whether a 3.1 type array includes "null".
+func hasNullType(raw interface{}) bool {
+	list, ok := raw.([]interface{})
+	if !ok {
+		return false
+	}
+	for _, entry := range list {
+		// yaml.v3 decodes the literal `null` in a type array as a nil entry.
+		if entry == nil {
+			return true
+		}
+		if s, ok := entry.(string); ok && s == "null" {
+			return true
+		}
+	}
+	return false
 }
 
 func boolField(m map[string]interface{}, key string) bool {
@@ -348,10 +388,10 @@ func buildSchema(doc map[string]interface{}, raw interface{}, seen map[string]bo
 	}
 
 	schema := &APISchema{
-		Type:        stringField(m, "type"),
+		Type:        schemaType(m),
 		Format:      stringField(m, "format"),
 		Description: stringField(m, "description"),
-		Nullable:    boolField(m, "nullable"),
+		Nullable:    boolField(m, "nullable") || hasNullType(m["type"]),
 	}
 	if enum, ok := m["enum"].([]interface{}); ok {
 		schema.Enum = enum
