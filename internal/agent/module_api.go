@@ -81,9 +81,16 @@ func (s *moduleAPIServer) contractFor(mod *moduleproto.SnapshotModuleEntry) (*mo
 	if mod == nil {
 		return nil, errors.New("nil module entry")
 	}
-	if cached, ok := s.contracts.Load(mod.ModuleID); ok {
-		if contract, ok := cached.(*moduleContract); ok && contract.revision == mod.Revision {
-			return contract, nil
+	// A provider may leave Revision empty when it does not manage contract
+	// revisions. There is then no invalidation signal, so caching the parsed
+	// document would serve a stale contract after the module changes. Bypass
+	// the cache in that case and revalidate on every request.
+	cacheable := mod.Revision != ""
+	if cacheable {
+		if cached, ok := s.contracts.Load(mod.ModuleID); ok {
+			if contract, ok := cached.(*moduleContract); ok && contract.revision == mod.Revision {
+				return contract, nil
+			}
 		}
 	}
 	validated, err := agentmod.ValidateOpenAPI(mod.OpenAPIYAML)
@@ -91,7 +98,9 @@ func (s *moduleAPIServer) contractFor(mod *moduleproto.SnapshotModuleEntry) (*mo
 		return nil, err
 	}
 	contract := &moduleContract{revision: mod.Revision, validated: validated}
-	s.contracts.Store(mod.ModuleID, contract)
+	if cacheable {
+		s.contracts.Store(mod.ModuleID, contract)
+	}
 	return contract, nil
 }
 
