@@ -552,16 +552,17 @@ func (s *moduleAPIServer) handleGetProviderAsset(w http.ResponseWriter, r *http.
 		return
 	}
 
-	validated, err := agentmod.ValidateOpenAPI(mod.OpenAPIYAML)
+	contract, err := s.contractFor(mod)
 	if err != nil {
+		log.Printf("agent: module api: validate OpenAPI for %s: %v", mod.ModuleID, err)
 		http.Error(w, "module contract unavailable", http.StatusServiceUnavailable)
 		return
 	}
 	// The asset operation is the module's own HTTP route for the file.
 	opPath := assetPath
-	if _, ok := validated.MatchOperation(http.MethodGet, opPath); !ok {
+	if _, ok := contract.validated.MatchOperation(http.MethodGet, opPath); !ok {
 		opPath = "/ui" + assetPath
-		if _, ok := validated.MatchOperation(http.MethodGet, opPath); !ok {
+		if _, ok := contract.validated.MatchOperation(http.MethodGet, opPath); !ok {
 			http.Error(w, fmt.Sprintf("asset operation not found for path: %s", assetPath), http.StatusNotFound)
 			return
 		}

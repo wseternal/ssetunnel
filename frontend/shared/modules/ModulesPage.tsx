@@ -137,6 +137,7 @@ export default function ModulesPage({ agentId, moduleFetch, curlBase, curlAuthHe
     openAPIAbortRef.current = null;
     setOpenAPI('');
     setOpenAPIError('');
+    setOpenAPILoading(false);
     if (!showOpenAPI || !selectedId) return;
     const controller = new AbortController();
     openAPIAbortRef.current = controller;

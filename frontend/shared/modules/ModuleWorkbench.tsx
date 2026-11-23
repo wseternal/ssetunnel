@@ -253,7 +253,7 @@ export default function ModuleWorkbench({ agentId, module, moduleFetch, curlBase
     const controller = new AbortController();
     loadAbortRef.current = controller;
 
-    const contractKey = `${module.module_id}:${module.revision || ''}`;
+    const contractKey = `${agentId}:${module.module_id}:${module.revision || ''}`;
     if (loadedContractRef.current !== contractKey) {
       // A different contract: drop the previous list and form before the new
       // request lands, so a failed load cannot leave stale operations live.
