@@ -16,6 +16,7 @@ import (
 	"github.com/wseternal/ssetunnel/internal/metrics"
 	"github.com/wseternal/ssetunnel/internal/moduleproto"
 	"github.com/wseternal/ssetunnel/internal/mux"
+	"github.com/wseternal/ssetunnel/sdk"
 )
 
 var bufferPool = sync.Pool{
@@ -35,6 +36,10 @@ type Server struct {
 	store     *auth.Store
 	metrics   *metrics.MetricsCollector
 	dataStore atomic.Pointer[DataStore]
+
+	// objectStore holds the immutable object store backend. Sessions
+	// capture it at attach time.
+	objectStore atomic.Pointer[objectStoreBackend]
 }
 
 // NewServer builds a server given an SSE heartbeat interval.
@@ -87,6 +92,17 @@ func (s *Server) MetricsCollector() *metrics.MetricsCollector {
 // pick up the change (by design — see attach).
 func (s *Server) SetDataStore(ds *DataStore) {
 	s.dataStore.Store(ds)
+}
+
+// SetObjectStore attaches a server-local object store backend for
+// module object requests forwarded through the control tunnel. Call it
+// before listeners serve: sessions attached earlier keep their
+// captured nil backend by design.
+func (s *Server) SetObjectStore(store sdk.ObjectStore) {
+	if store == nil {
+		return
+	}
+	s.objectStore.Store(&objectStoreBackend{store: store})
 }
 
 // FindSession returns the session for a given agent ID, or nil if not found.
@@ -164,6 +180,9 @@ func (s *Server) attach(sess *Session) {
 		streamHandler := NewModuleStreamHandler(sess)
 		sess.SetModuleStreamHandler(streamHandler)
 		sess.SetDataStore(s.dataStore.Load())
+		if backend := s.objectStore.Load(); backend != nil {
+			sess.SetObjectStore(backend.store)
+		}
 
 		// Accept module streams in background (agent opens these for invocations).
 		go s.acceptModuleStreams(ms, sess, streamHandler)
@@ -172,6 +191,7 @@ func (s *Server) attach(sess *Session) {
 		// log responses, future trace events). Runs until the stream
 		// closes or the session dies.
 		sess.readControlLoop(cs)
+		sess.CloseObjectStore()
 	}()
 }
 

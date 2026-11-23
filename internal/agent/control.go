@@ -2,6 +2,7 @@ package agent
 
 import (
 	"encoding/json"
+	"errors"
 	"log"
 	"net"
 	"sync"
@@ -113,6 +114,9 @@ func (a *Agent) handleControlStream(stream net.Conn, gen int) {
 			a.sendControl = nil
 		}
 		a.controlMu.Unlock()
+		if a.objectStoreFwd != nil {
+			a.objectStoreFwd.FailGeneration(gen, errors.New("agent: control stream closed"))
+		}
 	}()
 
 	log.Printf("agent: control stream established")
@@ -124,14 +128,28 @@ func (a *Agent) handleControlStream(stream net.Conn, gen int) {
 			log.Printf("agent: control stream closed: %v", err)
 			return
 		}
-		a.dispatchControlMessage(msg)
+		a.dispatchControlMessageForGen(msg, gen)
 	}
 }
 
-// dispatchControlMessage routes one control message to the target
-// data stream handler based on stream ID. Agent-level messages
-// (log_req) are handled before the stream registry lookup.
+// dispatchControlMessage routes one control message with the current
+// control generation. Tests and non-stream callers use it.
 func (a *Agent) dispatchControlMessage(msg *mux.ControlMessage) {
+	a.dispatchControlMessageForGen(msg, a.currentControlGen())
+}
+
+// currentControlGen reports the live control stream generation.
+func (a *Agent) currentControlGen() int {
+	a.controlMu.RLock()
+	defer a.controlMu.RUnlock()
+	return a.controlGen
+}
+
+// dispatchControlMessageForGen routes one control message to the target
+// data stream handler based on stream ID. Agent-level messages
+// (log_req) are handled before the stream registry lookup. The gen
+// parameter identifies the control stream that delivered the message.
+func (a *Agent) dispatchControlMessageForGen(msg *mux.ControlMessage, gen int) {
 	if a.Verbose {
 		verboseTrace("control recv: type=%s stream_id=%d payload_len=%d",
 			msg.Type, msg.StreamID, len(msg.Payload))
@@ -162,6 +180,11 @@ func (a *Agent) dispatchControlMessage(msg *mux.ControlMessage) {
 	case mux.MsgDataStoreResp:
 		if a.dataStoreFwd != nil {
 			a.dataStoreFwd.HandleResponse(msg)
+		}
+		return
+	case moduleproto.MsgObjectStoreResp:
+		if a.objectStoreFwd != nil {
+			a.objectStoreFwd.HandleResponse(msg, gen)
 		}
 		return
 	}

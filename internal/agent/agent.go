@@ -111,6 +111,10 @@ type Agent struct {
 	// server responses through the control tunnel.
 	dataStoreFwd *dataStoreForwarder
 
+	// Object store forwarder correlates module object requests with
+	// server response chunks through the control tunnel.
+	objectStoreFwd *objectStoreForwarder
+
 	// Current yamux session (set in runOnce, cleared on disconnect).
 	// Used by the module invoker to open reverse streams.
 	currentSess atomic.Pointer[yamux.Session]
@@ -143,6 +147,11 @@ type LogBuffer = logBuffer
 // accept loop, a socket FD, and module children.
 func (a *Agent) Close() error {
 	a.closeOnce.Do(func() {
+		// Fail object store callers before the IPC server closes, so a
+		// module never waits out its full timeout during teardown.
+		if a.objectStoreFwd != nil {
+			a.objectStoreFwd.FailAll(errObjectStoreClosed)
+		}
 		// Order matters: stop accepting on the loopback API first (no new
 		// invocations), then drain invocations, then stop children and IPC.
 		if a.moduleAPI != nil {
@@ -186,6 +195,23 @@ func (a *Agent) DataStoreRequest(req moduleproto.DataStoreRequestPayload) (*modu
 		return nil, fmt.Errorf("control stream not available")
 	}
 	return a.dataStoreFwd.Send(req, send)
+}
+
+// ObjectStoreRequest forwards one object store request through the
+// control tunnel and blocks until the terminal response arrives. A get
+// response carries the reassembled object bytes.
+func (a *Agent) ObjectStoreRequest(ctx context.Context, req moduleproto.ObjectStoreMessage) (*moduleproto.ObjectStoreMessage, error) {
+	if a.objectStoreFwd == nil {
+		return nil, fmt.Errorf("object store not initialized")
+	}
+	a.controlMu.RLock()
+	send := a.sendControl
+	gen := a.controlGen
+	a.controlMu.RUnlock()
+	if send == nil {
+		return nil, fmt.Errorf("control stream not available")
+	}
+	return a.objectStoreFwd.Forward(ctx, req, send, gen)
 }
 
 // InitModules initializes the module subsystem for this agent. It creates
@@ -287,6 +313,30 @@ func (a *Agent) InitModules(ctx context.Context, dataDir string) error {
 		return json.Marshal(resp)
 	})
 
+	// Wire IPC object store handler to forward requests through the
+	// control tunnel to the server's local filesystem backend. The
+	// authenticated module ID overrides the caller-supplied module_id
+	// so a module cannot select another namespace.
+	ipc.SetOnObjectStore(func(moduleID string, requestJSON []byte) ([]byte, error) {
+		var req moduleproto.ObjectStoreMessage
+		if err := json.Unmarshal(requestJSON, &req); err != nil {
+			return nil, fmt.Errorf("unmarshal object store request: %w", err)
+		}
+		req.ModuleID = moduleID // enforce authenticated caller identity
+
+		ctx, cancel := context.WithTimeout(a.runContext(), objectStoreTimeout)
+		defer cancel()
+		resp, err := a.ObjectStoreRequest(ctx, req)
+		if err != nil {
+			if resp != nil && resp.ErrorCode != "" {
+				return json.Marshal(resp)
+			}
+			return json.Marshal(moduleproto.NewObjectStoreError(
+				req.RequestID, req.Op, moduleproto.ObjectStoreErrInternal, "object store request failed"))
+		}
+		return json.Marshal(resp)
+	})
+
 	// Load builtin module packages installed next to the agent data
 	// directory (e.g. ~/.ssetunnel/modules). Each package is registered and
 	// enabled the first time it is seen.
@@ -374,6 +424,10 @@ func (a *Agent) Run(ctx context.Context) error {
 	// Initialize data store forwarder for module CRUD requests
 	// through the control tunnel.
 	a.dataStoreFwd = newDataStoreForwarder()
+
+	// Initialize object store forwarder for module object requests
+	// through the control tunnel.
+	a.objectStoreFwd = newObjectStoreForwarder()
 
 	// Install log capture: all log.Printf output goes to both stderr
 	// and the ring buffer. The server can request recent lines via
