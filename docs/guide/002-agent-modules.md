@@ -34,6 +34,38 @@ Consumer (SDK/HTTP)
        Module Process (provides http.Handler)
 ```
 
+## Surfaces
+
+A running agent exposes its modules through three surfaces with identical semantics. The HTTP policy behind all of them lives in `internal/moduleapi`; see [ADR-007](../adr/007-module-surface-parity.md).
+
+| Surface | Reach | Auth | Path prefix |
+|---------|-------|------|-------------|
+| Console | public server → tunnel → agent | user session | `/console/api/v1/modules/...` |
+| `cli ui` | browser → local client server → agent | launch secret | `/api/v1/modules/...` |
+| Local script | agent loopback listener | none (loopback boundary) | `http://127.0.0.1:<port>/api/v1/modules/...` |
+
+The agent publishes its loopback base URL in the status file `~/.ssetunnel/ssetunnel-agent.json` as `module_api_url`, and logs it at startup (`agent: module API listening on http://127.0.0.1:<port>`). `cli ui` reads that field, re-validates it on every proxied request, and hides the Modules page when it is absent.
+
+```bash
+# What the agent published
+jq -r .module_api_url ~/.ssetunnel/ssetunnel-agent.json
+
+# Discovery, metadata, OpenAPI, operation models — no credentials
+curl -s "$BASE/api/v1/modules?agent=local" | jq
+curl -s "$BASE/api/v1/modules/local/echo" | jq
+curl -s "$BASE/api/v1/modules/openapi/local/echo"
+curl -s "$BASE/api/v1/modules/local/echo/operations" | jq
+
+# Invocation: both route forms, query strings and bodies preserved
+curl -s "$BASE/api/v1/modules/invoke/local/echo/say?text=hello"
+curl -s -X POST "$BASE/api/v1/modules/invoke/local/echo/say" \
+  -H 'Content-Type: application/json' --data '{"text":"hello"}'
+```
+
+Boundary rules a caller must satisfy (see `localBoundary`): loopback peer, `Host` equal to the listener address, `Origin` (when present) exactly `http://<listener>`, `Sec-Fetch-Site` `same-origin` or `none`, no CORS preflight. A configured `AgentID` is required; when none is configured, use `local`.
+
+`cli ui` requests never traverse the console or the tunnel: the browser calls the local client server, which proxies to the loopback listener. The cURL snippets the Modules page shows point at `module_api_url` — the endpoint a script on the same machine can call directly.
+
 ## Concepts
 
 ### Module Package
@@ -131,6 +163,8 @@ Invocations require:
 - OpenAPI operation matching (method + path)
 - Epoch and revision pinning (stale references rejected with 409)
 
+The agent's loopback surface skips user authentication by design; its access control is the loopback/Host/Origin/fetch-metadata boundary plus the same operation matching, revision pinning, timeouts, and invocation caps. Any other OS user on the same machine can reach a loopback listener — do not enable modules on machines where that is unacceptable.
+
 ### Header Sanitization
 
 Before forwarding to modules, the server strips:
@@ -219,11 +253,12 @@ defer resp.Body.Close()
 | Active invocations | 32 |
 | Per-module invocations | 8 |
 | Establishment deadline | 3 seconds |
-| Request headers | 64 KiB |
-| Request path | 8 KiB |
-| Request query | 16 KiB |
 | UI asset size | 8 MiB |
 | UI cache size | 64 MiB |
+
+The surface does not impose module-specific request header, path, query, or body
+limits; a module must bound its own request-body reads. The limits above are the
+ones the registry, transport, and UI layers actually enforce.
 
 ## Troubleshooting
 

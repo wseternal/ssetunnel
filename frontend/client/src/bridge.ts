@@ -10,7 +10,7 @@
 
 import type {
   Bridge, SessionDTO, SavedSession, AgentStatus, AgentConfig,
-  ConnectStatus, ConnectConfig
+  ConnectStatus, ConnectConfig, ModuleFetchInit
 } from './types';
 
 function getSecret(): string {
@@ -110,6 +110,26 @@ export const httpBridge: Bridge = {
       method: 'POST',
       body: JSON.stringify(cfg),
     }, 25_000);
+  },
+
+  async fetchModule(path: string, init?: ModuleFetchInit): Promise<Response> {
+    const secret = getSecret();
+    const headers: Record<string, string> = { ...(init?.headers || {}) };
+    if (secret) {
+      headers['Authorization'] = `Bearer ${secret}`;
+    }
+    // No timeout: a module operation may legitimately run long and stream a
+    // large body. The caller owns cancellation through the passed signal.
+    // Shared module pages pass surface-relative `/api/v1/modules/...` paths;
+    // this server mounts its API at `/api`, so the path already carries the
+    // prefix. Adding another `/api` would produce `/api/api/v1/...` and miss
+    // every module route.
+    return fetch(path, {
+      method: init?.method || 'GET',
+      headers,
+      body: init?.body,
+      signal: init?.signal,
+    });
   },
 
   async getConnectInstances(): Promise<ConnectStatus[]> {

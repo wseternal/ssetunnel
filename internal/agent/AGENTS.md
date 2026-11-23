@@ -92,3 +92,36 @@ Shell sessions can enable verbose tracing (`Agent.Verbose`) which adds lifecycle
 ## Modules
 
 `InitModules(ctx, dataDir)` builds the registry, IPC server, supervisor, and module manager. It applies `Agent.ModuleProbeTimeout` to the registry, then scans the directory next to the data directory (`~/.ssetunnel/modules` for the default data dir) with `Registry.ScanModules`, which registers and enables every installed package. `ReloadModules` (SIGHUP from the CLI) reloads the registry, rescans that directory, and reconciles the supervisor.
+
+After the first `Supervisor.Reconcile()`, `InitModules` starts the local module API (`module_api.go`). A failure there is logged and does not abort module startup: the tunnel path keeps working without the local surface.
+
+### Invocation paths
+
+`ModuleInvoker` carries two entry points that share admission, resolution, and teardown:
+
+| Entry | Stream | Used by |
+|-------|--------|---------|
+| `Invoke(ctx, moduleID, revision, open)` | yamux data stream | the tunnel, driven by the server's module-open messages |
+| `InvokeLocal(ctx, moduleID, revision, req)` | none (nil) | the loopback API |
+
+Both go through `admitLocked`, which checks and increments `activeInvocations`/`perModuleCounts` inside one critical section and returns an idempotent release closure (`pendingOpens` is guarded in the same section so a close cannot interleave with an admit). `Invocation.finish` is a `sync.Once` that cancels the context, closes the module connection and — only when non-nil — the yamux stream, drops the registry entry, and releases the slot. `InvokeLocal` additionally applies `ModuleInvocationTimeout` (30 s) to the module request and wraps the response body so closing it runs `finish` exactly once.
+
+Sentinels returned to callers: `ErrModuleNotFound`, `ErrModuleRevisionMismatch`, `ErrModuleInvokerClosed`, `ErrModuleCapacity`. `Close()` marks the invoker closed, drains the tracked invocations, and leaves the counters untouched (they are only read by admission, which now refuses everything).
+
+### Local module API (`module_api.go`)
+
+A second HTTP surface, bound to `127.0.0.1:0`, that serves the same route shapes as the console so a local caller needs no token, no session, and no tunnel:
+
+- `/api/v1/modules?agent=<id>`, `/api/v1/modules/{agent}/{module}` (metadata), `/api/v1/modules/openapi/{agent}/{module}`, `/api/v1/modules/{agent}/{module}/operations`
+- `/api/v1/modules/invoke/{agent}/{module}[/{path...}]` (both route forms; the operation path comes from `moduleapi.TrailAfterSegments`)
+- `/api/v1/modules/ui/{agent}/{module}`, `/api/v1/modules/ui/provider/...`, `/api/v1/modules/ui/consumer/...`
+
+Boundary (`localBoundary`): loopback peer address, `Host` equal to the listener address (DNS-rebinding guard), `Origin` if present must be exactly `http://<addr>`, `Sec-Fetch-Site` must be `same-origin`/`none`, and CORS preflights are refused — this surface does not opt into CORS. Agent identity: a configured `AgentID` is required; with none configured, `local` is the accepted name and an omitted `agent` parameter passes.
+
+The catalog epoch is process-scoped (`local-<hex>`, never the tunnel session ID), returned as `X-Catalog-Epoch` and optionally enforced with `?epoch=` (mismatch → `409`). Invocation validates the operation with `agentmod.ValidateOpenAPI` + `MatchOperation` before dialing, then maps failures to `404`/`409`/`429`/`503`/`502`.
+
+`Agent.Close()` tears down in order: module API (shutdown, bounded), module invoker, supervisor, IPC. It is idempotent and returns the first error. `ModuleAPIURL()` exposes the published base URL to `clientapp`, which writes it into the agent status file so `cli ui` can find it.
+
+## Rules
+* Module request/response policy lives in `internal/moduleapi` — don't re-derive header filtering or operation-path handling here.
+* The local API must never be reachable from the tunnel listener; it is a separate loopback listener owned by the agent process.

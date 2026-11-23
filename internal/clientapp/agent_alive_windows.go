@@ -8,11 +8,16 @@ import (
 	"time"
 )
 
+// processQueryLimitedInformation is PROCESS_QUERY_LIMITED_INFORMATION (0x1000).
+// The syscall package only exposes the older, broader PROCESS_QUERY_INFORMATION,
+// which asks for more access than reading an exit code needs.
+const processQueryLimitedInformation = 0x1000
+
 // processAlive reports whether the process with the given PID exists.
 // On Windows, os.FindProcess always succeeds, so we use OpenProcess +
 // GetExitCodeProcess to actually verify the process is running.
 func processAlive(pid int) bool {
-	h, err := syscall.OpenProcess(syscall.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(pid))
+	h, err := syscall.OpenProcess(processQueryLimitedInformation, false, uint32(pid))
 	if err != nil {
 		return false
 	}
@@ -27,7 +32,7 @@ func processAlive(pid int) bool {
 // terminateProcess sends a termination signal to the given PID and waits
 // for it to exit. Returns nil if the process exited within the timeout.
 func terminateProcess(pid int, timeout time.Duration) error {
-	h, err := syscall.OpenProcess(syscall.PROCESS_TERMINATE|syscall.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(pid))
+	h, err := syscall.OpenProcess(syscall.PROCESS_TERMINATE|processQueryLimitedInformation, false, uint32(pid))
 	if err != nil {
 		return err
 	}

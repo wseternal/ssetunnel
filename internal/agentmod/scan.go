@@ -207,6 +207,10 @@ func (f *packageFiles) probe(timeout time.Duration) (*Package, error) {
 		Executable:     f.executable,
 		OpenAPIYAML:    f.openapiYAML,
 		PackageDir:     f.dir,
+		// The module declares its own UI descriptors; they become part of the
+		// installed package so the agent can serve the declared assets and the
+		// console can list the module's UI.
+		UIDescriptors: info.UIDescriptors,
 	}
 	// Stamp the file as it is after the probe, so the next scan compares
 	// against the version that actually answered.

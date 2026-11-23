@@ -70,7 +70,7 @@ import {
 } from '@doublefin/orca-ui';
 import { theme } from './theme/theme';
 import { parseSSEEvents } from './lib/sse';
-import ModuleWorkbench from './ModuleWorkbench';
+import ModulesPanel from './ModulesPanel';
 
 // API base URL derived from Vite's base config (base: '/console' in
 // vite.config.ts). The reverse proxy strips /console so the backend sees
@@ -358,19 +358,9 @@ export default function App() {
     return { from: from.toISOString(), to: now.toISOString() };
   };
 
-  // Module discovery state (Task 17: Console Module Federation)
-  interface ModuleSummary {
-    module_id: string;
-    service_name: string;
-    service_version: string;
-    revision?: string;
-    health: string;
-    has_ui: boolean;
-  }
+  // Module surface: the shared page owns discovery, so only the selected
+  // agent lives here (both the admin and user tabs render the same panel).
   const [moduleAgent, setModuleAgent] = useState<string>('');
-  const [modules, setModules] = useState<ModuleSummary[]>([]);
-  const [selectedModule, setSelectedModule] = useState<ModuleSummary | null>(null);
-  const [moduleOpenAPI, setModuleOpenAPI] = useState<string>('');
 
   // Cloud Shell
   const [connectedAgents, setConnectedAgents] = useState<ConnectedAgent[]>([]);
@@ -499,6 +489,29 @@ export default function App() {
     }
   };
 
+  // Session loss surfaced inside the shared module surface: its fetcher sees
+  // the 401 before component-level error handling could, so it logs the shell
+  // out here instead of rendering an "Unauthorized" panel.
+  const handleSessionExpired = useCallback(() => {
+    localStorage.removeItem('sessionToken');
+    setSessionToken('');
+    setIsLoggedIn(false);
+    setError('Session expired — please log in again');
+  }, []);
+
+  // Agent picker shared by the admin and user module tabs; the shared page
+  // reloads its catalog whenever this agent changes.
+  const moduleAgentSelector = (
+    <FormControl size="small" sx={{ minWidth: 200 }}>
+      <InputLabel>Agent</InputLabel>
+      <Select value={moduleAgent} label="Agent" onChange={(e) => setModuleAgent(e.target.value)}>
+        {connectedAgents.map((a) => (
+          <MenuItem key={a.agent_id} value={a.agent_id}>{a.agent_id}</MenuItem>
+        ))}
+      </Select>
+    </FormControl>
+  );
+
   // Check for 401 responses on authenticated requests and trigger logout.
   const checkAuth = (res: Response): boolean => {
     if (res.status === 401) {
@@ -545,26 +558,6 @@ export default function App() {
     try {
       const res = await fetch(`${api}/api/v1/connected-agents`, { headers: authHeaders() });
       if (checkAuth(res) && res.ok) setConnectedAgents(await res.json());
-    } catch (e) {
-      console.error(e);
-    }
-  };
-
-  // Module discovery (Task 17: Console Module Federation)
-  const fetchModules = async (agentId: string) => {
-    if (!agentId) { setModules([]); return; }
-    try {
-      const res = await fetch(`${api}/api/v1/modules?agent=${encodeURIComponent(agentId)}`, { headers: authHeaders() });
-      if (checkAuth(res) && res.ok) setModules(await res.json());
-    } catch (e) {
-      console.error(e);
-    }
-  };
-
-  const fetchModuleOpenAPI = async (agentId: string, moduleId: string) => {
-    try {
-      const res = await fetch(`${api}/api/v1/modules/openapi/${encodeURIComponent(agentId)}/${encodeURIComponent(moduleId)}`, { headers: authHeaders() });
-      if (checkAuth(res) && res.ok) setModuleOpenAPI(await res.text());
     } catch (e) {
       console.error(e);
     }
@@ -3256,120 +3249,14 @@ export default function App() {
                 {renderShellPanel(4)}
                 {tabIndex === 5 && desktopPanel}
 
-                {/* Modules tab (Task 17: Console Module Federation) */}
+                {/* Modules tab — shared registry + workbench (Task 6) */}
                 {tabIndex === 6 && (
-                  <Box>
-                    <PageHeader
-                      title="Module Registry"
-                      actions={
-                        <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
-                          <FormControl size="small" sx={{ minWidth: 200 }}>
-                            <InputLabel>Agent</InputLabel>
-                            <Select
-                              value={moduleAgent}
-                              label="Agent"
-                              onChange={(e) => { setModuleAgent(e.target.value); fetchModules(e.target.value); }}
-                            >
-                              {connectedAgents.map((a) => (
-                                <MenuItem key={a.agent_id} value={a.agent_id}>{a.agent_id}</MenuItem>
-                              ))}
-                            </Select>
-                          </FormControl>
-                          <Button startIcon={<RefreshIcon />} onClick={() => fetchModules(moduleAgent)} size="small" disabled={!moduleAgent}>
-                            Refresh
-                          </Button>
-                        </Box>
-                      }
-                    />
-
-                    {!moduleAgent && (
-                      <EmptyState
-                        icon={<ExtensionIcon sx={{ fontSize: 48, color: 'text.disabled' }} />}
-                        title="Select an agent to view modules"
-                      />
-                    )}
-
-                    {moduleAgent && modules.length === 0 && (
-                      <EmptyState
-                        icon={<ExtensionIcon sx={{ fontSize: 48, color: 'text.disabled' }} />}
-                        title="No modules registered"
-                      />
-                    )}
-
-                    {modules.length > 0 && (
-                      <Box sx={{ display: 'flex', gap: 3 }}>
-                        {/* Module list */}
-                        <Box sx={{ flex: '0 0 300px' }}>
-                          {modules.map((mod) => (
-                            <Card
-                              key={mod.module_id}
-                              sx={{ mb: 1, cursor: 'pointer', border: selectedModule?.module_id === mod.module_id ? '2px solid' : '1px solid', borderColor: selectedModule?.module_id === mod.module_id ? 'primary.main' : 'divider' }}
-                              onClick={() => {
-                                setSelectedModule(mod);
-                                setModuleOpenAPI('');
-                                fetchModuleOpenAPI(moduleAgent, mod.module_id);
-                              }}
-                            >
-                              <CardContent sx={{ py: 1.5, '&:last-child': { pb: 1.5 } }}>
-                                <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                                  <Typography variant="subtitle2">{mod.service_name}</Typography>
-                                  <StatusPill tone={mod.health === 'ready' ? 'success' : mod.health === 'degraded' ? 'warning' : 'error'}>
-                                    {mod.health}
-                                  </StatusPill>
-                                </Box>
-                                <Typography variant="caption" color="text.secondary">{mod.module_id}</Typography>
-                                <Box sx={{ display: 'flex', gap: 1, mt: 0.5 }}>
-                                  <Chip size="small" label={`v${mod.service_version}`} />
-                                  {mod.has_ui && <Chip size="small" label="UI" color="primary" variant="outlined" />}
-                                  {mod.revision && <Chip size="small" label={mod.revision.slice(0, 7)} variant="outlined" />}
-                                </Box>
-                              </CardContent>
-                            </Card>
-                          ))}
-                        </Box>
-
-                        {/* Module detail */}
-                        <Box sx={{ flex: 1 }}>
-                          {selectedModule ? (
-                            <Card>
-                              <CardContent>
-                                <Typography variant="h6">{selectedModule.service_name}</Typography>
-                                <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-                                  {selectedModule.module_id} · v{selectedModule.service_version}
-                                </Typography>
-
-                                {/* Generic, OpenAPI-driven request builder for every module */}
-                                <Box sx={{ mb: 3 }}>
-                                  <Typography variant="subtitle1" sx={{ mb: 1, fontWeight: 600 }}>Module API Workbench</Typography>
-                                  <ModuleWorkbench
-                                    apiBase={api}
-                                    agentId={moduleAgent}
-                                    module={selectedModule}
-                                    authHeaders={authHeaders}
-                                    checkAuth={checkAuth}
-                                  />
-                                </Box>
-
-                                <Typography variant="subtitle2" sx={{ mb: 1 }}>OpenAPI Specification</Typography>
-                                {moduleOpenAPI ? (
-                                  <Paper variant="outlined" sx={{ p: 2, maxHeight: 500, overflow: 'auto' }}>
-                                    <pre style={{ fontSize: 12, margin: 0, whiteSpace: 'pre-wrap' }}>{moduleOpenAPI}</pre>
-                                  </Paper>
-                                ) : (
-                                  <Typography variant="body2" color="text.secondary">Loading...</Typography>
-                                )}
-                              </CardContent>
-                            </Card>
-                          ) : (
-                            <EmptyState
-                              icon={<ExtensionIcon sx={{ fontSize: 48, color: 'text.disabled' }} />}
-                              title="Select a module to view details"
-                            />
-                          )}
-                        </Box>
-                      </Box>
-                    )}
-                  </Box>
+                  <ModulesPanel
+                    agentId={moduleAgent}
+                    token={sessionToken}
+                    onUnauthorized={handleSessionExpired}
+                    toolbar={moduleAgentSelector}
+                  />
                 )}
               </>
             ) : (
@@ -3551,116 +3438,14 @@ export default function App() {
                 {renderShellPanel(3)}
                 {tabIndex === 4 && desktopPanel}
 
-                {/* Modules tab (non-admin, Task 17) */}
+                {/* Modules tab — shared registry + workbench (Task 6) */}
                 {tabIndex === 5 && (
-                  <Box>
-                    <PageHeader
-                      title="Module Registry"
-                      actions={
-                        <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
-                          <FormControl size="small" sx={{ minWidth: 200 }}>
-                            <InputLabel>Agent</InputLabel>
-                            <Select
-                              value={moduleAgent}
-                              label="Agent"
-                              onChange={(e) => { setModuleAgent(e.target.value); fetchModules(e.target.value); }}
-                            >
-                              {connectedAgents.map((a) => (
-                                <MenuItem key={a.agent_id} value={a.agent_id}>{a.agent_id}</MenuItem>
-                              ))}
-                            </Select>
-                          </FormControl>
-                          <Button startIcon={<RefreshIcon />} onClick={() => fetchModules(moduleAgent)} size="small" disabled={!moduleAgent}>
-                            Refresh
-                          </Button>
-                        </Box>
-                      }
-                    />
-
-                    {!moduleAgent && (
-                      <EmptyState
-                        icon={<ExtensionIcon sx={{ fontSize: 48, color: 'text.disabled' }} />}
-                        title="Select an agent to view modules"
-                      />
-                    )}
-
-                    {moduleAgent && modules.length === 0 && (
-                      <EmptyState
-                        icon={<ExtensionIcon sx={{ fontSize: 48, color: 'text.disabled' }} />}
-                        title="No modules registered"
-                      />
-                    )}
-
-                    {modules.length > 0 && (
-                      <Box sx={{ display: 'flex', gap: 3 }}>
-                        <Box sx={{ flex: '0 0 300px' }}>
-                          {modules.map((mod) => (
-                            <Card
-                              key={mod.module_id}
-                              sx={{ mb: 1, cursor: 'pointer', border: selectedModule?.module_id === mod.module_id ? '2px solid' : '1px solid', borderColor: selectedModule?.module_id === mod.module_id ? 'primary.main' : 'divider' }}
-                              onClick={() => {
-                                setSelectedModule(mod);
-                                setModuleOpenAPI('');
-                                fetchModuleOpenAPI(moduleAgent, mod.module_id);
-                              }}
-                            >
-                              <CardContent sx={{ py: 1.5, '&:last-child': { pb: 1.5 } }}>
-                                <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                                  <Typography variant="subtitle2">{mod.service_name}</Typography>
-                                  <StatusPill tone={mod.health === 'ready' ? 'success' : mod.health === 'degraded' ? 'warning' : 'error'}>
-                                    {mod.health}
-                                  </StatusPill>
-                                </Box>
-                                <Typography variant="caption" color="text.secondary">{mod.module_id}</Typography>
-                                <Box sx={{ display: 'flex', gap: 1, mt: 0.5 }}>
-                                  <Chip size="small" label={`v${mod.service_version}`} />
-                                  {mod.has_ui && <Chip size="small" label="UI" color="primary" variant="outlined" />}
-                                </Box>
-                              </CardContent>
-                            </Card>
-                          ))}
-                        </Box>
-                        <Box sx={{ flex: 1 }}>
-                          {selectedModule ? (
-                            <Card>
-                              <CardContent>
-                                <Typography variant="h6">{selectedModule.service_name}</Typography>
-                                <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-                                  {selectedModule.module_id} · v{selectedModule.service_version}
-                                </Typography>
-
-                                {/* Generic, OpenAPI-driven request builder for every module */}
-                                <Box sx={{ mb: 3 }}>
-                                  <Typography variant="subtitle1" sx={{ mb: 1, fontWeight: 600 }}>Module API Workbench</Typography>
-                                  <ModuleWorkbench
-                                    apiBase={api}
-                                    agentId={moduleAgent}
-                                    module={selectedModule}
-                                    authHeaders={authHeaders}
-                                    checkAuth={checkAuth}
-                                  />
-                                </Box>
-
-                                <Typography variant="subtitle2" sx={{ mb: 1 }}>OpenAPI Specification</Typography>
-                                {moduleOpenAPI ? (
-                                  <Paper variant="outlined" sx={{ p: 2, maxHeight: 500, overflow: 'auto' }}>
-                                    <pre style={{ fontSize: 12, margin: 0, whiteSpace: 'pre-wrap' }}>{moduleOpenAPI}</pre>
-                                  </Paper>
-                                ) : (
-                                  <Typography variant="body2" color="text.secondary">Loading...</Typography>
-                                )}
-                              </CardContent>
-                            </Card>
-                          ) : (
-                            <EmptyState
-                              icon={<ExtensionIcon sx={{ fontSize: 48, color: 'text.disabled' }} />}
-                              title="Select a module to view details"
-                            />
-                          )}
-                        </Box>
-                      </Box>
-                    )}
-                  </Box>
+                  <ModulesPanel
+                    agentId={moduleAgent}
+                    token={sessionToken}
+                    onUnauthorized={handleSessionExpired}
+                    toolbar={moduleAgentSelector}
+                  />
                 )}
               </>
             )}

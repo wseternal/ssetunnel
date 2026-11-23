@@ -16,10 +16,10 @@ import (
 // buffer fills.
 type logBuffer struct {
 	mu    sync.Mutex
-	lines []string // circular storage
-	head  int      // next write slot
-	count int      // number of valid lines stored
-	cap   int      // buffer capacity
+	lines []string     // circular storage
+	head  int          // next write slot
+	count int          // number of valid lines stored
+	cap   int          // buffer capacity
 	buf   bytes.Buffer // accumulates partial lines
 }
 

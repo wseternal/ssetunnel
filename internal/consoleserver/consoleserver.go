@@ -18,6 +18,7 @@ import (
 	"github.com/wseternal/ssetunnel/internal/auth"
 	"github.com/wseternal/ssetunnel/internal/consoleapi"
 	"github.com/wseternal/ssetunnel/internal/metrics"
+	"github.com/wseternal/ssetunnel/internal/moduleapi"
 	"github.com/wseternal/ssetunnel/internal/moduleui"
 	"github.com/wseternal/ssetunnel/internal/server"
 )
@@ -122,13 +123,7 @@ var (
 // so a module's "public, max-age=…" would make it cacheable across users. The
 // caller's allowlist leaves it out; this asserts that it stayed out.
 func CopyProxiedHeader(dst http.Header, key string, values []string) {
-	if strings.EqualFold(key, "Cache-Control") {
-		return
-	}
-	dst.Del(key)
-	for _, v := range values {
-		dst.Add(key, v)
-	}
+	moduleapi.CopyResponseHeader(dst, key, values)
 }
 
 // serveConsoleAsset serves one content-hashed Vite asset from the embedded FS.

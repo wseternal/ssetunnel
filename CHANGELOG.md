@@ -44,8 +44,18 @@
   - Per-agent metrics collection (invocations, pending opens, errors, bytes)
   - Process supervisor with exponential backoff (500 ms → 30 s cap)
   - Package validation with symlink traversal protection
+* **modules:** agent-owned module API (ADR-007)
+  - The agent serves the console module contract on an ephemeral `127.0.0.1` port: discovery, metadata, OpenAPI, operation models, invocation (both route forms), UI descriptors, and digest-verified UI assets, with no console session or tunnel in the path
+  - `cli ui` gains a Modules page driven by `frontend/shared/modules`, the same components the console now uses
+  - `internal/moduleapi` owns the shared HTTP policy: `POST` + `X-SSET-Method-Override: TRACE` as the only method override, preflight detection that requires `Access-Control-Request-Method`, query preservation, credential/hop/forwarding stripping, response-header allowlist, 32 KiB incremental copying, and declared-asset size/digest checks
+  - `sdk.ManifestInfo.ui_descriptors` lets module packages declare their UI assets, and the agent scan persists them
 
 ### Fixes
+
+* **modules:** short module responses were buffered whole by `io.Copy` and lost incremental delivery on every surface; they now stream through `moduleapi.CopyStream`
+* **agent:** the module IPC register callback overwrote a scanned installed package with a placeholder record, so a module restart lost its executable and package directory
+* **console:** provider UI assets were requested at the URL path rather than the matched operation path, turning a module 404 into a 502
+* **modules:** `X-Correlation-ID` was missing from the response-header allowlist, so the client proxy dropped it
 
 * **clientserver:** agent restart no longer deadlocks the UI server (per-run lifecycle structs); concurrent stop/start can no longer orphan an agent; shutdown drains HTTP before runtime teardown
 * **server:** installed OS services now parse all flags (`server start` previously dropped every flag and ran with defaults)

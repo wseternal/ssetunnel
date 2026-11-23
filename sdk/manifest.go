@@ -253,11 +253,17 @@ const ManifestFlag = "-print-manifest"
 
 // ManifestInfo is the module identity that a binary prints for ManifestFlag.
 // The OpenAPI document stays in the package's openapi.yaml file.
+//
+// UIDescriptors travel with the identity because they are part of the module's
+// own declaration: the agent records them with the installed package, and the
+// package's assets are then served through the module's HTTP routes under the
+// declared size and digest.
 type ManifestInfo struct {
-	ModuleID       string `json:"module_id"`
-	ServiceName    string `json:"service_name"`
-	ServiceVersion string `json:"service_version"`
-	Revision       string `json:"revision,omitempty"`
+	ModuleID       string         `json:"module_id"`
+	ServiceName    string         `json:"service_name"`
+	ServiceVersion string         `json:"service_version"`
+	Revision       string         `json:"revision,omitempty"`
+	UIDescriptors  []UIDescriptor `json:"ui_descriptors,omitempty"`
 }
 
 // PrintManifest prints m as one JSON line when the process was started with
@@ -279,6 +285,7 @@ func PrintManifest(m Manifest) bool {
 		ServiceName:    m.ServiceName,
 		ServiceVersion: m.ServiceVersion,
 		Revision:       m.Revision,
+		UIDescriptors:  m.UIDescriptors,
 	}
 	if err := json.NewEncoder(os.Stdout).Encode(info); err != nil {
 		fmt.Fprintf(os.Stderr, "sdk: print manifest: %v\n", err)

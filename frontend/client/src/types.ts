@@ -27,6 +27,8 @@ export interface AgentStatus {
   concurrency: number;
   compress: boolean;
   error?: string;
+  /** Loopback module API the running agent published, e.g. http://127.0.0.1:54321. */
+  module_api_url?: string;
 }
 
 export interface ConnectStatus {
@@ -37,6 +39,16 @@ export interface ConnectStatus {
   target: string;
   running: boolean;
   error?: string;
+}
+
+// Module surface fetcher: paths are relative to `/api/v1/modules/...`. A
+// dedicated method keeps module traffic (which may stream large bodies) out of
+// the JSON helpers while pages stay free of transport details.
+export interface ModuleFetchInit {
+  method?: string;
+  headers?: Record<string, string>;
+  body?: string;
+  signal?: AbortSignal;
 }
 
 export interface Bridge {
@@ -50,6 +62,9 @@ export interface Bridge {
   startAgent(cfg: AgentConfig): Promise<void>;
   stopAgent(): Promise<void>;
   restartAgent(cfg: AgentConfig): Promise<void>;
+
+  /** Fetches a module surface path; the adapter attaches its own credentials. */
+  fetchModule(path: string, init?: ModuleFetchInit): Promise<Response>;
 
   getConnectInstances(): Promise<ConnectStatus[]>;
   startConnect(name: string, cfg: ConnectConfig): Promise<void>;

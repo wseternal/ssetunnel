@@ -99,6 +99,13 @@ type Agent struct {
 	modSupervisor *agentmod.Supervisor
 	// modulesDir holds the builtin module packages scanned at startup.
 	modulesDir string
+	// moduleAPI is the loopback module surface (nil until InitModules starts it).
+	moduleAPI *moduleAPIServer
+
+	// closeOnce makes Close idempotent: a second call must not re-run the
+	// teardown sequence or reset state an in-flight handler still reads.
+	closeOnce sync.Once
+	closeErr  error
 
 	// Data store forwarder correlates module data store requests with
 	// server responses through the control tunnel.
@@ -128,19 +135,39 @@ func (a *Agent) InitLogCapture() *LogBuffer {
 // LogBuffer is a thread-safe ring buffer that captures recent log output.
 type LogBuffer = logBuffer
 
-// Close releases the module subsystem: it stops supervised module processes
-// and closes the IPC listener. Safe to call multiple times and safe when
-// modules were never initialized. Run does not call it — the Agent's owner
-// (process exit for the CLI, clientapp.RunAgent for the UI) must, or each
-// in-process restart leaks an accept loop, a socket FD, and module children.
+// Close releases the module subsystem: it stops the loopback module API, cancels
+// active invocations, stops supervised module processes, and closes the IPC
+// listener. Safe to call multiple times and safe when modules were never
+// initialized. Run does not call it — the Agent's owner (process exit for the
+// CLI, clientapp.RunAgent for the UI) must, or each in-process restart leaks an
+// accept loop, a socket FD, and module children.
 func (a *Agent) Close() error {
-	if a.modSupervisor != nil {
-		a.modSupervisor.Stop()
+	a.closeOnce.Do(func() {
+		// Order matters: stop accepting on the loopback API first (no new
+		// invocations), then drain invocations, then stop children and IPC.
+		if a.moduleAPI != nil {
+			a.moduleAPI.Close()
+		}
+		if a.moduleInvoker != nil {
+			a.moduleInvoker.Close()
+		}
+		if a.modSupervisor != nil {
+			a.modSupervisor.Stop()
+		}
+		if a.modIPC != nil {
+			a.closeErr = a.modIPC.Close()
+		}
+	})
+	return a.closeErr
+}
+
+// ModuleAPIURL returns the loopback module API base URL, or "" when the API is
+// not running. The URL's port is kernel-assigned and only valid for this run.
+func (a *Agent) ModuleAPIURL() string {
+	if a.moduleAPI == nil {
+		return ""
 	}
-	if a.modIPC != nil {
-		return a.modIPC.Close()
-	}
-	return nil
+	return a.moduleAPI.URL()
 }
 
 // DataStoreRequest forwards a data store CRUD request through the
@@ -201,8 +228,18 @@ func (a *Agent) InitModules(ctx context.Context, dataDir string) error {
 	a.moduleInvoker = NewModuleInvoker(a, ipc, registry)
 
 	// Wire IPC registration → auto-install into registry → snapshot publish.
-	// This allows manually started modules to appear in the console.
+	// A module started from an installed package already has a registry entry
+	// naming its executable and package directory on disk. That entry is what
+	// the supervisor restarts from, so a registration must not replace it with
+	// an IPC-endpoint placeholder: doing so turns the next restart into a
+	// failed exec of a socket and leaves a healthy module unavailable. Only a
+	// module started by hand, with no package on disk, is auto-installed.
 	ipc.SetOnRegister(func(reg *agentmod.Registration) {
+		if existing := registry.Package(reg.ModuleID); existing != nil {
+			log.Printf("agent: module %s registered from installed package %s", reg.ModuleID, existing.PackageDir)
+			a.moduleManager.OnRegistryChange()
+			return
+		}
 		// Use IPC endpoint as executable placeholder — the supervisor will
 		// log a start failure, but the module is already running manually.
 		if err := registry.InstallFromIPC(
@@ -219,6 +256,15 @@ func (a *Agent) InitModules(ctx context.Context, dataDir string) error {
 	// Wire IPC deregister callback to remove the module from the registry
 	// and trigger a catalog snapshot publish.
 	ipc.SetOnDeregister(func(moduleID string) {
+		// Keep an installed package: the process exiting (crash or restart) is
+		// not an uninstall. Only the placeholder written by InstallFromIPC for
+		// a hand-started module is dropped, because there is nothing on disk
+		// for the supervisor to start.
+		if pkg := registry.Package(moduleID); pkg != nil && pkg.Executable != ipc.Endpoint() {
+			log.Printf("agent: module %s deregistered, keeping installed package", moduleID)
+			a.moduleManager.OnRegistryChange()
+			return
+		}
 		registry.Uninstall(moduleID)
 		log.Printf("agent: uninstalled module %s from registry", moduleID)
 		a.moduleManager.OnRegistryChange()
@@ -250,6 +296,16 @@ func (a *Agent) InitModules(ctx context.Context, dataDir string) error {
 	// Reconcile desired state: start enabled modules.
 	if err := supervisor.Reconcile(); err != nil {
 		log.Printf("agent: module reconcile: %v", err)
+	}
+
+	// Start the loopback module API. It is independent of the tunnel: a
+	// consumer on this host reaches the same modules without a session, and
+	// the console keeps reaching them through the tunnel path.
+	api := newModuleAPIServer(a)
+	if err := api.start(); err != nil {
+		log.Printf("agent: module API unavailable: %v", err)
+	} else {
+		a.moduleAPI = api
 	}
 
 	return nil

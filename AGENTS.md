@@ -108,6 +108,10 @@ User (SSH, DB client, ...)
 * **Responsibility**: Secured loopback HTTP server for `cli ui`: launch-secret auth (constant-time), exact Host + same-origin Origin checks, loopback-only bind, contract security headers on every response class, dedicated index/immutable-asset handlers, 64 KiB body limit. Owns the in-process agent/connect lifecycle (per-run structs, bounded teardown, logout stops owned runtimes) and the JSON API delegating to `clientapp`.
 * **Path**: `internal/clientserver/`
 
+### 18. [Module API Policy](internal/moduleapi/AGENTS.md)
+* **Responsibility**: Pure request/response transformations shared by the three module surfaces — the console routes, the agent's loopback API, and the browser client's proxy. No I/O, no auth, no clients: method resolution (`POST` + `X-SSET-Method-Override: TRACE` → `TRACE`), escaped operation-path extraction, request sanitization, response header allowlist (no `cache-control`), correlation IDs, declared-asset lookup plus size/SHA-256 verification.
+* **Path**: `internal/moduleapi/`
+
 ---
 
 ## Core Development & Operation Rules
@@ -155,6 +159,8 @@ These rules apply to all test work in this project. They are derived from the gl
 * **Test-first for bugs**: When fixing a bug, write a reproduction test that fails before the fix and passes after. The `TestServeRW_ServerClosesReturns` test was written to prove the SSH ProxyCommand deadlock before the fix. This is the one exception to the default-to-zero rule — regression tests for real bugs are always warranted.
 
 ### Key Conventions
+* **Module surfaces are equal**: the console (user auth over the tunnel), the agent's loopback API (no auth, loopback + Host/Origin/fetch-metadata boundary), and `cli ui` (launch secret, proxying to the agent's published `module_api_url`) must produce the same module behaviour. Shared policy lives in `internal/moduleapi`; the module UI lives in `frontend/shared/modules` and is imported by both SPAs.
+* **Never re-derive module request/response handling per surface.** Query strings, escaped operation paths, credential stripping, and the `cache-control` exclusion are decided once.
 * **Bidirectional proxy pattern**: Every hop uses two goroutines with `io.CopyBuffer` + `sync.Pool` 32 KiB buffers. When one direction hits EOF, the corresponding connection/stream must be closed to unblock the other direction.
 * **Fail-fast model**: POST failures, stream deaths, and pipe closures are terminal — sessions die and agents reconnect. No partial recovery.
 * **No goroutine leaks**: Every goroutine hangs off a context owned by its conn/session. `Close()` always tears down cleanly.
@@ -207,6 +213,14 @@ Two independent causes lived under one symptom (vim opens, renders once, then th
 2. **Separate permanence bug (hardened).** The shell's output (SSE) and input (POST) use independent connections. A dead output writer used to be detached silently while the handler kept the response open. `Attach` now returns a per-attach `clientLost` channel; handlers select on it and return, ending the response so the browser reconnects and replays the ring buffer. The frontend watchdog aborts after `max(60 s, 4 × X-SSET-Heartbeat-Ms)` of silence and reattaches with `takeover=1`. Never clear an SSE writer without terminating its response. The shell keeps a single writer per session: a second client that does not ask for a takeover is answered **409 Conflict before any SSE header is flushed** — a 200 with an empty body is indistinguishable from a dropped stream and made clients retry. A writer that cannot express `SetWriteDeadline` (`http.ErrNotSupported`) is not a dead client and must not be detached.
 
 Diagnosis instruments: `window.__shellDbg` (byte-pipeline counters) and `window.__shellTerm` (xterm handle) separate delivery, render-loop, and input stalls. See `docs/rca/001-cloud-shell-output-freeze.md` and `docs/guide/001-frozen-streaming-ui-playbook.md`.
+
+### Browser Methods and Module Surfaces
+**Problem**: `fetch` refuses to send TRACE, so a module whose OpenAPI declares it was unusable from either UI. Surface-side rewriting (`POST` + `X-SSET-Method-Override: TRACE`) is the only way through.
+
+**Rule**: only TRACE may be overridden, and only from POST; every surface resolves it back via `moduleapi.ResolveMethod` before the module sees the request. Browsers also lie about OPTIONS: `moduleapi.IsPreflight` requires `Access-Control-Request-Method`, so a bare OPTIONS reaches a module that declares one.
+
+### Module Asset Trust
+Assets are served only when the module's descriptor declares them **and** the bytes match the declared size and SHA-256. A mismatch is a `502`, never a pass-through: a package whose contents changed on disk is untrusted. SVG assets get a restrictive CSP on every surface.
 
 ### Auto-Tuning
 The `AutoTuner` evaluates agents every 30 s: throughput saturation adjusts batch size (4 KiB–1 MiB), p95 latency adjusts concurrency (1–4), and bandwidth level toggles gzip. Decisions are pushed via SSE `event: tune` control frames. Agents apply batch-size and compress changes live; concurrency changes are deferred to next reconnect. The tuner enforces a 2-minute cooldown between decisions per agent.
