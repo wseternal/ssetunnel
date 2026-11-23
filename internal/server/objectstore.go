@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/wseternal/ssetunnel/internal/metrics"
 	"github.com/wseternal/ssetunnel/internal/moduleproto"
 	"github.com/wseternal/ssetunnel/internal/mux"
 	"github.com/wseternal/ssetunnel/sdk"
@@ -21,6 +22,10 @@ const (
 	// objectStoreAssemblyTTL expires incomplete uploads.
 	objectStoreAssemblyTTL = 5 * time.Minute
 
+	// objectStoreAssemblySweepInterval bounds how long an expired
+	// assembly can retain memory when no further Put arrives.
+	objectStoreAssemblySweepInterval = time.Minute
+
 	// objectStoreOperationTimeout bounds one backend call.
 	objectStoreOperationTimeout = 30 * time.Second
 )
@@ -29,7 +34,8 @@ const (
 // installs it once before listeners serve; each session captures the
 // pointer at attach time.
 type objectStoreBackend struct {
-	store sdk.ObjectStore
+	store   sdk.ObjectStore
+	metrics *metrics.ObjectStoreMetrics
 }
 
 // ObjectStoreHandler serves object store requests for one session. The
@@ -37,18 +43,26 @@ type objectStoreBackend struct {
 // One worker goroutine performs backend disk calls, so a slow disk
 // cannot stall unrelated control traffic.
 type ObjectStoreHandler struct {
-	store sdk.ObjectStore
-	send  func(*mux.ControlMessage) error
+	store   sdk.ObjectStore
+	send    func(*mux.ControlMessage) error
+	metrics *metrics.ObjectStoreMetrics
 
 	ctx    context.Context
 	cancel context.CancelFunc
 
 	mu         sync.Mutex
-	assemblies map[string]*moduleproto.ObjectStoreAssembler
-	assemblyAt map[string]time.Time
+	assemblies map[objectAssemblyKey]*moduleproto.ObjectStoreAssembler
+	assemblyAt map[objectAssemblyKey]time.Time
 	closed     bool
 
 	queue chan objectStoreJob
+}
+
+// objectAssemblyKey scopes an upload to its module namespace. A bare
+// request_id would let two modules on one session collide.
+type objectAssemblyKey struct {
+	moduleID  string
+	requestID string
 }
 
 // objectStoreJob is one bounded backend operation.
@@ -61,15 +75,16 @@ type objectStoreJob struct {
 }
 
 // newObjectStoreHandler starts the per-session disk worker.
-func newObjectStoreHandler(store sdk.ObjectStore, send func(*mux.ControlMessage) error) *ObjectStoreHandler {
+func newObjectStoreHandler(store sdk.ObjectStore, send func(*mux.ControlMessage) error, metrics *metrics.ObjectStoreMetrics) *ObjectStoreHandler {
 	ctx, cancel := context.WithCancel(context.Background())
 	h := &ObjectStoreHandler{
 		store:      store,
 		send:       send,
+		metrics:    metrics,
 		ctx:        ctx,
 		cancel:     cancel,
-		assemblies: make(map[string]*moduleproto.ObjectStoreAssembler),
-		assemblyAt: make(map[string]time.Time),
+		assemblies: make(map[objectAssemblyKey]*moduleproto.ObjectStoreAssembler),
+		assemblyAt: make(map[objectAssemblyKey]time.Time),
 		queue:      make(chan objectStoreJob, objectStoreQueueDepth),
 	}
 	go h.run()
@@ -133,7 +148,8 @@ func (h *ObjectStoreHandler) handlePut(req *moduleproto.ObjectStoreMessage) {
 	}
 	h.expireAssembliesLocked(time.Now())
 
-	asm, exists := h.assemblies[req.RequestID]
+	key := objectAssemblyKey{moduleID: req.ModuleID, requestID: req.RequestID}
+	asm, exists := h.assemblies[key]
 	if !exists {
 		if req.Sequence != 0 {
 			h.mu.Unlock()
@@ -152,13 +168,13 @@ func (h *ObjectStoreHandler) handlePut(req *moduleproto.ObjectStoreMessage) {
 			h.fail(req.RequestID, req.Op, moduleproto.ObjectStoreErrInvalidRequest, "invalid object transfer")
 			return
 		}
-		h.assemblies[req.RequestID] = asm
-		h.assemblyAt[req.RequestID] = time.Now()
+		h.assemblies[key] = asm
+		h.assemblyAt[key] = time.Now()
 	}
 
 	if err := asm.Add(req); err != nil {
-		delete(h.assemblies, req.RequestID)
-		delete(h.assemblyAt, req.RequestID)
+		delete(h.assemblies, key)
+		delete(h.assemblyAt, key)
 		h.mu.Unlock()
 		log.Printf("server: object upload %s rejected: %v", req.RequestID, err)
 		h.fail(req.RequestID, req.Op, moduleproto.ObjectStoreErrInvalidRequest, "invalid object chunk")
@@ -170,8 +186,8 @@ func (h *ObjectStoreHandler) handlePut(req *moduleproto.ObjectStoreMessage) {
 		return
 	}
 	data := asm.Data()
-	delete(h.assemblies, req.RequestID)
-	delete(h.assemblyAt, req.RequestID)
+	delete(h.assemblies, key)
+	delete(h.assemblyAt, key)
 	h.mu.Unlock()
 
 	if !h.enqueue(objectStoreJob{
@@ -215,20 +231,27 @@ func (h *ObjectStoreHandler) enqueue(job objectStoreJob) bool {
 
 // expireAssembliesLocked drops incomplete uploads past their TTL.
 func (h *ObjectStoreHandler) expireAssembliesLocked(now time.Time) {
-	for id, at := range h.assemblyAt {
+	for key, at := range h.assemblyAt {
 		if now.Sub(at) > objectStoreAssemblyTTL {
-			delete(h.assemblies, id)
-			delete(h.assemblyAt, id)
+			delete(h.assemblies, key)
+			delete(h.assemblyAt, key)
 		}
 	}
 }
 
-// run executes queued backend operations until Close cancels it.
+// run executes queued backend operations until Close cancels it. A
+// timer sweeps expired assemblies even on sessions that only read.
 func (h *ObjectStoreHandler) run() {
+	ticker := time.NewTicker(objectStoreAssemblySweepInterval)
+	defer ticker.Stop()
 	for {
 		select {
 		case job := <-h.queue:
 			h.execute(job)
+		case now := <-ticker.C:
+			h.mu.Lock()
+			h.expireAssembliesLocked(now)
+			h.mu.Unlock()
 		case <-h.ctx.Done():
 			return
 		}
@@ -239,14 +262,17 @@ func (h *ObjectStoreHandler) run() {
 func (h *ObjectStoreHandler) execute(job objectStoreJob) {
 	ctx, cancel := context.WithTimeout(h.ctx, objectStoreOperationTimeout)
 	defer cancel()
+	start := time.Now()
 
 	switch job.op {
 	case moduleproto.ObjectStorePut:
 		if err := h.store.Put(ctx, job.moduleID, job.key, job.data); err != nil {
+			h.metrics.RecordFailure(job.op, time.Since(start))
 			log.Printf("server: object store put %s failed: %v", job.requestID, err)
 			h.fail(job.requestID, job.op, moduleproto.ObjectStoreErrInternal, "object store write failed")
 			return
 		}
+		h.metrics.RecordPut(len(job.data), time.Since(start))
 		_ = h.sendControl(&moduleproto.ObjectStoreMessage{
 			RequestID:  job.requestID,
 			Op:         job.op,
@@ -261,6 +287,7 @@ func (h *ObjectStoreHandler) execute(job objectStoreJob) {
 	case moduleproto.ObjectStoreGet:
 		data, err := h.store.Get(ctx, job.moduleID, job.key)
 		if err != nil {
+			h.metrics.RecordFailure(job.op, time.Since(start))
 			if errors.Is(err, sdk.ErrObjectNotFound) {
 				h.fail(job.requestID, job.op, moduleproto.ObjectStoreErrNotFound, "object not found")
 				return
@@ -271,9 +298,11 @@ func (h *ObjectStoreHandler) execute(job objectStoreJob) {
 		}
 		chunks, err := moduleproto.NewObjectStoreDataChunks(job.requestID, job.op, job.moduleID, job.key, data)
 		if err != nil {
+			h.metrics.RecordFailure(job.op, time.Since(start))
 			h.fail(job.requestID, job.op, moduleproto.ObjectStoreErrTooLarge, "object is too large")
 			return
 		}
+		h.metrics.RecordGet(len(data), time.Since(start))
 		for _, chunk := range chunks {
 			if err := h.sendControl(chunk); err != nil {
 				log.Printf("server: object store response %s stopped: %v", job.requestID, err)
@@ -285,6 +314,9 @@ func (h *ObjectStoreHandler) execute(job objectStoreJob) {
 
 // fail sends one structured terminal error.
 func (h *ObjectStoreHandler) fail(requestID, op, code, message string) {
+	if code == moduleproto.ObjectStoreErrBusy {
+		h.metrics.RecordBusy()
+	}
 	_ = h.sendControl(moduleproto.NewObjectStoreError(requestID, op, code, message))
 }
 

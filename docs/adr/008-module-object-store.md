@@ -91,13 +91,15 @@ Every chunk repeats immutable transfer metadata:
 
 A 4 MiB object has 128 chunks. An empty object has one final zero-data chunk and the empty SHA-256 digest. The receiver rejects mismatched metadata, duplicate chunks, gaps, wrong lengths, trailing data, and a bad digest.
 
-The agent replaces the request `module_id` with the authenticated IPC identity. It generates a fresh random `request_id` and stores the control generation with each pending operation. A stale control stream fails only its own operations.
+The agent replaces the request `module_id` with the authenticated IPC identity. It discards any caller-supplied `request_id`, generates a fresh random `request_id`, rejects a duplicate ID already pending, and stores the control generation with each pending operation. A stale control stream fails only its own operations and rejects requests that try to register after that generation closed.
 
 ### 4. Server lifecycle
 
-One `ObjectStoreHandler` serves each session. The control read loop performs decode, validation, and reassembly only. One worker goroutine per session performs backend disk calls. The worker queue holds eight operations. A full queue returns `busy`.
+One `ObjectStoreHandler` serves each session. The control read loop performs decode, validation, and reassembly only. One worker goroutine per session performs backend disk calls. The worker queue holds eight operations. A full queue returns `busy`. Upload assemblies are keyed by module ID and request ID, so two modules cannot collide on a request ID. A one-minute ticker in the worker sweeps expired assemblies.
 
-A session holds at most eight upload assemblies. That caps object memory at 32 MiB plus bounded encoding overhead. Incomplete assemblies expire after five minutes.
+Server-scoped object-store metrics count completed puts and gets, backend errors, busy rejections, bytes moved, and average backend latency.
+
+A session holds at most eight upload assemblies. That caps object memory at 32 MiB plus bounded encoding overhead. Incomplete assemblies expire after five minutes; the worker ticker reclaims them even when the session performs only reads.
 
 The handler returns these structured error codes: `not_found`, `invalid_request`, `too_large`, `busy`, `unavailable`, and `internal`. Disabled storage returns `unavailable` with the matching request ID, so a caller never waits out a timeout.
 

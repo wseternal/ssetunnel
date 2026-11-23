@@ -40,6 +40,9 @@ type Server struct {
 	// objectStore holds the immutable object store backend. Sessions
 	// capture it at attach time.
 	objectStore atomic.Pointer[objectStoreBackend]
+
+	// objectStoreStats is server-scoped object-store observability.
+	objectStoreStats *metrics.ObjectStoreMetrics
 }
 
 // NewServer builds a server given an SSE heartbeat interval.
@@ -50,7 +53,7 @@ func NewServer(heartbeat time.Duration) *Server {
 // NewServerWithRegistry builds a server with a given registry and SSE heartbeat interval.
 func NewServerWithRegistry(reg *Registry, heartbeat time.Duration) *Server {
 	h := NewHandlerWithAuth(reg, heartbeat, nil)
-	s := &Server{Reg: reg, handler: h}
+	s := &Server{Reg: reg, handler: h, objectStoreStats: metrics.NewObjectStoreMetrics()}
 	h.OnSession = s.attach
 	return s
 }
@@ -102,7 +105,15 @@ func (s *Server) SetObjectStore(store sdk.ObjectStore) {
 	if store == nil {
 		return
 	}
-	s.objectStore.Store(&objectStoreBackend{store: store})
+	if s.objectStoreStats == nil {
+		s.objectStoreStats = metrics.NewObjectStoreMetrics()
+	}
+	s.objectStore.Store(&objectStoreBackend{store: store, metrics: s.objectStoreStats})
+}
+
+// ObjectStoreMetrics returns server-scoped object-store counters.
+func (s *Server) ObjectStoreMetrics() *metrics.ObjectStoreMetrics {
+	return s.objectStoreStats
 }
 
 // FindSession returns the session for a given agent ID, or nil if not found.
@@ -181,7 +192,7 @@ func (s *Server) attach(sess *Session) {
 		sess.SetModuleStreamHandler(streamHandler)
 		sess.SetDataStore(s.dataStore.Load())
 		if backend := s.objectStore.Load(); backend != nil {
-			sess.SetObjectStore(backend.store)
+			sess.SetObjectStore(backend.store, backend.metrics)
 		}
 
 		// Accept module streams in background (agent opens these for invocations).
@@ -320,5 +331,3 @@ func (s *Server) NewHTTPServer(addr string) *http.Server {
 		IdleTimeout: 5 * time.Minute,
 	}
 }
-
-

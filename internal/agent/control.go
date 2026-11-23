@@ -2,7 +2,6 @@ package agent
 
 import (
 	"encoding/json"
-	"errors"
 	"log"
 	"net"
 	"sync"
@@ -115,7 +114,7 @@ func (a *Agent) handleControlStream(stream net.Conn, gen int) {
 		}
 		a.controlMu.Unlock()
 		if a.objectStoreFwd != nil {
-			a.objectStoreFwd.FailGeneration(gen, errors.New("agent: control stream closed"))
+			a.objectStoreFwd.FailGeneration(gen, errObjectStoreStreamClosed)
 		}
 	}()
 

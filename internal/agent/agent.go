@@ -115,6 +115,11 @@ type Agent struct {
 	// server response chunks through the control tunnel.
 	objectStoreFwd *objectStoreForwarder
 
+	// forwardersOnce creates the module control forwarders once, before
+	// the IPC listener can accept module requests or the supervisor can
+	// start a module that calls through it.
+	forwardersOnce sync.Once
+
 	// Current yamux session (set in runOnce, cleared on disconnect).
 	// Used by the module invoker to open reverse streams.
 	currentSess atomic.Pointer[yamux.Session]
@@ -214,10 +219,26 @@ func (a *Agent) ObjectStoreRequest(ctx context.Context, req moduleproto.ObjectSt
 	return a.objectStoreFwd.Forward(ctx, req, send, gen)
 }
 
+// initForwarders creates the module control forwarders once. It runs
+// before the IPC listener starts and before supervisor.Reconcile, so a
+// module that calls DataStore or ObjectStore at startup cannot observe a
+// nil forwarder or race a late assignment.
+func (a *Agent) initForwarders() {
+	a.forwardersOnce.Do(func() {
+		a.dataStoreFwd = newDataStoreForwarder()
+		a.objectStoreFwd = newObjectStoreForwarder()
+	})
+}
+
 // InitModules initializes the module subsystem for this agent. It creates
 // the registry, IPC server, supervisor, module manager, and invoker.
 // Must be called before Run if module support is desired.
 func (a *Agent) InitModules(ctx context.Context, dataDir string) error {
+	// Modules can call DataStore and ObjectStore as soon as Reconcile
+	// starts them. Create the forwarders before the listener exists so
+	// those calls never observe a nil forwarder.
+	a.initForwarders()
+
 	registry, err := agentmod.NewRegistry(dataDir)
 	if err != nil {
 		return fmt.Errorf("create registry: %w", err)
@@ -323,6 +344,10 @@ func (a *Agent) InitModules(ctx context.Context, dataDir string) error {
 			return nil, fmt.Errorf("unmarshal object store request: %w", err)
 		}
 		req.ModuleID = moduleID // enforce authenticated caller identity
+		// The agent owns correlation IDs. Discard a caller-supplied one
+		// so a hand-written IPC client cannot collide with another
+		// module's in-flight request.
+		req.RequestID = ""
 
 		ctx, cancel := context.WithTimeout(a.runContext(), objectStoreTimeout)
 		defer cancel()
@@ -421,13 +446,10 @@ func (a *Agent) Run(ctx context.Context) error {
 	// Store run context for control message handlers (W7 fix).
 	a.runCtx.Store(&ctx)
 
-	// Initialize data store forwarder for module CRUD requests
-	// through the control tunnel.
-	a.dataStoreFwd = newDataStoreForwarder()
-
-	// Initialize object store forwarder for module object requests
-	// through the control tunnel.
-	a.objectStoreFwd = newObjectStoreForwarder()
+	// Create the module control forwarders before the tunnel starts.
+	// InitModules normally creates them before its IPC listener; this
+	// call covers a Run without modules and keeps creation single-shot.
+	a.initForwarders()
 
 	// Install log capture: all log.Printf output goes to both stderr
 	// and the ring buffer. The server can request recent lines via

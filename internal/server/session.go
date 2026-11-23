@@ -113,14 +113,14 @@ func (s *Session) SetDataStore(ds *DataStore) {
 // SetObjectStore installs an object store backend for this session.
 // A nil backend leaves object storage disabled. Called by
 // Server.attach() before the control read loop starts.
-func (s *Session) SetObjectStore(store sdk.ObjectStore) {
+func (s *Session) SetObjectStore(store sdk.ObjectStore, metrics *metrics.ObjectStoreMetrics) {
 	if store == nil {
 		return
 	}
 	s.objectStoreMu.Lock()
 	defer s.objectStoreMu.Unlock()
 	if s.objectStore == nil {
-		s.objectStore = newObjectStoreHandler(store, s.SendControl)
+		s.objectStore = newObjectStoreHandler(store, s.SendControl, metrics)
 	}
 }
 

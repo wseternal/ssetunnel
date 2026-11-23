@@ -24,6 +24,10 @@ const objectStoreTimeout = 2 * time.Minute
 // stopped.
 var errObjectStoreClosed = errors.New("agent: object store forwarder is closed")
 
+// errObjectStoreStreamClosed reports a request captured from a control
+// stream generation that has already been torn down.
+var errObjectStoreStreamClosed = errors.New("agent: control stream closed")
+
 // objectStorePending is one in-flight object operation.
 type objectStorePending struct {
 	requestID string
@@ -46,12 +50,17 @@ type objectStoreForwarder struct {
 	pending  map[string]*objectStorePending
 	closed   bool
 	closedCh chan struct{}
+	// closedThrough is the highest control generation known to be dead.
+	// Generations are monotonic, so one watermark replaces a per-stream
+	// map that would grow on every reconnect.
+	closedThrough int
 }
 
 func newObjectStoreForwarder() *objectStoreForwarder {
 	return &objectStoreForwarder{
-		pending:  make(map[string]*objectStorePending),
-		closedCh: make(chan struct{}),
+		pending:       make(map[string]*objectStorePending),
+		closedCh:      make(chan struct{}),
+		closedThrough: -1,
 	}
 }
 
@@ -85,6 +94,14 @@ func (f *objectStoreForwarder) Forward(ctx context.Context, msg moduleproto.Obje
 	if f.closed {
 		f.mu.Unlock()
 		return nil, errObjectStoreClosed
+	}
+	if gen <= f.closedThrough {
+		f.mu.Unlock()
+		return nil, errObjectStoreStreamClosed
+	}
+	if _, dup := f.pending[p.requestID]; dup {
+		f.mu.Unlock()
+		return nil, fmt.Errorf("object store: duplicate request_id %q", p.requestID)
 	}
 	f.pending[p.requestID] = p
 	f.mu.Unlock()
@@ -139,13 +156,13 @@ func (f *objectStoreForwarder) HandleResponse(msg *mux.ControlMessage, gen int) 
 
 	f.mu.Lock()
 	p := f.pending[resp.RequestID]
-	if p != nil && p.gen != gen {
+	if p != nil && (p.gen != gen || (resp.ModuleID != "" && resp.ModuleID != p.moduleID)) {
 		p = nil
 	}
 	f.mu.Unlock()
 
 	if p == nil {
-		log.Printf("agent: object store response for unknown request_id=%s", resp.RequestID)
+		log.Printf("agent: object store response for unknown or mismatched request_id=%s", resp.RequestID)
 		return
 	}
 
@@ -197,6 +214,9 @@ func (f *objectStoreForwarder) HandleResponse(msg *mux.ControlMessage, gen int) 
 // given control stream generation.
 func (f *objectStoreForwarder) FailGeneration(gen int, err error) {
 	f.mu.Lock()
+	if gen > f.closedThrough {
+		f.closedThrough = gen
+	}
 	var list []*objectStorePending
 	for _, p := range f.pending {
 		if p.gen == gen {
