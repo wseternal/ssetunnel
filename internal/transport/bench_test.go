@@ -4,14 +4,17 @@ package transport_test
 
 // Bench harness (plan step 9): the budget proof. Manual run:
 //
-//	go test ./internal/transport/ -run Bench -v -timeout 10m
+//	SSET_BENCH=1 go test ./internal/transport/ -run Bench -v -timeout 10m
 //
 // All measurements go through the testutil middlebox with 10 ms
 // injected latency per direction — the loopback floor otherwise makes
-// the deltas meaningless. Skipped under -short, and excluded from
-// race-enabled builds: race instrumentation inflates goroutine-heavy
-// timings asymmetrically, making wall-clock budgets meaningless
-// (plan: benches run manually, not in CI).
+// the deltas meaningless. Skipped unless SSET_BENCH=1 (these are budget
+// assertions measured in seconds each, not unit tests: a plain
+// `go test ./...` must neither pay their cost nor let them eat the
+// package timeout), and excluded from race-enabled builds: race
+// instrumentation inflates goroutine-heavy timings asymmetrically,
+// making wall-clock budgets meaningless (plan: benches run manually,
+// not in CI).
 
 import (
 	"bytes"
@@ -20,9 +23,9 @@ import (
 	"io"
 	"net"
 	"net/http/httptest"
+	"os"
 	"runtime"
 	"sort"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -39,6 +42,15 @@ type benchEnv struct {
 	reg       *server.Registry
 	mb        *testutil.Middlebox
 	cancel    context.CancelFunc
+}
+
+// requireBench gates the manual benchmarks. They are budget assertions
+// that take seconds to minutes, so a plain `go test ./...` skips them.
+func requireBench(t *testing.T) {
+	t.Helper()
+	if os.Getenv("SSET_BENCH") == "" {
+		t.Skip("bench: manual run only (set SSET_BENCH=1)")
+	}
 }
 
 // report prints one budget line and fails the test on a miss.
@@ -176,8 +188,16 @@ func setupBench(t *testing.T, target net.Listener) *benchEnv {
 
 func (e *benchEnv) dialAgent(t *testing.T) net.Conn {
 	t.Helper()
+	return e.dialAgentBatch(t, 64<<10)
+}
+
+// dialAgentBatch dials with a specific upstream batch ceiling. The middlebox
+// rejects POST bodies over 64 KiB, so a bench that sends agent→client data
+// must pick a ceiling that leaves room for coalesced control frames.
+func (e *benchEnv) dialAgentBatch(t *testing.T, batchSize int) net.Conn {
+	t.Helper()
 	client := connect.NewClient(e.serverURL, "", "", "")
-	client.BatchSize = 64 << 10
+	client.BatchSize = batchSize
 	client.MaxWait = 10 * time.Millisecond
 	c, err := client.Dial(context.Background())
 	if err != nil {
@@ -206,12 +226,10 @@ func percentile(ds []time.Duration, p float64) time.Duration {
 }
 
 func TestBenchAddedLatency(t *testing.T) {
-	if testing.Short() {
-		t.Skip("bench: manual run only")
-	}
+	requireBench(t)
 	target := startEchoTarget(t)
 	e := setupBench(t, target)
-	const pings = 2000
+	const pings = 300 // 2020 round trips at ~35 ms each would spend a minute
 	payload := bytes.Repeat([]byte{'p'}, 64)
 	buf := make([]byte, 64)
 
@@ -250,9 +268,7 @@ func TestBenchAddedLatency(t *testing.T) {
 }
 
 func TestBenchThroughput(t *testing.T) {
-	if testing.Short() {
-		t.Skip("bench: manual run only")
-	}
+	requireBench(t)
 	target, discarded := startModeTarget(t)
 	e := setupBench(t, target)
 
@@ -289,16 +305,20 @@ func TestBenchThroughput(t *testing.T) {
 }
 
 func TestBenchConcurrency(t *testing.T) {
-	if testing.Short() {
-		t.Skip("bench: manual run only")
-	}
+	requireBench(t)
 	target, discarded := startModeTarget(t)
-	e := setupBench(t, target)
+	// The middlebox caps POST bodies at 64 KiB. A deployment behind such a
+	// proxy picks its batch ceiling from `probe`; 32 KiB leaves room for the
+	// control frames that coalesce into the same agent→client batches.
+	e := setupBenchTuned(t, target, func(ag *agent.Agent) {
+		ag.BatchSize = 32 << 10
+	})
 	const payload = 1 << 20 // 1 MiB per stream
+	batch := 32 << 10
 
 	// Single-stream baseline.
 	base := discarded.Load()
-	c := e.dialAgent(t)
+	c := e.dialAgentBatch(t, batch)
 	t0 := time.Now()
 	c.Write([]byte{'D'})
 	go c.Write(bytes.Repeat([]byte{'b'}, payload))
@@ -309,30 +329,40 @@ func TestBenchConcurrency(t *testing.T) {
 	// Stalled stream (plan step 9: "one stalled after 64 KiB"): 'E' echo
 	// mode, sends 64 KiB, never reads — its echo backs up in its stream
 	// buffers and it never makes progress again.
-	stall := e.dialAgent(t)
+	stall := e.dialAgentBatch(t, batch)
 	defer stall.Close()
 	stall.Write([]byte{'E'})
 	stall.Write(bytes.Repeat([]byte{'s'}, 64<<10))
 
-	// 31 streams × 1 MiB must all complete while the stall sits.
+	// 31 streams × 1 MiB must all complete while the stall sits. Keep every
+	// stream open until the target has counted the bytes: yamux Close kills
+	// both directions, so closing right after Write would drop data still in
+	// flight and turn the measurement into a race.
 	const streams = 31
 	base = discarded.Load()
 	start := time.Now()
-	var wg sync.WaitGroup
+	conns := make([]net.Conn, 0, streams)
 	for i := 0; i < streams; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			sc := e.dialAgent(t)
-			defer sc.Close()
-			sc.SetDeadline(time.Now().Add(2 * time.Minute))
-			sc.Write([]byte{'D'})
-			sc.Write(bytes.Repeat([]byte{'c'}, payload))
-		}()
+		sc := e.dialAgentBatch(t, batch)
+		sc.SetDeadline(time.Now().Add(2 * time.Minute))
+		sc.Write([]byte{'D'})
+		if _, err := sc.Write(bytes.Repeat([]byte{'c'}, payload)); err != nil {
+			t.Errorf("stream %d: write: %v", i, err)
+		}
+		conns = append(conns, sc)
 	}
-	wg.Wait()
+	// Also cover the fatal path: a failed wait must not leave 31 live sessions
+	// behind for the next benchmark.
+	t.Cleanup(func() {
+		for _, sc := range conns {
+			sc.Close()
+		}
+	})
 	waitBytes(t, discarded, base+streams*payload, 90*time.Second)
 	tN := time.Since(start)
+	for _, sc := range conns {
+		sc.Close()
+	}
 	ratio := float64(tN) / float64(t1)
 	t.Logf("BENCH  baseline 1 stream=%v · %d streams with one stalled=%v (%.1fx)", t1.Round(time.Millisecond), streams, tN.Round(time.Millisecond), ratio)
 	report(t, "31/32 streams complete", tN.Round(time.Millisecond).String(), "<= 90s deadline", true)
@@ -344,9 +374,7 @@ func TestBenchConcurrency(t *testing.T) {
 }
 
 func TestBenchReconnect(t *testing.T) {
-	if testing.Short() {
-		t.Skip("bench: manual run only")
-	}
+	requireBench(t)
 	target := startEchoTarget(t)
 	e := setupBench(t, target)
 
@@ -502,9 +530,7 @@ func setupBenchTuned(t *testing.T, target net.Listener, tune func(*agent.Agent))
 // upstream POST path — cycle 2's bottleneck). Serial-16KiB control
 // prints the baseline; the 4/64KiB gate must clear the ≥4 MB/s budget.
 func TestBenchUpstreamThroughput(t *testing.T) {
-	if testing.Short() {
-		t.Skip("bench: manual run only")
-	}
+	requireBench(t)
 	target, discarded := startModeTarget(t)
 
 	// Serial baseline (cycle-1 behavior).
@@ -546,9 +572,7 @@ func TestBenchUpstreamThroughput(t *testing.T) {
 
 // TestBenchUpstreamGzip measures wire-byte reduction for gzip-per-batch.
 func TestBenchUpstreamGzip(t *testing.T) {
-	if testing.Short() {
-		t.Skip("bench: manual run only")
-	}
+	requireBench(t)
 	target, _ := startModeTarget(t)
 
 	e := setupBenchTuned(t, target, func(ag *agent.Agent) {
