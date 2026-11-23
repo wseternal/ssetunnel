@@ -152,38 +152,7 @@ func startModeTarget(t *testing.T) (net.Listener, *atomic.Int64) {
 
 func setupBench(t *testing.T, target net.Listener) *benchEnv {
 	t.Helper()
-	srv := server.NewServer(15 * time.Second)
-	ts := httptest.NewServer(srv.HTTPHandler())
-	mb, err := testutil.StartMiddlebox(ts.URL, testutil.MiddleboxConfig{
-		Latency: 10 * time.Millisecond, // per direction
-		MaxBody: 64 << 10,
-	})
-	if err != nil {
-		t.Fatalf("StartMiddlebox: %v", err)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	ag := &agent.Agent{
-		ServerURL:  mb.URL,
-		Target:     target.Addr().String(),
-		MaxBackoff: 50 * time.Millisecond,
-	}
-	go ag.Run(ctx)
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if len(srv.Reg.IDs()) > 0 {
-			break
-		}
-		time.Sleep(time.Millisecond)
-	}
-	if len(srv.Reg.IDs()) == 0 {
-		t.Fatal("agent never connected")
-	}
-	t.Cleanup(func() {
-		cancel()
-		ts.Close()
-		mb.Close()
-	})
-	return &benchEnv{serverURL: ts.URL, reg: srv.Reg, mb: mb, cancel: cancel}
+	return setupBenchTuned(t, target, nil)
 }
 
 func (e *benchEnv) dialAgent(t *testing.T) net.Conn {
