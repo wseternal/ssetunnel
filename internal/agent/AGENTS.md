@@ -97,11 +97,11 @@ After the first `Supervisor.Reconcile()`, `InitModules` starts the local module 
 
 ### Object store forwarding (`objectstore.go`)
 
-`InitModules` installs `SetOnObjectStore` beside `SetOnDataStore`. The handler unmarshals the IPC request, overwrites `module_id` with the authenticated IPC identity, and calls `Agent.ObjectStoreRequest`.
+`InitModules` creates the forwarders before the IPC listener, then installs `SetOnObjectStore` beside `SetOnDataStore`. The handler unmarshals the IPC request, overwrites `module_id` with the authenticated IPC identity, clears any caller-supplied `request_id`, and calls `Agent.ObjectStoreRequest`.
 
-- `objectStoreForwarder` generates a random `request_id` and fragments a put with `moduleproto.NewObjectStoreDataChunks`.
-- A get sends one request. The forwarder reassembles bounded response chunks with `moduleproto.ObjectStoreAssembler`.
-- Every pending entry stores its control generation. A stale stream cannot satisfy or clear a newer entry.
+- `objectStoreForwarder` owns correlation IDs: it generates a random `request_id`, rejects a duplicate already pending, and fragments a put with `moduleproto.NewObjectStoreDataChunks`.
+- A get sends one request. The forwarder reassembles bounded response chunks with `moduleproto.ObjectStoreAssembler` and ignores a response whose non-empty `module_id` does not match the pending request.
+- Every pending entry stores its control generation. A stale stream cannot satisfy or clear a newer entry; a monotonic closed-generation watermark rejects requests that try to register after their stream closed.
 - The operation bound is two minutes, or the caller context deadline when shorter.
 - Cleanup paths: terminal response, malformed response, timeout, control stream close (`FailGeneration`), and `Agent.Close` (`FailAll` before the IPC server closes).
 

@@ -100,7 +100,8 @@ Server half of the module object path.
 
 - `object_store_req` frames arrive on the control loop. The handler validates metadata, reassembles a put, and queues the backend call.
 - One worker goroutine per session performs disk calls. The queue holds eight jobs. A full queue returns `busy`.
-- A session holds at most eight upload assemblies. Incomplete assemblies expire after five minutes.
+- Upload assemblies are keyed by `(module_id, request_id)`, so two modules cannot collide on a bare request ID. A session holds at most eight assemblies; a one-minute worker ticker expires them after five minutes, even on read-only sessions.
+- Server-scoped object-store metrics count puts, gets, backend errors, busy rejections, bytes, and average backend latency; they are exposed through `Server.ObjectStoreMetrics`.
 - The worker fragments a get result at 32 KiB and stops on the first `SendControl` error.
 - Disabled storage answers `unavailable` with the matching request ID, so a caller never waits out a timeout.
 - `Session.Close` and control-loop exit stop the handler and release assemblies.
