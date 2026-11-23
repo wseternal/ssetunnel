@@ -42,9 +42,3 @@ export interface ModuleSummary {
   health?: string;
   has_ui?: boolean;
 }
-
-export interface ModuleUIDescriptor {
-  kind: string;
-  path?: string;
-  assets: string[];
-}

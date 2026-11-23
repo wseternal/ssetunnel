@@ -124,9 +124,12 @@ func (s *Server) Serve(ctx context.Context) error {
 	srv := &http.Server{
 		Handler:           s.handler,
 		ReadHeaderTimeout: 10 * time.Second,
-		ReadTimeout:       30 * time.Second,
-		WriteTimeout:      30 * time.Second,
-		IdleTimeout:       60 * time.Second,
+		// Ordinary API calls are bounded here; the module proxy clears both
+		// whole-request deadlines per request so a valid long module exchange is
+		// bounded only by the agent's module timeout.
+		ReadTimeout:  30 * time.Second,
+		WriteTimeout: 30 * time.Second,
+		IdleTimeout:  60 * time.Second,
 		// net/http answers OPTIONS * itself, before the handler, so that
 		// response would bypass the security headers the wrapper declares.
 		DisableGeneralOptionsHandler: true,

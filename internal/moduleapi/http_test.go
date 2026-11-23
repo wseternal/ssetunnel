@@ -84,6 +84,26 @@ func TestBuildRequestStripsSurfaceCredentials(t *testing.T) {
 	}
 }
 
+func TestBuildRequestStripsBrowserMetadata(t *testing.T) {
+	src := httptest.NewRequest(http.MethodPost, "/api/v1/modules/invoke/box/io.test/run", strings.NewReader("{}"))
+	src.Header.Set("Origin", "https://console.example")
+	src.Header.Set("Referer", "https://console.example/console/modules")
+	src.Header.Set("Sec-Fetch-Site", "same-origin")
+	src.Header.Set("Sec-Fetch-Mode", "cors")
+	src.Header.Set("Sec-Fetch-Dest", "empty")
+	src.Header.Set("Sec-Fetch-User", "?1")
+
+	req, err := moduleapi.BuildRequest(context.Background(), src, http.MethodPost, "/run")
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	for _, key := range []string{"Origin", "Referer", "Sec-Fetch-Site", "Sec-Fetch-Mode", "Sec-Fetch-Dest", "Sec-Fetch-User"} {
+		if got := req.Header.Get(key); got != "" {
+			t.Errorf("header %s leaked to the module: %q", key, got)
+		}
+	}
+}
+
 func TestBuildRequestGeneratesCorrelationID(t *testing.T) {
 	src := httptest.NewRequest(http.MethodGet, "/api/v1/modules/invoke/box/io.test/sync", nil)
 	req, err := moduleapi.BuildRequest(context.Background(), src, http.MethodGet, "/sync")

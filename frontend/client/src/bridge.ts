@@ -120,7 +120,11 @@ export const httpBridge: Bridge = {
     }
     // No timeout: a module operation may legitimately run long and stream a
     // large body. The caller owns cancellation through the passed signal.
-    return fetch(`/api${path}`, {
+    // Shared module pages pass surface-relative `/api/v1/modules/...` paths;
+    // this server mounts its API at `/api`, so the path already carries the
+    // prefix. Adding another `/api` would produce `/api/api/v1/...` and miss
+    // every module route.
+    return fetch(path, {
       method: init?.method || 'GET',
       headers,
       body: init?.body,

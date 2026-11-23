@@ -83,6 +83,9 @@ export default function ModulesPage({ agentId, moduleFetch, curlBase, curlAuthHe
       const res = await fetchRef.current(`/api/v1/modules?agent=${encodeURIComponent(agentId)}`, { signal: controller.signal });
       if (!res.ok) {
         setError((await res.text()) || `Failed to list modules (${res.status})`);
+        setModules([]);
+        setSelectedId('');
+        setEpoch('');
         return;
       }
       const list = (await res.json()) as ModuleSummary[];
@@ -99,14 +102,21 @@ export default function ModulesPage({ agentId, moduleFetch, curlBase, curlAuthHe
     } catch (e) {
       if (controller.signal.aborted || (e instanceof DOMException && e.name === 'AbortError')) return;
       setError(e instanceof Error ? e.message : 'Failed to list modules');
+      setModules([]);
+      setSelectedId('');
+      setEpoch('');
     } finally {
       if (listAbortRef.current === controller) setLoading(false);
     }
   }, [agentId]);
 
   useEffect(() => {
-    // A different agent owns a different catalog: drop the selection first so
-    // the detail panel cannot show the previous agent's module.
+    // A different agent owns a different catalog: drop the previous catalog
+    // and selection before the new list arrives, so the detail panel cannot
+    // render the previous agent's module with the new agent ID.
+    setModules([]);
+    setSelectedId('');
+    setEpoch('');
     setOpenAPI('');
     setOpenAPIError('');
     setShowOpenAPI(false);
@@ -118,6 +128,7 @@ export default function ModulesPage({ agentId, moduleFetch, curlBase, curlAuthHe
   }, [loadModules]);
 
   const selected = modules.find((m) => m.module_id === selectedId) || null;
+  const selectedRevision = selected?.revision || '';
 
   // Load the raw OpenAPI document only when it is asked for; the workbench
   // obtains its operation models through its own endpoint.
@@ -155,7 +166,7 @@ export default function ModulesPage({ agentId, moduleFetch, curlBase, curlAuthHe
     // The fetcher is read through fetchRef: an adapter may rebuild it on every
     // render, and depending on its identity would abort and restart this load
     // endlessly while the document is open.
-  }, [showOpenAPI, agentId, selectedId]);
+  }, [showOpenAPI, agentId, selectedId, selectedRevision]);
 
   return (
     <Box>

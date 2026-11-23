@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted. Implements goal `docs/as-goals/agent-module-parity`; supersedes none.
+Accepted. Implements the module-surface parity goal; supersedes none.
 
 ## Context
 
@@ -50,7 +50,7 @@ loopback listener. An IPC design (owner-only Unix socket) would exclude them but
 would also exclude every browser surface, which is the point of the goal. The
 mitigations are the Host/Origin/fetch-metadata checks above (they stop a remote
 page from driving the API through the user's browser) plus module-level operation
-matching, body limits, timeouts, and invocation caps. Deployments that cannot
+matching, timeouts, and invocation caps. Deployments that cannot
 accept cross-user loopback access must not enable modules.
 
 ### 2. One HTTP policy for all surfaces
@@ -131,5 +131,6 @@ own `node_modules` (a symlinked directory would resolve a second React copy).
 
 ## Evidence
 
-Gate transcripts live under `docs/as-goals/agent-module-parity/1/evidence/`
-(direct API, `cli ui` parity, local security, console compatibility, lifecycle).
+The implementation and its tests are the durable evidence. Development gate
+transcripts from the original goal are intentionally kept out of the repository
+and are not required to understand or verify this decision.

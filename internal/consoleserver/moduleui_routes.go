@@ -3,6 +3,7 @@ package consoleserver
 import (
 	"bufio"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"strings"
@@ -158,29 +159,32 @@ func (m *moduleUIRoutes) handleGetProviderAsset(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	// Find the asset operation in the validated OpenAPI.
-	// Convention: the asset operation is named "getAsset" or matches GET /assets/{path}.
-	op, ok := mod.ValidatedOpenAPI.MatchOperation("GET", assetPath)
+	// Find the concrete asset path the module serves. `MatchOperation` matches a
+	// concrete path against an OpenAPI template, but the returned operation's
+	// Path is still the template (e.g. "/assets/{path}"); sending that would ask
+	// the module for the literal file "{path}". Keep the candidate path that
+	// matched, and use the operation only for validation/logging.
+	opPath := assetPath
+	op, ok := mod.ValidatedOpenAPI.MatchOperation("GET", opPath)
 	if !ok {
-		// Try the conventional asset path.
-		op, ok = mod.ValidatedOpenAPI.MatchOperation("GET", "/ui"+assetPath)
+		// A package may declare its asset files under "ui/".
+		opPath = "/ui" + assetPath
+		op, ok = mod.ValidatedOpenAPI.MatchOperation("GET", opPath)
 		if !ok {
 			http.Error(w, fmt.Sprintf("asset operation not found for path: %s", assetPath), http.StatusNotFound)
 			return
 		}
 	}
 
-	// Request invocation. The matched operation's own path is what the module
-	// serves: a package may declare an asset as "index.html" while its route is
-	// "/ui/index.html", and invoking the URL path instead of the matched
-	// operation asks the module for a route it does not have.
+	// Request invocation. The candidate path, not the operation template, is
+	// what the module serves.
 	streamHandler := session.ModuleStreamHandler()
 	if streamHandler == nil {
 		http.Error(w, "invocation not available", http.StatusServiceUnavailable)
 		return
 	}
 
-	invReq, err := http.NewRequestWithContext(r.Context(), "GET", op.Path, nil)
+	invReq, err := http.NewRequestWithContext(r.Context(), "GET", opPath, nil)
 	if err != nil {
 		http.Error(w, "failed to create request", http.StatusInternalServerError)
 		return
@@ -236,6 +240,11 @@ func (m *moduleUIRoutes) handleGetProviderAsset(w http.ResponseWriter, r *http.R
 			data = append(data, buf[:n]...)
 		}
 		if err != nil {
+			if err != io.EOF {
+				log.Printf("module ui: provider asset %s read failed: %v", assetPath, err)
+				http.Error(w, "asset read failed", http.StatusBadGateway)
+				return
+			}
 			break
 		}
 	}

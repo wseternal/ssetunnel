@@ -239,6 +239,12 @@ func (m *moduleRoutes) handleGetOperationModels(w http.ResponseWriter, r *http.R
 // handleInvoke invokes a module operation.
 // POST /api/v1/modules/invoke/<agent-id>/<module-id>/<operation-path...>
 func (m *moduleRoutes) handleInvoke(w http.ResponseWriter, r *http.Request) {
+	// The console's 15-second ReadTimeout is sized for ordinary API calls. A
+	// module request body may legitimately take longer to upload; clear the read
+	// deadline for this route so the agent's 30-second exchange deadline is the
+	// only limit. The console already has no WriteTimeout.
+	clearModuleReadDeadline(w)
+
 	// An OPTIONS with Access-Control-Request-Method is a CORS preflight and is
 	// answered here. A plain OPTIONS is an operation and must reach a module
 	// whose contract declares it (see IsPreflight).
@@ -395,4 +401,14 @@ func writeJSON(w http.ResponseWriter, status int, data interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(data)
+}
+
+// clearModuleReadDeadline removes the server-wide ReadTimeout for one module
+// invocation. ResponseController follows the console's original writer; if the
+// writer cannot express a deadline, the server default remains and the error is
+// logged rather than hidden.
+func clearModuleReadDeadline(w http.ResponseWriter) {
+	if err := http.NewResponseController(w).SetReadDeadline(time.Time{}); err != nil {
+		log.Printf("invoke: clear read deadline: %v", err)
+	}
 }

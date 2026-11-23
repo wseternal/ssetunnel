@@ -220,8 +220,9 @@ export default function ModuleWorkbench({ agentId, module, moduleFetch, curlBase
   fetchRef.current = moduleFetch;
   const loadAbortRef = useRef<AbortController | null>(null);
   const sendAbortRef = useRef<AbortController | null>(null);
-  // Which module the state below belongs to; a switch clears it before loading.
-  const loadedModuleRef = useRef('');
+  // Which module contract the state below belongs to; a switch or a revision
+  // change clears it before loading.
+  const loadedContractRef = useRef('');
 
   // Initialise the form for an operation: defaults for every parameter, a body
   // template from the schema, and a content-type header when a body exists.
@@ -252,10 +253,11 @@ export default function ModuleWorkbench({ agentId, module, moduleFetch, curlBase
     const controller = new AbortController();
     loadAbortRef.current = controller;
 
-    if (loadedModuleRef.current !== module.module_id) {
-      // A different module: drop the previous list and form before the new
+    const contractKey = `${module.module_id}:${module.revision || ''}`;
+    if (loadedContractRef.current !== contractKey) {
+      // A different contract: drop the previous list and form before the new
       // request lands, so a failed load cannot leave stale operations live.
-      loadedModuleRef.current = module.module_id;
+      loadedContractRef.current = contractKey;
       setOperations([]);
       setTitle('');
       setSelectedKey('');
@@ -301,7 +303,7 @@ export default function ModuleWorkbench({ agentId, module, moduleFetch, curlBase
       // finishes while its successor is still in flight.
       if (loadAbortRef.current === controller) setLoading(false);
     }
-  }, [agentId, module.module_id, seedForm]);
+  }, [agentId, module.module_id, module.revision, seedForm]);
 
   useEffect(() => {
     loadOperations();

@@ -163,7 +163,7 @@ Invocations require:
 - OpenAPI operation matching (method + path)
 - Epoch and revision pinning (stale references rejected with 409)
 
-The agent's loopback surface skips user authentication by design; its access control is the loopback/Host/Origin/fetch-metadata boundary plus the same operation matching, revision pinning, body limits, timeouts, and invocation caps. Any other OS user on the same machine can reach a loopback listener — do not enable modules on machines where that is unacceptable.
+The agent's loopback surface skips user authentication by design; its access control is the loopback/Host/Origin/fetch-metadata boundary plus the same operation matching, revision pinning, timeouts, and invocation caps. Any other OS user on the same machine can reach a loopback listener — do not enable modules on machines where that is unacceptable.
 
 ### Header Sanitization
 
@@ -253,11 +253,12 @@ defer resp.Body.Close()
 | Active invocations | 32 |
 | Per-module invocations | 8 |
 | Establishment deadline | 3 seconds |
-| Request headers | 64 KiB |
-| Request path | 8 KiB |
-| Request query | 16 KiB |
 | UI asset size | 8 MiB |
 | UI cache size | 64 MiB |
+
+The surface does not impose module-specific request header, path, query, or body
+limits; a module must bound its own request-body reads. The limits above are the
+ones the registry, transport, and UI layers actually enforce.
 
 ## Troubleshooting
 

@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 )
@@ -103,12 +104,14 @@ func BuildRequest(ctx context.Context, src *http.Request, method, operationPath 
 	return req, nil
 }
 
-// CopyRequestHeaders copies the headers a module may see. Credentials and
-// hop-by-hop headers never cross a surface: each surface has its own
-// authentication, and the module must not receive either one's secret.
+// CopyRequestHeaders copies the headers a module may see. Credentials,
+// hop-by-hop headers, and the browser's own Fetch Metadata never cross a
+// surface: each surface has its own authentication, and metadata that
+// describes the surface must not be presented as if it described the module
+// call.
 func CopyRequestHeaders(src, dst http.Header) {
 	for key, values := range src {
-		if IsHopByHopHeader(key) || IsCredentialHeader(key) || IsForwardingHeader(key) {
+		if IsHopByHopHeader(key) || IsCredentialHeader(key) || IsForwardingHeader(key) || IsBrowserMetadataHeader(key) {
 			continue
 		}
 		// The surface, not the module, decides the wire encoding. Forwarding
@@ -128,7 +131,7 @@ func CopyRequestHeaders(src, dst http.Header) {
 func IsHopByHopHeader(key string) bool {
 	switch strings.ToLower(key) {
 	case "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
-		"te", "trailers", "transfer-encoding", "upgrade":
+		"te", "trailer", "transfer-encoding", "upgrade":
 		return true
 	}
 	return false
@@ -218,8 +221,9 @@ func WriteJSON(w http.ResponseWriter, status int, data any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	if err := json.NewEncoder(w).Encode(data); err != nil {
-		// The status line is already sent; only the log-worthy failure remains.
-		_ = err
+		// The status line is already sent, so this cannot change the status; log
+		// it because a truncated or invalid response is otherwise invisible.
+		log.Printf("moduleapi: write JSON: %v", err)
 	}
 }
 

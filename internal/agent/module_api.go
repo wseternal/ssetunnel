@@ -3,10 +3,12 @@ package agent
 import (
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	gmux "github.com/gorilla/mux"
@@ -41,10 +43,56 @@ type moduleAPIServer struct {
 	manager  *ModuleManager
 	registry *agentmod.Registry
 
+	// contracts caches the parsed OpenAPI document and its form models by
+	// module ID. The entry is replaced when the module revision changes; a
+	// revision is the module's contract identity.
+	contracts sync.Map // map[string]*moduleContract
+
 	ln      net.Listener
 	srv     *http.Server
 	addr    string
 	baseURL string
+}
+
+// moduleContract is the immutable-by-revision parsed contract for one module.
+// The operation models are built at most once per contract.
+type moduleContract struct {
+	revision  string
+	validated *agentmod.ValidatedOpenAPI
+
+	modelsOnce     sync.Once
+	modelsTitle    string
+	models         []agentmod.APIOperation
+	modelsBuildErr error
+}
+
+func (c *moduleContract) operationModels(openAPIYAML []byte) (string, []agentmod.APIOperation, error) {
+	c.modelsOnce.Do(func() {
+		c.modelsTitle, c.models, c.modelsBuildErr = agentmod.BuildOperationModels(openAPIYAML)
+	})
+	return c.modelsTitle, c.models, c.modelsBuildErr
+}
+
+// contractFor returns the cached contract for the module's current revision,
+// parsing the OpenAPI document only when the revision changed. The map holds
+// entries for all modules seen by this API process; invalidation is by revision
+// comparison, not time.
+func (s *moduleAPIServer) contractFor(mod *moduleproto.SnapshotModuleEntry) (*moduleContract, error) {
+	if mod == nil {
+		return nil, errors.New("nil module entry")
+	}
+	if cached, ok := s.contracts.Load(mod.ModuleID); ok {
+		if contract, ok := cached.(*moduleContract); ok && contract.revision == mod.Revision {
+			return contract, nil
+		}
+	}
+	validated, err := agentmod.ValidateOpenAPI(mod.OpenAPIYAML)
+	if err != nil {
+		return nil, err
+	}
+	contract := &moduleContract{revision: mod.Revision, validated: validated}
+	s.contracts.Store(mod.ModuleID, contract)
+	return contract, nil
 }
 
 // newModuleAPIServer builds the API for an agent that has modules initialized.
@@ -296,8 +344,8 @@ func (s *moduleAPIServer) handleGetModule(w http.ResponseWriter, r *http.Request
 	}
 
 	opCount := 0
-	if validated, err := agentmod.ValidateOpenAPI(mod.OpenAPIYAML); err == nil {
-		opCount = len(validated.Operations)
+	if contract, err := s.contractFor(mod); err == nil {
+		opCount = len(contract.validated.Operations)
 	} else {
 		log.Printf("agent: module api: validate OpenAPI for %s: %v", mod.ModuleID, err)
 	}
@@ -359,7 +407,13 @@ func (s *moduleAPIServer) handleGetOperationModels(w http.ResponseWriter, r *htt
 		http.Error(w, "module not found", http.StatusNotFound)
 		return
 	}
-	title, operations, err := agentmod.BuildOperationModels(mod.OpenAPIYAML)
+	contract, err := s.contractFor(mod)
+	if err != nil {
+		log.Printf("agent: module api: validate OpenAPI for %s: %v", mod.ModuleID, err)
+		http.Error(w, "module OpenAPI document cannot be rendered", http.StatusInternalServerError)
+		return
+	}
+	title, operations, err := contract.operationModels(mod.OpenAPIYAML)
 	if err != nil {
 		log.Printf("agent: module api: build operation models for %s: %v", mod.ModuleID, err)
 		http.Error(w, "module OpenAPI document cannot be rendered", http.StatusInternalServerError)
@@ -401,13 +455,13 @@ func (s *moduleAPIServer) handleInvoke(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "module not found", http.StatusNotFound)
 		return
 	}
-	validated, err := agentmod.ValidateOpenAPI(mod.OpenAPIYAML)
+	contract, err := s.contractFor(mod)
 	if err != nil {
 		log.Printf("agent: module api: validate OpenAPI for %s: %v", moduleID, err)
 		http.Error(w, "module contract unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	op, ok := validated.MatchOperation(method, operationPath)
+	op, ok := contract.validated.MatchOperation(method, operationPath)
 	if !ok {
 		http.Error(w, fmt.Sprintf("operation not found: %s %s", method, operationPath), http.StatusNotFound)
 		return
@@ -544,6 +598,11 @@ func (s *moduleAPIServer) handleGetProviderAsset(w http.ResponseWriter, r *http.
 			data = append(data, buf[:n]...)
 		}
 		if err != nil {
+			if err != io.EOF {
+				log.Printf("agent: module api: provider asset %s read failed: %v", assetPath, err)
+				http.Error(w, "asset read failed", http.StatusBadGateway)
+				return
+			}
 			break
 		}
 	}

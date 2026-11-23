@@ -45,6 +45,13 @@ var moduleProxyClient = &http.Client{
 // agent restarted by the UI publishes a new port without the browser having to
 // re-read anything.
 func (s *Server) handleModuleProxy(w http.ResponseWriter, r *http.Request) {
+	// The server's whole-request ReadTimeout/WriteTimeout are sized for ordinary
+	// API calls. A module exchange gets its own 30-second deadline inside the
+	// agent, and a server deadline that starts before the proxy dial would cut a
+	// valid late response. Clear both deadlines for this request only; the
+	// launch-secret boundary and the module's exchange deadline still bound it.
+	clearModuleDeadlines(w)
+
 	target, err := moduleProxyTarget()
 	if err != nil {
 		log.Printf("api: module proxy unavailable: %v", err)
@@ -85,6 +92,20 @@ func (s *Server) handleModuleProxy(w http.ResponseWriter, r *http.Request) {
 func flush(w http.ResponseWriter) {
 	if f, ok := w.(http.Flusher); ok {
 		f.Flush()
+	}
+}
+
+// clearModuleDeadlines removes the server-wide read and write deadlines for the
+// lifetime of one module proxy request. ResponseController follows the
+// statusWriter's Unwrap to the real connection; an unsupported writer is not
+// fatal, but it means the server defaults remain in force.
+func clearModuleDeadlines(w http.ResponseWriter) {
+	rc := http.NewResponseController(w)
+	if err := rc.SetReadDeadline(time.Time{}); err != nil {
+		log.Printf("api: module proxy: clear read deadline: %v", err)
+	}
+	if err := rc.SetWriteDeadline(time.Time{}); err != nil {
+		log.Printf("api: module proxy: clear write deadline: %v", err)
 	}
 }
 
