@@ -19,9 +19,20 @@ Secured local HTTP server behind `cli ui`. Serves the embedded client SPA (`fron
 - Shutdown: `srv.Shutdown` first (no new registrations during teardown), then parallel agent/connect teardown; `Serve` gates its return on teardown completion when the context was cancelled.
 - Logout stops owned runtimes before deleting the session entry (ADR-005 ownership).
 
+## Module Proxy
+
+`/api/v1/modules/**` is a proxy, not a reimplementation. `module_proxy.go` forwards every request to the loopback module API the agent published, so the browser never talks to the agent and the shared module policy lives in one place (`internal/moduleapi`).
+
+- Target: `clientapp.ReadExternalAgentStatus()` → `module_api_url`, validated per request (scheme `http`, no userinfo, host must be loopback, port required, no path/query/fragment). Anything else is `503` — an owned run publishes this only after its module subsystem starts, so a stale or missing endpoint must fail loudly instead of being cached.
+- Transport: dedicated `http.Transport{Proxy: nil, DisableCompression: true}` and a client that does not follow redirects. A proxy inherited from the environment would send tunnel-only machines somewhere else; transparent gzip plus a relayed body without `Content-Encoding` would corrupt output.
+- Method: `moduleapi.ResolveMethod` turns `POST` + `X-SSET-Method-Override: TRACE` into TRACE.
+- Request: credentials, hop-by-hop, forwarding, browser Fetch Metadata, the override header, and `Accept-Encoding` are stripped before forwarding.
+- Response: `moduleapi.CopyResponseHeaders` (allowlist, no `cache-control`), then the body is streamed with a 32 KiB flush cadence so a long module response renders as it arrives. Errors surface as `502` (upstream failure) or `503` (no usable endpoint).
+
 ## Rules
 
-* No streaming responses here — the `statusWriter` wrapper is safe in this package only. Never copy it to `consoleserver` (SSE handlers assert `http.Flusher` on the original writer).
+* `statusWriter` forwards `Flush` and `Unwrap` (for `http.ResponseController`) because the module proxy streams. It is still package-local: never copy it to `consoleserver`, whose SSE handlers assert `http.Flusher` on the original writer.
+* The client server's `WriteTimeout` (30 s) bounds forwarded module responses; the proxy cannot outlive it.
 * Route order: `/api` subrouter (auth) → `/assets/` → bare `/assets` 404 → SPA catch-all last.
 * The launch secret comes from `URL()`'s fragment; there is no secret override knob.
 * Regression tests (`runtime_test.go`, `server_test.go`) use the real `Serve` boundary and an httptest tunnel stub; the test HOME must be short (macOS unix-socket path limit).

@@ -143,15 +143,16 @@ func (ar *agentRuntime) status() agentStatus {
 			// own agent that hasn't been cleaned up yet.
 			if ext.PID != os.Getpid() {
 				return agentStatus{
-					Running:     true,
-					External:    true,
-					PID:         ext.PID,
-					ServerURL:   ext.ServerURL,
-					Target:      ext.Target,
-					AgentID:     ext.AgentID,
-					BatchSize:   ext.BatchSize,
-					Concurrency: ext.Concurrency,
-					Compress:    ext.Compress,
+					Running:      true,
+					External:     true,
+					PID:          ext.PID,
+					ServerURL:    ext.ServerURL,
+					Target:       ext.Target,
+					AgentID:      ext.AgentID,
+					BatchSize:    ext.BatchSize,
+					Concurrency:  ext.Concurrency,
+					Compress:     ext.Compress,
+					ModuleAPIURL: ext.ModuleAPIURL,
 				}
 			}
 		}
@@ -162,34 +163,48 @@ func (ar *agentRuntime) status() agentStatus {
 	if run.exited() {
 		if ext := clientapp.ReadExternalAgentStatus(); ext != nil && ext.PID != os.Getpid() {
 			return agentStatus{
-				Running:     true,
-				External:    true,
-				PID:         ext.PID,
-				ServerURL:   ext.ServerURL,
-				Target:      ext.Target,
-				AgentID:     ext.AgentID,
-				BatchSize:   ext.BatchSize,
-				Concurrency: ext.Concurrency,
-				Compress:    ext.Compress,
+				Running:      true,
+				External:     true,
+				PID:          ext.PID,
+				ServerURL:    ext.ServerURL,
+				Target:       ext.Target,
+				AgentID:      ext.AgentID,
+				BatchSize:    ext.BatchSize,
+				Concurrency:  ext.Concurrency,
+				Compress:     ext.Compress,
+				ModuleAPIURL: ext.ModuleAPIURL,
 			}
 		}
 		// No external agent — fall through to report the exited run's error.
 	}
 
 	st := agentStatus{
-		Running:     !run.exited(),
-		PID:         os.Getpid(),
-		ServerURL:   run.cfg.ServerURL,
-		Target:      run.cfg.Target,
-		AgentID:     run.cfg.AgentID,
-		BatchSize:   run.cfg.BatchSize,
-		Concurrency: run.cfg.Concurrency,
-		Compress:    run.cfg.Compress,
+		Running:      !run.exited(),
+		PID:          os.Getpid(),
+		ServerURL:    run.cfg.ServerURL,
+		Target:       run.cfg.Target,
+		AgentID:      run.cfg.AgentID,
+		BatchSize:    run.cfg.BatchSize,
+		Concurrency:  run.cfg.Concurrency,
+		Compress:     run.cfg.Compress,
+		ModuleAPIURL: moduleAPIURLForOwnedRun(),
 	}
 	if e := run.err.Load(); e != nil && *e != nil {
 		st.Error = uiError(*e)
 	}
 	return st
+}
+
+// moduleAPIURLForOwnedRun returns the module API URL this process published for
+// its own agent. It is read from the status file because the URL is assigned
+// when the agent's module subsystem starts, which happens after the run begins.
+func moduleAPIURLForOwnedRun() string {
+	if ext := clientapp.ReadExternalAgentStatus(); ext != nil && ext.PID == os.Getpid() {
+		// The record is this process's own; its PID proves it was not left by
+		// a predecessor that reused our PID after a crash.
+		return ext.ModuleAPIURL
+	}
+	return ""
 }
 
 // uiError translates CLI-shaped workflow errors into browser wording and
@@ -225,7 +240,11 @@ type agentStatus struct {
 	BatchSize   int    `json:"batch_size"`
 	Concurrency int    `json:"concurrency"`
 	Compress    bool   `json:"compress"`
-	Error       string `json:"error,omitempty"`
+	// ModuleAPIURL is the agent's loopback module API base URL, empty when the
+	// agent is not running or did not publish one. The client UI needs it to
+	// offer copy-paste commands that bypass this server.
+	ModuleAPIURL string `json:"module_api_url,omitempty"`
+	Error        string `json:"error,omitempty"`
 }
 
 func waitDone(done <-chan struct{}, timeout time.Duration) bool {

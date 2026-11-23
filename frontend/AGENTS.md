@@ -17,7 +17,7 @@ frontend/
 │   │   └── assets/     # JS/CSS bundles (standard Vite output)
 │   ├── src/
 │   │   ├── App.tsx          # Main application component
-│   │   ├── ModuleWorkbench.tsx # OpenAPI-driven module API request builder
+│   │   ├── ModulesPanel.tsx # Adapter wiring the shared module page to the console API
 │   │   ├── main.tsx         # Entry point
 │   │   └── theme/
 │   │       └── theme.ts     # Mercury Console design tokens
@@ -31,6 +31,7 @@ frontend/
 │   │   ├── main.tsx         # Entry point
 │   │   ├── AgentPage.tsx    # Agent config + lifecycle
 │   │   ├── ConnectPage.tsx  # Named connect instances
+│   │   ├── ModulesPage.tsx  # Adapter wiring the shared module page to the local proxy
 │   │   ├── LoginForm.tsx    # Server dropdowns + TOTP check
 │   │   ├── ServerURLField.tsx # Saved-session URL autocomplete
 │   │   ├── bridge.ts        # HTTP bridge (launch-secret auth)
@@ -40,12 +41,18 @@ frontend/
 │   ├── index.html
 │   ├── package.json
 │   └── vite.config.ts
+├── shared/
+│   └── modules/         # Module UI shared verbatim by both SPAs
+│       ├── api.ts       # Module surface contract: ModuleFetch, methods, summaries
+│       ├── ModulesPage.tsx    # Registry + detail + OpenAPI viewer
+│       └── ModuleWorkbench.tsx # OpenAPI-driven operation form, send, response
 └── console.go          # go:embed ConsoleWebRootFs (package frontend)
 ```
 
 ## Dependencies
 
 - **MUI v9** (`@mui/material`, `@mui/icons-material`): Material UI components
+- **`frontend/shared/modules`**: the only code shared by both SPAs. It imports React and MUI **only** — `@doublefin/orca-ui` is a console dependency, so a shared component that reached for it would break the client build.
 - **orca-ui** (`@doublefin/orca-ui`): Mercury Console UI kit (AdminTable, PageHeader, StatusPill, EmptyState)
 - **react-router**: Routing (peer dependency)
 - **xterm.js** (`@xterm/xterm`, `@xterm/addon-fit`): Terminal emulator for Cloud Shell
@@ -62,6 +69,8 @@ Output goes to `frontend/console/dist/`, which is embedded by `frontend.go`.
 `dist/` is a committed build artifact, so rebuild it whenever `src/` changes —
 `task ci` now rebuilds it and fails on any drift against the committed bundle.
 
+Both vite configs alias `react`, `react-dom`, `@mui/material`, and `@mui/icons-material` to the project's own `node_modules`. `../shared` sits outside each project root, so Node resolution from there cannot find those packages; symlinking the directory instead would let Rollup resolve a second React copy and break hooks. Add any new shared import to that alias list.
+
 `fe:build` also runs the esbuild enum-miscompile guard (see RCA-001): it
 self-tests its own regex, then fails closed if `dist/assets/` holds no JS or
 the bundle contains a miscompiled function-local enum.
@@ -77,7 +86,7 @@ overrides. The server strips the prefix via `--console-prefix` (default
 
 ## Client SPA
 
-The client UI (`frontend/client`) is a two-tab app (Agent, Connect) with a login dialog. Pages contain no transport logic: they call the `Bridge` interface (`types.ts`), implemented by `httpBridge` (browser, `cli ui`) and — once Wails bindings exist — `wailsBridge` (desktop).
+The client UI (`frontend/client`) is a three-tab app (Agent, Connect, Modules) with a login dialog. Pages contain no transport logic: they call the `Bridge` interface (`types.ts`), implemented by `httpBridge` (browser, `cli ui`) and — once Wails bindings exist — `wailsBridge` (desktop).
 
 - **Auth**: the launch secret arrives in the URL fragment, moves to `sessionStorage`, and is sent as `Authorization: Bearer` on every `/api` request. A fresh fragment always wins over stored state. Fetches carry a 10 s abort timeout (30 s for logout, which tears down runtimes server-side).
 - **State**: both tab panels stay mounted (hidden) so config survives tab switches; AgentPage seeds its form from a running agent's status once. Status polls every 5 s; runtime errors (`error` field on the DTOs) render as alerts.
@@ -87,18 +96,22 @@ The client UI (`frontend/client`) is a two-tab app (Agent, Connect) with a login
 
 ## Tabs
 
-### Admin (5 tabs)
+### Admin (7 tabs)
 - **Sessions**: Live tunnel sessions with stats (bytes up/down, remote addr)
 - **Users**: User management — CRUD, role/permissions editing, enable/disable toggle
 - **Agents**: Agent config management — CRUD for allowed targets per agent
 - **Statistics**: Global metrics overview (active agents, throughput, error rate), per-agent metrics cards, time-series charts (throughput + latency via recharts LineChart), tuning decision history
 - **Shell**: Cloud Shell — xterm.js terminal connecting to a selected agent's PTY via SSE-down + POST-up proxy
+- **Desktop**: Remote desktop viewer for an agent's screen
+- **Modules**: Module registry, metadata, OpenAPI viewer, and API workbench (shared with `cli ui`)
 
-### Non-Admin (4 tabs)
+### Non-Admin (6 tabs)
 - **Sessions**: User's own tunnel sessions (scoped by user ID)
 - **Agents**: Read-only agent config list
 - **Statistics**: User-scoped metrics (same layout, limited data)
 - **Shell**: Cloud Shell (same as admin)
+- **Desktop**: same as admin
+- **Modules**: same shared registry and workbench (user-scoped agents)
 
 ## Key Features
 
@@ -158,14 +171,17 @@ The SPA is served by `consoleserver.NewConsoleHandler` at `/` on the console lis
 
 ## Module API Workbench
 
-The Modules tab renders `ModuleWorkbench.tsx` for every registered module — no module-specific code. It loads its form model from `GET /api/v1/modules/<agent-id>/<module-id>/operations`, which `consoleserver` derives on demand from the module's stored `openapi.yaml` via `agentmod.BuildOperationModels` (parameters, request-body schema with local `$ref`s flattened, recursion truncated). Requests are sent through the existing console proxy `POST /api/v1/modules/invoke/<agent-id>/<module-id>/<path>`.
+The Modules tab renders `shared/modules/ModulesPage.tsx` + `ModuleWorkbench.tsx` for every registered module — no module-specific code, and no second implementation in either SPA. It loads its form model from `GET /api/v1/modules/<agent-id>/<module-id>/operations`, which `consoleserver` derives on demand from the module's stored `openapi.yaml` via `agentmod.BuildOperationModels` (parameters, request-body schema with local `$ref`s flattened, recursion truncated). Requests are sent through a `ModuleFetch` the surface injects: the console fetches `<base>/api/v1/modules/...` with the session bearer token, and `cli ui` fetches its own authenticated local proxy (`/api/v1/modules/...`), which forwards to the loopback module API the agent published. Both call `POST /api/v1/modules/invoke/<agent-id>/<module-id>/<path>`. A method the browser refuses to send (TRACE) travels as `POST` plus `X-SSET-Method-Override: TRACE`, restored by `internal/moduleapi` before the module sees it, and the form says so while that operation is selected.
 
-Contract for the component: operations are ordered by path then method; path parameters are always required; query values left blank are omitted; a JSON content type enables client-side JSON validation before sending; responses are streamed and read up to 200 KiB, then cancelled and shown with a truncation notice, so an oversized artifact never lands in tab memory whole. Non-JSON bodies open empty with only a `Content-Type` header, and every module switch aborts the previous operation-list fetch. The raw OpenAPI YAML stays visible below the workbench for contract debugging.
+Contract for the component: operations are ordered by path then method; path parameters are always required; query values left blank are omitted; a JSON content type enables client-side JSON validation before sending; responses are streamed and read up to 200 KiB, then cancelled and shown with a truncation notice, so an oversized artifact never lands in tab memory whole. Non-JSON bodies open empty with only a `Content-Type` header, and every module switch aborts the previous operation-list fetch. The raw OpenAPI YAML is loaded on demand from `GET /api/v1/modules/openapi/<agent-id>/<module-id>`. The catalog epoch (`X-Catalog-Epoch`) is shown when the surface forwards it.
+
+cURL snippets are surface-specific on purpose: the console composes `<origin><base>/api/v1/modules/invoke/...` with a `Bearer $SSETUNNEL_TOKEN` placeholder, while `cli ui` composes the agent's own `module_api_url` (no secret) because that endpoint is callable by any local script. `cli ui` hides the registry entirely when the running agent published no module endpoint.
 
 ## Rules
 * Always rebuild `dist/` before committing changes that touch `src/` — CI enforces it with `task fe:build` + `git diff --exit-code -- frontend/console/dist`.
 * `/assets/**` is served by the dedicated handler, not by `litespaserver.Config.StaticPaths`; anything registered after the SPA catch-all silently returns `index.html`.
 * Use theme tokens instead of raw hex colors.
-* Use orca-ui kit components (AdminTable, PageHeader, StatusPill, EmptyState) for consistency.
+* Use orca-ui kit components (AdminTable, PageHeader, StatusPill, EmptyState) for consistency — except inside `frontend/shared/modules`, which must stay on plain MUI so the client SPA can build it.
+* Both bundles are committed: rebuild `frontend/console/dist` **and** `frontend/client/dist` whenever shared or surface sources change.
 * Shell SSE uses `fetch` ReadableStream (not `EventSource`) to control auth headers.
 * Binary terminal output must go through `Uint8Array` to avoid UTF-8 corruption of ANSI escape sequences.

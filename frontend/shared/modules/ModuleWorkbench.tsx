@@ -11,11 +11,16 @@ import {
 } from '@mui/material';
 import PlayArrowIcon from '@mui/icons-material/PlayArrow';
 import ContentCopyIcon from '@mui/icons-material/ContentCopy';
+import { METHOD_OVERRIDE_HEADER, resolveMethod, type ModuleFetch, type ModuleSummary } from './api';
 
 // Generic module API workbench. Given a module and its agent, it fetches
 // form-friendly operation models derived from the module's OpenAPI document
 // (`GET /api/v1/modules/<agent>/<module>/operations`) and lets the operator
 // compose and send requests without knowing the contract by heart.
+//
+// This component is shared by the console and `cli ui`; it talks only through
+// the injected `moduleFetch`, so the two surfaces stay behaviourally identical
+// without either of them reimplementing the workflow.
 
 interface APISchema {
   type?: string;
@@ -52,7 +57,7 @@ interface APIRequestBody {
   schema?: APISchema;
 }
 
-interface APIOperation {
+export interface APIOperation {
   method: string;
   path: string;
   operation_id?: string;
@@ -62,7 +67,7 @@ interface APIOperation {
   request_body?: APIRequestBody;
 }
 
-interface OperationsResponse {
+export interface OperationsResponse {
   module_id: string;
   revision?: string;
   title: string;
@@ -78,17 +83,14 @@ interface InvokeResult {
   truncated: boolean;
 }
 
-export interface WorkbenchModule {
-  module_id: string;
-  service_name?: string;
-}
-
 interface ModuleWorkbenchProps {
-  apiBase: string;
   agentId: string;
-  module: WorkbenchModule;
-  authHeaders: () => Record<string, string>;
-  checkAuth: (res: Response) => boolean;
+  module: ModuleSummary;
+  moduleFetch: ModuleFetch;
+  /** Absolute base that precedes `/v1/modules/invoke/...` in cURL snippets. */
+  curlBase: string;
+  /** Auth headers a human would need to replay the cURL snippet. */
+  curlAuthHeaders: string[];
 }
 
 const MAX_RENDER_BYTES = 200 * 1024;
@@ -198,7 +200,7 @@ function parseHeaderLines(text: string): Record<string, string> {
   return headers;
 }
 
-export default function ModuleWorkbench({ apiBase, agentId, module, authHeaders, checkAuth }: ModuleWorkbenchProps) {
+export default function ModuleWorkbench({ agentId, module, moduleFetch, curlBase, curlAuthHeaders }: ModuleWorkbenchProps) {
   const [operations, setOperations] = useState<APIOperation[]>([]);
   const [title, setTitle] = useState('');
   const [loading, setLoading] = useState(false);
@@ -211,13 +213,11 @@ export default function ModuleWorkbench({ apiBase, agentId, module, authHeaders,
   const [sendError, setSendError] = useState('');
   const [result, setResult] = useState<InvokeResult | null>(null);
 
-  // Keep the auth callbacks in refs: App recreates them on every render, and
-  // depending on their identity would refetch the operation list — wiping the
+  // Keep the fetcher in a ref: callers may recreate it on every render, and
+  // depending on its identity would refetch the operation list — wiping the
   // operator's form — each time the parent re-rendered.
-  const authRef = useRef(authHeaders);
-  authRef.current = authHeaders;
-  const checkAuthRef = useRef(checkAuth);
-  checkAuthRef.current = checkAuth;
+  const fetchRef = useRef(moduleFetch);
+  fetchRef.current = moduleFetch;
   const loadAbortRef = useRef<AbortController | null>(null);
   const sendAbortRef = useRef<AbortController | null>(null);
   // Which module the state below belongs to; a switch clears it before loading.
@@ -272,11 +272,10 @@ export default function ModuleWorkbench({ apiBase, agentId, module, authHeaders,
     setLoading(true);
     setLoadError('');
     try {
-      const res = await fetch(
-        `${apiBase}/api/v1/modules/${encodeURIComponent(agentId)}/${encodeURIComponent(module.module_id)}/operations`,
-        { headers: authRef.current(), signal: controller.signal },
+      const res = await fetchRef.current(
+        `/api/v1/modules/${encodeURIComponent(agentId)}/${encodeURIComponent(module.module_id)}/operations`,
+        { signal: controller.signal },
       );
-      if (!checkAuthRef.current(res)) return;
       if (!res.ok) {
         setLoadError((await res.text()) || `Failed to load operations (${res.status})`);
         return;
@@ -302,7 +301,7 @@ export default function ModuleWorkbench({ apiBase, agentId, module, authHeaders,
       // finishes while its successor is still in flight.
       if (loadAbortRef.current === controller) setLoading(false);
     }
-  }, [apiBase, agentId, module.module_id, seedForm]);
+  }, [agentId, module.module_id, seedForm]);
 
   useEffect(() => {
     loadOperations();
@@ -328,10 +327,10 @@ export default function ModuleWorkbench({ apiBase, agentId, module, authHeaders,
   const queryParams = selected?.parameters.filter((p) => p.in === 'query') || [];
   const headerParams = selected?.parameters.filter((p) => p.in === 'header') || [];
 
-  // resolveRequest turns the form into the concrete URL and body the console
-  // proxy will forward. Empty query values are omitted, which is what most
-  // module handlers expect for optional filters.
-  const resolveRequest = (): { url: string; body?: string; headers: Record<string, string> } | null => {
+  // resolveRequest turns the form into the concrete path and body the surface
+  // will forward. Empty query values are omitted, which is what most module
+  // handlers expect for optional filters.
+  const resolveRequest = (): { path: string; method: string; headers: Record<string, string>; body?: string } | null => {
     if (!selected) return null;
     let path = selected.path;
     for (const param of pathParams) {
@@ -349,15 +348,21 @@ export default function ModuleWorkbench({ apiBase, agentId, module, authHeaders,
       if (raw !== '') query.set(param.name, raw);
     }
     const queryString = query.toString();
-    const url = `${apiBase}/api/v1/modules/invoke/${encodeURIComponent(agentId)}/${encodeURIComponent(module.module_id)}${path}${queryString ? `?${queryString}` : ''}`;
+    const surfacePath = `/api/v1/modules/invoke/${encodeURIComponent(agentId)}/${encodeURIComponent(module.module_id)}${path}${queryString ? `?${queryString}` : ''}`;
 
-    const headers: Record<string, string> = { ...authRef.current(), ...parseHeaderLines(headersText) };
+    const headers: Record<string, string> = { ...parseHeaderLines(headersText) };
     for (const param of headerParams) {
       const raw = values[`header:${param.name}`] ?? '';
       if (raw !== '') headers[param.name] = raw;
     }
 
-    const methodAllowsBody = selected.method !== 'GET' && selected.method !== 'HEAD';
+    // The browser cannot send every verb a spec may declare (TRACE, CONNECT
+    // and unknown verbs are rejected before the request leaves), so those
+    // travel as POST plus the override header the surfaces resolve back.
+    const resolved = resolveMethod(selected.method);
+    if (resolved.override) headers[METHOD_OVERRIDE_HEADER] = selected.method.toUpperCase();
+
+    const methodAllowsBody = resolved.method !== 'GET' && resolved.method !== 'HEAD';
     const body = methodAllowsBody && bodyText.trim() ? bodyText : undefined;
     if (body) {
       const contentType = Object.keys(headers).find((k) => k.toLowerCase() === 'content-type');
@@ -371,7 +376,7 @@ export default function ModuleWorkbench({ apiBase, agentId, module, authHeaders,
         }
       }
     }
-    return { url, body, headers };
+    return { path: surfacePath, method: resolved.method, headers, body };
   };
 
   const send = async () => {
@@ -390,13 +395,12 @@ export default function ModuleWorkbench({ apiBase, agentId, module, authHeaders,
     setResult(null);
     const started = performance.now();
     try {
-      const res = await fetch(request.url, {
-        method: selected.method,
+      const res = await fetchRef.current(request.path, {
+        method: request.method,
         headers: request.headers,
         body: request.body,
         signal: controller.signal,
       });
-      if (!checkAuthRef.current(res)) return;
       const headers: Record<string, string> = {};
       res.headers.forEach((v, k) => { headers[k] = v; });
       const { text: rawBody, truncated } = await readCappedBody(res);
@@ -434,11 +438,10 @@ export default function ModuleWorkbench({ apiBase, agentId, module, authHeaders,
       if (raw !== '') query.set(param.name, raw);
     }
     const queryString = query.toString();
-    const origin = typeof window !== 'undefined' ? window.location.origin : '';
     const lines = [
-      `curl -X ${selected.method} '${origin}${apiBase}/api/v1/modules/invoke/${encodeURIComponent(agentId)}/${encodeURIComponent(module.module_id)}${path}${queryString ? `?${queryString}` : ''}'`,
-      `  -H 'Authorization: Bearer $SSETUNNEL_TOKEN'`,
+      `curl -X ${selected.method} '${curlBase}/v1/modules/invoke/${encodeURIComponent(agentId)}/${encodeURIComponent(module.module_id)}${path}${queryString ? `?${queryString}` : ''}'`,
     ];
+    for (const header of curlAuthHeaders) lines.push(`  -H '${header}'`);
     for (const [key, value] of Object.entries(parseHeaderLines(headersText))) {
       lines.push(`  -H '${key}: ${value}'`);
     }
@@ -503,7 +506,7 @@ export default function ModuleWorkbench({ apiBase, agentId, module, authHeaders,
       )}
 
       {operations.length > 0 && (
-        <Box sx={{ display: 'flex', gap: 2, alignItems: 'flex-start' }}>
+        <Box sx={{ display: 'flex', gap: 2, alignItems: 'flex-start', flexWrap: 'wrap' }}>
           {/* Operation list */}
           <Paper variant="outlined" sx={{ flex: '0 0 260px', p: 1, maxHeight: 560, overflow: 'auto' }}>
             <Typography variant="caption" color="text.secondary" sx={{ px: 1, display: 'block', mb: 0.5 }}>
@@ -560,7 +563,7 @@ export default function ModuleWorkbench({ apiBase, agentId, module, authHeaders,
 
           {/* Request builder */}
           {selected && (
-            <Box sx={{ flex: 1, minWidth: 0 }}>
+            <Box sx={{ flex: 1, minWidth: 320 }}>
               <Paper variant="outlined" sx={{ p: 2, mb: 2 }}>
                 <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 0.5 }}>
                   <Chip size="small" label={selected.method} color={METHOD_TONE[selected.method] || 'default'} sx={{ fontFamily: 'monospace' }} />
@@ -570,6 +573,13 @@ export default function ModuleWorkbench({ apiBase, agentId, module, authHeaders,
                   <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1.5 }}>
                     {selected.description || selected.summary}
                   </Typography>
+                )}
+                {resolveMethod(selected.method).override && (
+                  <Alert severity="info" sx={{ mb: 1.5 }}>
+                    Browsers cannot send {selected.method.toUpperCase()}; this request is sent as POST with
+                    {' '}<code>{METHOD_OVERRIDE_HEADER}: {selected.method.toUpperCase()}</code>{' '}
+                    so the surface can restore the real method.
+                  </Alert>
                 )}
 
                 {pathParams.map((param) => (
@@ -709,7 +719,7 @@ export default function ModuleWorkbench({ apiBase, agentId, module, authHeaders,
                     <Box sx={{ mb: 1 }}>
                       <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 600 }}>Response headers</Typography>
                       <Paper variant="outlined" sx={{ p: 1, maxHeight: 140, overflow: 'auto' }}>
-                        <pre style={{ fontSize: 11, margin: 0 }}>
+                        <pre style={{ fontSize: 11, margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
                           {Object.entries(result.headers).map(([k, v]) => `${k}: ${v}`).join('\n')}
                         </pre>
                       </Paper>

@@ -9,6 +9,7 @@ import type { Bridge, SessionDTO } from './types';
 import LoginForm from './LoginForm';
 import AgentPage from './AgentPage';
 import ConnectPage from './ConnectPage';
+import ModulesPage from './ModulesPage';
 
 // Detect Wails runtime and fall back to HTTP bridge.
 // Wails injects window.runtime and generated bindings; use those when present.
@@ -90,6 +91,7 @@ export default function App() {
             <Tabs value={tab} onChange={(_, v) => setTab(v)} sx={{ flexGrow: 1 }}>
               <Tab label="Agent" />
               <Tab label="Connect" />
+              <Tab label="Modules" />
             </Tabs>
             {session ? (
               <>
@@ -109,6 +111,9 @@ export default function App() {
         </TabPanel>
         <TabPanel value={tab} index={1}>
           <ConnectPage bridge={bridge} />
+        </TabPanel>
+        <TabPanel value={tab} index={2}>
+          <ModulesPage bridge={bridge} />
         </TabPanel>
       </Box>
 

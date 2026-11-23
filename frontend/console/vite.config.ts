@@ -1,5 +1,10 @@
 import { defineConfig } from 'vite';
+import { resolve } from 'path';
+import { fileURLToPath } from 'url';
+
 import react from '@vitejs/plugin-react';
+
+const projectDir = fileURLToPath(new URL('.', import.meta.url));
 import { readFileSync, existsSync } from "fs";
 
 // Dev HTTPS: generate certs with `mkcert localhost` or similar.
@@ -15,9 +20,20 @@ const https = process.env.CI === "true" || process.argv.includes("build") ?
 const base = '/console';
 const apiProxyKey = `${base}/api`;
 
+// `../shared/modules` lives outside this project, so Node resolution from
+// there cannot find its dependencies. Alias its imports back into this
+// project's node_modules — symlinking the directory instead would let Rollup
+// resolve a second React copy and break hooks.
+const sharedDeps = ['react', 'react-dom', '@mui/material', '@mui/icons-material'];
+const sharedAlias = sharedDeps.map((pkg) => ({
+  find: new RegExp(`^${pkg}(/.*)?$`),
+  replacement: `${resolve(projectDir, 'node_modules', pkg)}$1`,
+}));
+
 export default defineConfig({
   base,
   plugins: [react()],
+  resolve: { alias: sharedAlias },
   build: {
     // esbuild's default build target lowers TypeScript enums inside methods
     // to an IIFE and, together with minify's dead-code pass, drops the enum

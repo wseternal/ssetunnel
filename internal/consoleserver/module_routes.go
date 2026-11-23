@@ -2,17 +2,15 @@ package consoleserver
 
 import (
 	"bufio"
-	"crypto/rand"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
-	"strings"
 	"time"
 
 	gmux "github.com/gorilla/mux"
 	"github.com/wseternal/ssetunnel/internal/agentmod"
+	"github.com/wseternal/ssetunnel/internal/moduleapi"
 	"github.com/wseternal/ssetunnel/internal/server"
 )
 
@@ -241,10 +239,13 @@ func (m *moduleRoutes) handleGetOperationModels(w http.ResponseWriter, r *http.R
 // handleInvoke invokes a module operation.
 // POST /api/v1/modules/invoke/<agent-id>/<module-id>/<operation-path...>
 func (m *moduleRoutes) handleInvoke(w http.ResponseWriter, r *http.Request) {
-	if r.Method == http.MethodOptions {
+	// An OPTIONS with Access-Control-Request-Method is a CORS preflight and is
+	// answered here. A plain OPTIONS is an operation and must reach a module
+	// whose contract declares it (see IsPreflight).
+	if moduleapi.IsPreflight(r) {
 		// W4 fix: Do not reflect arbitrary Origin as Access-Control-Allow-Origin.
 		// Only allow same-origin requests (no CORS headers needed for same-origin).
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, PATCH, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS, TRACE")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Correlation-ID")
 		w.WriteHeader(http.StatusNoContent)
 		return
@@ -259,9 +260,21 @@ func (m *moduleRoutes) handleInvoke(w http.ResponseWriter, r *http.Request) {
 	vars := gmux.Vars(r)
 	agentID := vars["agent-id"]
 	moduleID := vars["module-id"]
+
+	// fetch() refuses to send TRACE, so the workbench sends POST with a
+	// method override. Resolve it before operation matching and before the
+	// request is built (BuildRequest strips the override header).
+	method, _ := moduleapi.ResolveMethod(r.Method, r.Header.Get(moduleapi.MethodOverrideHeader))
+
+	// Take the operation path from the escaped URL: router variables are
+	// decoded, so a path parameter that legitimately contains %2F would be
+	// split into two segments and stop matching its template.
 	operationPath := "/" + vars["path"]
 	if vars["path"] == "" {
 		operationPath = "/"
+	}
+	if escaped, ok := moduleapi.TrailAfterSegments(r.URL.EscapedPath(), "/api/v1/modules/invoke/", 2); ok {
+		operationPath = escaped
 	}
 
 	session := m.server.FindSessionByAgent(agentID, sessInfo)
@@ -283,9 +296,9 @@ func (m *moduleRoutes) handleInvoke(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Validate operation exists in OpenAPI.
-	op, ok := mod.ValidatedOpenAPI.MatchOperation(r.Method, operationPath)
+	op, ok := mod.ValidatedOpenAPI.MatchOperation(method, operationPath)
 	if !ok {
-		http.Error(w, fmt.Sprintf("operation not found: %s %s", r.Method, operationPath), http.StatusNotFound)
+		http.Error(w, fmt.Sprintf("operation not found: %s %s", method, operationPath), http.StatusNotFound)
 		return
 	}
 
@@ -296,30 +309,17 @@ func (m *moduleRoutes) handleInvoke(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Build the invocation request.
-	invReq, err := http.NewRequestWithContext(r.Context(), r.Method, operationPath, r.Body)
+	// Build the invocation request. BuildRequest keeps the caller's escaped
+	// operation path and RawQuery, strips surface credentials, and attaches a
+	// correlation ID.
+	invReq, err := moduleapi.BuildRequest(r.Context(), r, method, operationPath)
 	if err != nil {
 		http.Error(w, "failed to create request", http.StatusInternalServerError)
 		return
 	}
 
-	// Copy headers (excluding auth and hop-by-hop).
-	for key, values := range r.Header {
-		if isHopByHopHeader(key) || isAuthHeader(key) {
-			continue
-		}
-		for _, v := range values {
-			invReq.Header.Add(key, v)
-		}
-	}
-
-	// Add correlation ID if not present.
-	if invReq.Header.Get("X-Correlation-ID") == "" {
-		invReq.Header.Set("X-Correlation-ID", generateCorrelationID())
-	}
-
 	log.Printf("invoke: %s %s on module %s (operation=%s, correlation=%s)",
-		r.Method, operationPath, moduleID, op.OperationID, invReq.Header.Get("X-Correlation-ID"))
+		method, operationPath, moduleID, op.OperationID, invReq.Header.Get(moduleapi.CorrelationHeader))
 
 	// Request the stream.
 	stream, invocationID, err := streamHandler.RequestInvocation(r.Context(), moduleID, mod.Revision, invReq)
@@ -352,32 +352,18 @@ func (m *moduleRoutes) handleInvoke(w http.ResponseWriter, r *http.Request) {
 
 	// W5 fix: Copy response headers using an allowlist (not blocklist).
 	//
+	// The allowlist lives in moduleapi so every surface applies the same rule.
 	// cache-control is deliberately absent. This route returns output from a
 	// user's own agent behind UserSessionMiddleware, the URL carries no user
 	// identity and nothing sets Vary, so honouring a module's
 	// "public, max-age=86400" would let a shared cache answer another user's
-	// invocation from that URL. The router's no-store floor is kept instead —
-	// the module's caching intent is not portable to a proxied, per-user
-	// response, and silently becoming cacheable is the worse outcome.
-	allowedResponseHeaders := map[string]bool{
-		"content-type":        true,
-		"content-length":      true,
-		"content-disposition": true,
-		"etag":                true,
-		"last-modified":       true,
-		"x-request-id":        true,
-	}
-	for key, values := range resp.Header {
-		if !allowedResponseHeaders[strings.ToLower(key)] {
-			continue
-		}
-		CopyProxiedHeader(w.Header(), key, values)
-	}
-	w.Header().Set("X-Correlation-ID", invReq.Header.Get("X-Correlation-ID"))
+	// invocation from that URL. The router's no-store floor is kept instead.
+	moduleapi.CopyResponseHeaders(w.Header(), resp.Header)
+	w.Header().Set(moduleapi.CorrelationHeader, invReq.Header.Get(moduleapi.CorrelationHeader))
 	w.WriteHeader(resp.StatusCode)
 
 	// Stream the body (W12 fix: log copy errors).
-	if _, err := io.Copy(w, resp.Body); err != nil {
+	if err := moduleapi.CopyStream(w, resp.Body); err != nil {
 		log.Printf("invoke: copy response body: %v", err)
 	}
 }
@@ -409,30 +395,4 @@ func writeJSON(w http.ResponseWriter, status int, data interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(data)
-}
-
-// isHopByHopHeader checks if a header is a hop-by-hop header that should not be forwarded.
-func isHopByHopHeader(key string) bool {
-	switch strings.ToLower(key) {
-	case "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
-		"te", "trailers", "transfer-encoding", "upgrade":
-		return true
-	}
-	return false
-}
-
-// isAuthHeader checks if a header is an authentication header that should be stripped.
-func isAuthHeader(key string) bool {
-	switch strings.ToLower(key) {
-	case "authorization", "cookie", "x-sset-token":
-		return true
-	}
-	return false
-}
-
-// generateCorrelationID creates a unique correlation ID.
-func generateCorrelationID() string {
-	var b [8]byte
-	rand.Read(b[:])
-	return fmt.Sprintf("corr-%x", b[:])
 }

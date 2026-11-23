@@ -136,27 +136,6 @@ func RunAgent(ctx context.Context, cfg AgentConfig) error {
 			sess.URL, cfg.AgentID, batch, conc, cfg.Compress)
 	}
 
-	// Write a status file so the browser UI can detect this agent
-	// even when it was started outside the UI process (e.g. `cli agent run`).
-	// Service-managed agents also write a PID file via serviceProgram.Start;
-	// this status file carries the same PID plus config for the UI to display.
-	statusPath, pathErr := agentStatusFilePath()
-	if pathErr != nil {
-		log.Printf("agent: status file: %v", pathErr)
-	} else {
-		writeAgentStatusFile(statusPath, AgentStatusInfo{
-			PID:         os.Getpid(),
-			ServerURL:   sess.URL,
-			Target:      cfg.Target,
-			AgentID:     cfg.AgentID,
-			BatchSize:   batch,
-			Concurrency: conc,
-			Compress:    cfg.Compress,
-			StartedAt:   time.Now(),
-		})
-		defer removeAgentStatusFile(statusPath)
-	}
-
 	ag := &agent.Agent{
 		ServerURL:          sess.URL,
 		Target:             cfg.Target,
@@ -185,6 +164,37 @@ func RunAgent(ctx context.Context, cfg AgentConfig) error {
 	}
 	defer ag.Close()
 
+	// Write a status file so the browser UI can detect this agent
+	// even when it was started outside the UI process (e.g. `cli agent run`).
+	// Service-managed agents also write a PID file via serviceProgram.Start;
+	// this status file carries the same PID plus config for the UI to display.
+	//
+	// It is written after InitModules so the record can carry the direct
+	// module API's published URL: the listener's port is kernel-assigned and
+	// exists only once the module subsystem has started.
+	statusPath, pathErr := agentStatusFilePath()
+	var moduleAPIURL string
+	if pathErr != nil {
+		log.Printf("agent: status file: %v", pathErr)
+	} else {
+		moduleAPIURL = ag.ModuleAPIURL()
+		writeAgentStatusFile(statusPath, AgentStatusInfo{
+			PID:          os.Getpid(),
+			ServerURL:    sess.URL,
+			Target:       cfg.Target,
+			AgentID:      cfg.AgentID,
+			BatchSize:    batch,
+			Concurrency:  conc,
+			Compress:     cfg.Compress,
+			StartedAt:    time.Now(),
+			ModuleAPIURL: moduleAPIURL,
+		})
+		defer removeAgentStatusFile(statusPath)
+	}
+	if moduleAPIURL != "" {
+		log.Printf("agent: module API URL %s", moduleAPIURL)
+	}
+
 	// Install SIGHUP handler so CLI module commands can trigger a
 	// reload of module state from disk without restarting the agent.
 	installReloadSignal(ag)
@@ -211,6 +221,11 @@ type AgentStatusInfo struct {
 	Concurrency int       `json:"concurrency"`
 	Compress    bool      `json:"compress"`
 	StartedAt   time.Time `json:"started_at"`
+
+	// ModuleAPIURL is the agent's direct module API base URL
+	// (http://127.0.0.1:<port>). Empty when the API is not running, which is
+	// also the case for an agent built without module support.
+	ModuleAPIURL string `json:"module_api_url,omitempty"`
 }
 
 // statusFileMaxAge is the maximum age of a status file entry before it

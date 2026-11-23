@@ -34,6 +34,11 @@ func (s *Server) registerAPIRoutes(r *mux.Router) {
 	r.HandleFunc("/connect/start", s.handleConnectStart).Methods("POST")
 	r.HandleFunc("/connect/stop/{name}", s.handleConnectStop).Methods("POST")
 	r.HandleFunc("/connect/restart/{name}", s.handleConnectRestart).Methods("POST")
+
+	// The module surface is proxied, not reimplemented: the browser talks to
+	// this authenticated server, which forwards to the agent's loopback API
+	// (the same shape the console serves through the tunnel).
+	r.PathPrefix("/v1/modules").HandlerFunc(s.handleModuleProxy)
 }
 
 func readJSON(r *http.Request, v any) error {
@@ -346,9 +351,9 @@ var pollingPaths = map[string]bool{
 }
 
 // statusWriter records the response status so requestLogging can report it.
-// clientserver has no streaming responses, so wrapping the writer is safe
-// here (it must NOT be copied to consoleserver, whose SSE handlers assert
-// http.Flusher on the original writer).
+// It forwards Flush and Unwrap: the module proxy streams a module response
+// through this writer, and a wrapper that hid http.Flusher would turn a
+// streamed response into one delivered only when the handler returns.
 type statusWriter struct {
 	http.ResponseWriter
 	status int
@@ -364,6 +369,18 @@ func (w *statusWriter) Write(b []byte) (int, error) {
 		w.status = http.StatusOK
 	}
 	return w.ResponseWriter.Write(b)
+}
+
+// Flush forwards the flush to the underlying writer.
+func (w *statusWriter) Flush() {
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// Unwrap exposes the original writer to http.ResponseController.
+func (w *statusWriter) Unwrap() http.ResponseWriter {
+	return w.ResponseWriter
 }
 
 // requestLogging logs API requests for audit and debugging. Successful

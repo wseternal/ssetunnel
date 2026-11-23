@@ -19,9 +19,9 @@ import (
 // catalog snapshots to the server via the control stream. It survives
 // tunnel reconnects and republishes the current state on each connection.
 type ModuleManager struct {
-	mu       sync.RWMutex
-	registry *agentmod.Registry
-	ipc      *agentmod.IPCServer
+	mu         sync.RWMutex
+	registry   *agentmod.Registry
+	ipc        *agentmod.IPCServer
 	supervisor *agentmod.Supervisor
 
 	// Current snapshot state.
@@ -190,6 +190,16 @@ func (m *ModuleManager) buildSnapshotLocked(epoch string) *CatalogSnapshot {
 		Epoch:   epoch,
 		Modules: entries,
 	}
+}
+
+// LocalSnapshot returns the catalog the agent's own loopback API serves.
+// It is built from the registry and live IPC health exactly like the tunnel
+// snapshot, so both surfaces answer with the same modules; the epoch is the
+// caller's process-local token rather than the tunnel session ID.
+func (m *ModuleManager) LocalSnapshot(epoch string) *CatalogSnapshot {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.buildSnapshotLocked(epoch)
 }
 
 // buildPublishMessages builds the control messages for a snapshot publish.
