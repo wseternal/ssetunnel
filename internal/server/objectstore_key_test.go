@@ -64,7 +64,7 @@ func TestValidateObjectModuleID(t *testing.T) {
 		{"Com.Example", "uppercase"},
 		{"com.example../escape", "traversal"},
 		{"com.example/store", "path separator"},
-		{strings.Repeat("a", sdk.MaxModuleIDLen-len(".b")) + ".b", "too long"},
+		{strings.Repeat("a", sdk.MaxModuleIDLen+1-len(".b")) + ".b", "too long"},
 	}
 	for _, c := range invalid {
 		if err := validateObjectModuleID(c.id); err == nil {
