@@ -63,11 +63,14 @@ The SDK opens one authenticated IPC connection per operation. The protocol is:
 AUTH <len>\n<credential>
 OK\n
 OBJECTSTORE <module-id>\n
+OK\n
 OBJECTSTORE <len>\n<json request>
 OBJECTSTORE_RESP <len>\n<json response>
 ```
 
-The ObjectStore IPC frame ceiling is 6 MiB. This covers the base64 form of a 4 MiB object plus bounded metadata. The agent reads the length header with a bounded line read before it allocates the body. The agent holds one of eight transfer slots for each request body. A full slot set returns `busy`. `IPCServer.Close` closes tracked ObjectStore connections.
+The identity acknowledgment is mandatory. The module sends no request frame until it has read `OK`. A rejection during the identity check is delivered as a framed error while no request body is in flight. Once a request frame is in flight, the agent must drain the body before sending a `busy` rejection: closing with unread bytes resets the connection and the module sees a broken pipe instead of the error.
+
+The ObjectStore IPC frame ceiling is 6 MiB. This covers the base64 form of a 4 MiB object plus bounded metadata. The agent reads the length header with a bounded line read before it allocates the body. The agent holds one of eight transfer slots for each request body. A full slot set returns `busy` after the body is drained.
 
 The existing control tunnel carries the transfer. Add `object_store_req` and `object_store_resp` in `internal/moduleproto`. Do not change the 64 KiB control codec.
 

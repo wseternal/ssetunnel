@@ -53,6 +53,14 @@ func (s *IPCServer) handleObjectStoreConnection(conn net.Conn, reader *bufio.Rea
 		return
 	}
 
+	// Acknowledge the identity before the module sends any request frame.
+	// Early rejections above can then be delivered without racing a
+	// request body that is already in flight.
+	if _, err := conn.Write([]byte("OK\n")); err != nil {
+		log.Printf("ipc: object store acknowledgment write error for %s: %v", moduleID, err)
+		return
+	}
+
 	log.Printf("ipc: object store connection established for module %s", moduleID)
 
 	for {
@@ -80,10 +88,17 @@ func (s *IPCServer) handleObjectStoreConnection(conn net.Conn, reader *bufio.Rea
 			return
 		}
 
-		// Acquire one bounded transfer slot before body allocation.
+		// Acquire one bounded transfer slot before body allocation. When
+		// the slot is unavailable the request body is still in flight, so
+		// drain it before answering: closing with unread bytes resets the
+		// connection and the module never sees the busy error.
 		select {
 		case s.objSlots <- struct{}{}:
 		default:
+			if _, err := io.CopyN(io.Discard, reader, int64(dataLen)); err != nil {
+				log.Printf("ipc: object store busy drain error from %s: %v", moduleID, err)
+				return
+			}
 			writeObjectStoreResponse(conn, objectStoreErrorJSON(moduleproto.ObjectStoreErrBusy, "object store is busy"))
 			return
 		}

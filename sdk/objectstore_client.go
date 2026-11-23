@@ -220,9 +220,53 @@ func (c *objectStoreClient) connect(ctx context.Context) (net.Conn, *bufio.Reade
 		return fail("object store: write identity: %w", err)
 	}
 
+	// The agent acknowledges the identity before any request frame is
+	// sent. A rejection therefore arrives as a framed error instead of
+	// racing an in-flight request body.
 	reader := bufio.NewReaderSize(conn, 64<<10)
+	line, err := reader.ReadSlice('\n')
+	if err != nil {
+		return fail("object store: read identity response: %w", err)
+	}
+	if string(line) != "OK\n" {
+		_ = conn.Close()
+		if bytes.HasPrefix(line, []byte("OBJECTSTORE_RESP ")) {
+			n, err := parseObjectStoreHeaderLine(line[:len(line)-1], "OBJECTSTORE_RESP ")
+			if err != nil {
+				return nil, nil, err
+			}
+			respBuf := make([]byte, n)
+			if n > 0 {
+				if _, err := io.ReadFull(reader, respBuf); err != nil {
+					return nil, nil, fmt.Errorf("object store: read rejection body: %w", err)
+				}
+			}
+			var resp objectStoreResponse
+			if err := json.Unmarshal(respBuf, &resp); err != nil {
+				return nil, nil, fmt.Errorf("object store: unmarshal rejection: %w", err)
+			}
+			if resp.ErrorCode != "" {
+				return nil, nil, objectStoreResponseError(resp.ErrorCode, resp.Error)
+			}
+			return nil, nil, errors.New("object store: registration rejected")
+		}
+		return nil, nil, fmt.Errorf("object store: unexpected identity response %q", line)
+	}
+
 	_ = conn.SetDeadline(time.Time{})
 	return conn, reader, nil
+}
+
+// parseObjectStoreHeaderLine parses one bounded length header line.
+func parseObjectStoreHeaderLine(line []byte, prefix string) (int, error) {
+	if !bytes.HasPrefix(line, []byte(prefix)) {
+		return 0, fmt.Errorf("object store: unexpected response header %q", line)
+	}
+	n, err := strconv.Atoi(string(line[len(prefix):]))
+	if err != nil || n < 0 || n > maxObjectStoreMessageSize {
+		return 0, fmt.Errorf("object store: invalid response length %q", line[len(prefix):])
+	}
+	return n, nil
 }
 
 // readObjectStoreHeader reads one bounded length header line.
@@ -235,14 +279,7 @@ func readObjectStoreHeader(reader *bufio.Reader, prefix string) (int, error) {
 		return 0, fmt.Errorf("object store: read response header: %w", err)
 	}
 	line = line[:len(line)-1]
-	if !bytes.HasPrefix(line, []byte(prefix)) {
-		return 0, fmt.Errorf("object store: unexpected response header %q", line)
-	}
-	n, err := strconv.Atoi(string(line[len(prefix):]))
-	if err != nil || n < 0 || n > maxObjectStoreMessageSize {
-		return 0, fmt.Errorf("object store: invalid response length %q", line[len(prefix):])
-	}
-	return n, nil
+	return parseObjectStoreHeaderLine(line, prefix)
 }
 
 // objectStoreResponseError maps a structured error code to a Go error.

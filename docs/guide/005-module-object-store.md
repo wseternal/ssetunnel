@@ -105,6 +105,8 @@ Each call opens one authenticated IPC connection. The call closes the connection
 
 Keys are flat. A key cannot contain a path separator, whitespace, a control byte, or a traversal form.
 
+A module that exceeds the transfer slots receives `busy` for the extra call. The request body is drained before the rejection, so the client always sees the error and never a reset connection. Callers should treat `busy` as retryable.
+
 ### Errors
 
 | Code | Meaning |

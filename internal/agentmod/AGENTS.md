@@ -12,10 +12,12 @@ Unix domain socket (0600) or Windows named pipe server. Protocol: `AUTH <len>\n<
 - Platform-specific: `ipc_unix.go` (Unix sockets), `ipc_windows.go` (named pipes via `go-winio`).
 
 ### Object Store IPC (`objectstore_ipc.go`)
-Dedicated proxy mode for module object transfers. After AUTH the module sends `OBJECTSTORE <module-id>`, then `OBJECTSTORE <len>\n<json>` frames. Responses use `OBJECTSTORE_RESP <len>\n<json>`.
+Dedicated proxy mode for module object transfers. After AUTH the module sends `OBJECTSTORE <module-id>` and waits for `OK\n`, then sends `OBJECTSTORE <len>\n<json>` frames. Responses use `OBJECTSTORE_RESP <len>\n<json>`.
 
 - Only registered modules reach the handler. The handler receives the authenticated module ID.
 - The frame ceiling is 6 MiB. Length headers use a bounded `ReadSlice` read before body allocation.
+- Eight transfer slots bound concurrency. A ninth transfer is rejected with `busy` only after its in-flight body is drained; closing with unread bytes produces a broken pipe on the module side.
+- Identity rejection happens before the request frame, so the client sees a framed error rather than a reset connection.
 - Eight transfer slots bound concurrent request and response bodies. A full slot set returns a structured `busy` error.
 - `IPCServer` tracks live object connections and closes them in `Close`.
 - `SetOnObjectStore` installs the handler beside `SetOnDataStore`.
