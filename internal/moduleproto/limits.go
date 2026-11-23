@@ -39,3 +39,12 @@ const MaxActiveInvocationsPerModule = 8
 // EstablishmentDeadline is the maximum seconds to wait for an agent to
 // open the reverse stream after receiving module_open.
 const EstablishmentDeadline = 3
+
+// ObjectStoreChunkSize is the maximum raw chunk size for module object
+// transfers. A 32 KiB raw chunk stays below the 64 KiB control frame
+// limit after base64 encoding and JSON metadata.
+const ObjectStoreChunkSize = 32 << 10
+
+// MaxActiveObjectTransfers caps concurrent object transfers per agent or
+// session. Eight 4 MiB transfers cap object memory at 32 MiB.
+const MaxActiveObjectTransfers = 8
