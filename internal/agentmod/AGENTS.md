@@ -11,6 +11,15 @@ Unix domain socket (0600) or Windows named pipe server. Protocol: `AUTH <len>\n<
 - `ListenerAddr()` accessor is mutex-safe for concurrent `startProcess` calls.
 - Platform-specific: `ipc_unix.go` (Unix sockets), `ipc_windows.go` (named pipes via `go-winio`).
 
+### Object Store IPC (`objectstore_ipc.go`)
+Dedicated proxy mode for module object transfers. After AUTH the module sends `OBJECTSTORE <module-id>`, then `OBJECTSTORE <len>\n<json>` frames. Responses use `OBJECTSTORE_RESP <len>\n<json>`.
+
+- Only registered modules reach the handler. The handler receives the authenticated module ID.
+- The frame ceiling is 6 MiB. Length headers use a bounded `ReadSlice` read before body allocation.
+- Eight transfer slots bound concurrent request and response bodies. A full slot set returns a structured `busy` error.
+- `IPCServer` tracks live object connections and closes them in `Close`.
+- `SetOnObjectStore` installs the handler beside `SetOnDataStore`.
+
 ### Registry (`registry.go`)
 Persistent module registry backed by JSON file in agent data dir. Tracks installed packages, enabled state, and IPC registrations.
 
@@ -48,3 +57,4 @@ Module package metadata with `ValidateExecutable()` — rejects symlinks escapin
 - All credential comparison must use constant-time operations.
 - OpenAPI validation must run before any install path (CLI or IPC).
 - Registry file writes are atomic (write to temp, rename).
+- Object store frames are the only IPC frames above 64 KiB. Keep the 6 MiB ceiling and the slot count on every ObjectStore path.

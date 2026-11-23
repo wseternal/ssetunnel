@@ -4,7 +4,7 @@ Server workflow plus shared CLI infrastructure used by all three entry points (`
 
 ## Contents
 
-- `command.go` — `RunServer` (flags, listeners, metrics/auto-tuner, auth store, console wiring), usage texts, deprecated-flag shims (`AcceptDeprecatedBaseFlag`, `WarnDeprecatedBase`), `IsEmbeddedPostgres`.
+- `command.go` — `RunServer` (flags, listeners, metrics/auto-tuner, auth store, console wiring, object store), usage texts, deprecated-flag shims (`AcceptDeprecatedBaseFlag`, `WarnDeprecatedBase`), `IsEmbeddedPostgres`.
 - `service.go` — OS service management via `kardianos/service`: `ServiceActions`, `DispatchServiceAction` (multi-command binaries), `DispatchServiceActionBare` (single-command binaries), `RunFnBuilder`, argv construction, saved-args persistence, `ExtractFlag`/`StripFlag`/`StripRetiredBase`.
 - `version.go`, `sighup_unix.go`, `sighup_windows.go` — build version string and SIGHUP placeholder handler.
 
@@ -26,3 +26,5 @@ The OS service manager invokes `binary <Arguments...>`.
 * `RunServer` opens listeners eagerly so address-in-use errors surface before serving; console `WriteTimeout` must stay 0 (SSE).
 * Never add client-package imports here — `cmd/server`'s dependency boundary depends on it. Known residual: this package imports `consoleserver`, so client binaries transitively embed the console bundle.
 * `flag.Parse` stops at the first non-flag token: any argv prefix a binary does not dispatch itself silently drops every flag. Keep the argv contract above in sync with each entry point's dispatch.
+* `--object-store-dir` defaults to empty. Build the backend before any listener and outside the auth/PostgreSQL block. Close the root on every return path.
+* A bare `server run --help` reaches service dispatch and starts the service. Use `server --help` for flag help.

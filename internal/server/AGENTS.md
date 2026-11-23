@@ -91,6 +91,22 @@ this layer. `Server.SetDataStore` must run before any session attaches (`interna
 this right after `SetAuthStore`) — a session captures the handler pointer at attach time and
 keeps nil otherwise, which makes module requests fail with "no data store configured".
 
+### `ObjectStore` (`objectstore_fs.go`, `objectstore.go`)
+Server half of the module object path.
+
+`FileObjectStore` stores objects at `<root>/<module-id>/<sha256(key)>`. It confines every operation with `os.Root`, rejects symlinks and non-regular files, applies `0700`/`0600` modes, reads at most 4 MiB, and publishes writes with a same-directory temporary file and rename. A missing file maps to `sdk.ErrObjectNotFound`.
+
+`ObjectStoreHandler` serves one session object path:
+
+- `object_store_req` frames arrive on the control loop. The handler validates metadata, reassembles a put, and queues the backend call.
+- One worker goroutine per session performs disk calls. The queue holds eight jobs. A full queue returns `busy`.
+- A session holds at most eight upload assemblies. Incomplete assemblies expire after five minutes.
+- The worker fragments a get result at 32 KiB and stops on the first `SendControl` error.
+- Disabled storage answers `unavailable` with the matching request ID, so a caller never waits out a timeout.
+- `Session.Close` and control-loop exit stop the handler and release assemblies.
+
+`Server.SetObjectStore` must run before any session attaches. `attach` captures the backend pointer before `readControlLoop` starts, so a later change does not reach existing sessions.
+
 ## Middleware
 - **`AgentAuthMiddleware`**: Bearer token (or query token for SSE) → `ValidateToken` → checks `PermAgent` → fallback user-session validation → `X-SSET-Token` response header on upgrade.
 - **`ConnectAuthMiddleware`**: Bearer token (or query token for SSE) → `ValidateToken` → checks `PermConnect` → fallback to user session validation.
@@ -106,3 +122,5 @@ keeps nil otherwise, which makes module requests fail with "no data store config
 * **Agent routing**: When `agent_id` is provided, use `findYamuxByAgentID` for exact match; otherwise first-match via `findYamux`.
 * **Connect path has no reorder window**: Concurrent POSTs are not supported on `/connect-up`; `X-SSET-Flags` are rejected.
 * **Shell resize over the control stream**: PTY resize for cloud-shell sessions is sent to the agent over the dedicated control stream (`resizeForwarder` → `SendControl`), never interleaved on the data stream. The ephemeral connect path carries no resize (its `connectSession.resize` is nil).
+* **Object store disk calls never run on the control read loop**: decode, validate, and reassemble inline, then hand the job to the per-session worker.
+* **Object store write locks cover one frame only**: `SendControl` serializes each chunk, so other control traffic can interleave between chunks.

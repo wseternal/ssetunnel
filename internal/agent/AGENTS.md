@@ -95,6 +95,16 @@ Shell sessions can enable verbose tracing (`Agent.Verbose`) which adds lifecycle
 
 After the first `Supervisor.Reconcile()`, `InitModules` starts the local module API (`module_api.go`). A failure there is logged and does not abort module startup: the tunnel path keeps working without the local surface.
 
+### Object store forwarding (`objectstore.go`)
+
+`InitModules` installs `SetOnObjectStore` beside `SetOnDataStore`. The handler unmarshals the IPC request, overwrites `module_id` with the authenticated IPC identity, and calls `Agent.ObjectStoreRequest`.
+
+- `objectStoreForwarder` generates a random `request_id` and fragments a put with `moduleproto.NewObjectStoreDataChunks`.
+- A get sends one request. The forwarder reassembles bounded response chunks with `moduleproto.ObjectStoreAssembler`.
+- Every pending entry stores its control generation. A stale stream cannot satisfy or clear a newer entry.
+- The operation bound is two minutes, or the caller context deadline when shorter.
+- Cleanup paths: terminal response, malformed response, timeout, control stream close (`FailGeneration`), and `Agent.Close` (`FailAll` before the IPC server closes).
+
 ### Invocation paths
 
 `ModuleInvoker` carries two entry points that share admission, resolution, and teardown:
@@ -125,3 +135,4 @@ The catalog epoch is process-scoped (`local-<hex>`, never the tunnel session ID)
 ## Rules
 * Module request/response policy lives in `internal/moduleapi` — don't re-derive header filtering or operation-path handling here.
 * The local API must never be reachable from the tunnel listener; it is a separate loopback listener owned by the agent process.
+* Object store pending entries must fail on control stream loss and `Agent.Close`. A module must never wait out its full timeout during teardown.
