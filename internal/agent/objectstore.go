@@ -64,6 +64,17 @@ func newObjectStoreForwarder() *objectStoreForwarder {
 	}
 }
 
+// newObjectStoreRequestID returns a fresh correlation ID. Callers that
+// need the ID on an error path generate it before Forward, which keeps
+// a non-empty ID.
+func newObjectStoreRequestID() (string, error) {
+	var buf [8]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		return "", fmt.Errorf("object store: generate request ID: %w", err)
+	}
+	return hex.EncodeToString(buf[:]), nil
+}
+
 // Forward sends one object request and waits for its terminal response.
 // For a get, the returned message carries the reassembled data.
 func (f *objectStoreForwarder) Forward(ctx context.Context, msg moduleproto.ObjectStoreMessage, sender controlSender, gen int) (*moduleproto.ObjectStoreMessage, error) {
@@ -74,11 +85,11 @@ func (f *objectStoreForwarder) Forward(ctx context.Context, msg moduleproto.Obje
 		return nil, fmt.Errorf("object store: unknown operation %q", msg.Op)
 	}
 	if msg.RequestID == "" {
-		var buf [8]byte
-		if _, err := rand.Read(buf[:]); err != nil {
-			return nil, fmt.Errorf("object store: generate request ID: %w", err)
+		id, err := newObjectStoreRequestID()
+		if err != nil {
+			return nil, err
 		}
-		msg.RequestID = hex.EncodeToString(buf[:])
+		msg.RequestID = id
 	}
 
 	p := &objectStorePending{
@@ -179,6 +190,9 @@ func (f *objectStoreForwarder) HandleResponse(msg *mux.ControlMessage, gen int) 
 		}
 		f.finish(p, &resp, nil)
 	case moduleproto.ObjectStoreGet:
+		// One control generation has one reader, so p.asm needs no lock;
+		// the generation check above rejects stale chunks before they
+		// reach it.
 		if p.asm == nil {
 			asm, err := moduleproto.NewObjectStoreAssembler(&resp)
 			if err != nil {

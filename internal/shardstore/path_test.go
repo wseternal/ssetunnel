@@ -63,23 +63,27 @@ func TestResolvePathEmpty(t *testing.T) {
 }
 
 func TestResolvePathShape(t *testing.T) {
-	keys := []string{
-		"a",
-		"0",
-		".",
-		"..",
-		"../escape",
-		"/leading",
-		"trailing/",
-		"with space",
-		`back\slash`,
-		"КЛЮЧ",
-		"\x00control",
-		strings.Repeat("k", 4096),
+	tests := []struct {
+		name string
+		key  string
+	}{
+		{"single character", "a"},
+		{"digit", "0"},
+		{"dot", "."},
+		{"dot dot", ".."},
+		{"parent traversal", "../escape"},
+		{"leading slash", "/leading"},
+		{"trailing slash", "trailing/"},
+		{"space", "with space"},
+		{"backslash", `back\slash`},
+		{"non-ascii", "КЛЮЧ"},
+		{"control byte", "\x00control"},
+		{"4096-byte key", strings.Repeat("k", 4096)},
 	}
 
-	for _, key := range keys {
-		t.Run(key, func(t *testing.T) {
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			key := tt.key
 			shardDir, objectPath, err := shardstore.ResolvePath(key)
 			if err != nil {
 				t.Fatalf("resolve %q: %v", key, err)

@@ -103,6 +103,11 @@ func TestShardInspectorStats(t *testing.T) {
 	}
 }
 
+// TestShardDistribution writes 10,000 keys with one sync per object. It is
+// the slowest test in this package: about 55 to 70 seconds with the race
+// detector, and up to about 90 seconds when other packages run in parallel
+// against the 120-second timeout. A failure under load points at the time
+// budget before the distribution.
 func TestShardDistribution(t *testing.T) {
 	store, root := newTestStore(t)
 

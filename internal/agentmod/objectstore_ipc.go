@@ -112,7 +112,6 @@ func (s *IPCServer) handleObjectStoreConnection(conn net.Conn, reader *bufio.Rea
 			}
 		}
 
-		conn.SetDeadline(time.Now().Add(3 * time.Minute))
 		respJSON, err := handler(moduleID, dataBuf)
 		<-s.objSlots
 		if err != nil {
@@ -129,6 +128,11 @@ func writeObjectStoreResponse(conn net.Conn, respJSON []byte) {
 	if len(respJSON) > maxObjectStoreIPCMessageSize {
 		respJSON = objectStoreErrorJSON(moduleproto.ObjectStoreErrInternal, "response too large")
 	}
+	// Bound this write so a module that stops reading cannot pin the
+	// loop, then clear it: the next request read stays governed by the
+	// read deadline the loop sets.
+	_ = conn.SetWriteDeadline(time.Now().Add(3 * time.Minute))
+	defer func() { _ = conn.SetWriteDeadline(time.Time{}) }()
 	header := fmt.Sprintf("OBJECTSTORE_RESP %d\n", len(respJSON))
 	if _, err := conn.Write([]byte(header)); err != nil {
 		log.Printf("ipc: object store response header write error: %v", err)

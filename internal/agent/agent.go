@@ -346,8 +346,14 @@ func (a *Agent) InitModules(ctx context.Context, dataDir string) error {
 		req.ModuleID = moduleID // enforce authenticated caller identity
 		// The agent owns correlation IDs. Discard a caller-supplied one
 		// so a hand-written IPC client cannot collide with another
-		// module's in-flight request.
+		// module's in-flight request, then generate the ID here so the
+		// internal error path can report the same correlation ID.
 		req.RequestID = ""
+		id, err := newObjectStoreRequestID()
+		if err != nil {
+			return nil, err
+		}
+		req.RequestID = id
 
 		ctx, cancel := context.WithTimeout(a.runContext(), objectStoreTimeout)
 		defer cancel()
