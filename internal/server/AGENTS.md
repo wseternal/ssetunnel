@@ -96,15 +96,18 @@ Server half of the module object path.
 
 `FileObjectStore` stores objects at `<root>/<module-id>/<sha256(key)>`. It confines every operation with `os.Root`, rejects symlinks and non-regular files, applies `0700`/`0600` modes, reads at most 4 MiB, and publishes writes with a same-directory temporary file and rename. A missing file maps to `sdk.ErrObjectNotFound`.
 
+A read-write lock orders every operation against `Close`: active calls hold the read side for their whole duration, and `Close` holds the write side. The backend trusts the operator-owned root, so `Get`'s `Lstat`-then-open gap and a symlinked module directory need local write access that the root mode denies.
+
 `ObjectStoreHandler` serves one session object path:
 
 - `object_store_req` frames arrive on the control loop. The handler validates metadata, reassembles a put, and queues the backend call.
-- One worker goroutine per session performs disk calls. The queue holds eight jobs. A full queue returns `busy`.
+- A get must carry canonical metadata: sequence 0, chunk count 1, final true, zero size, no digest, no data. Any other shape returns `invalid_request` and never reaches the queue.
+- One worker goroutine per session performs disk calls. The queue holds eight jobs. A full queue returns `busy`. The closed check and the queue send share the mutex, so no job is accepted after the worker stops.
 - Upload assemblies are keyed by `(module_id, request_id)`, so two modules cannot collide on a bare request ID. A session holds at most eight assemblies; a one-minute worker ticker expires them after five minutes, even on read-only sessions.
-- Server-scoped object-store metrics count puts, gets, backend errors, busy rejections, bytes, and average backend latency; they are exposed through `Server.ObjectStoreMetrics`.
+- Server-scoped object-store metrics count puts, gets, misses, backend errors, busy rejections, bytes, and average backend latency; they are exposed through `Server.ObjectStoreMetrics` and the admin route `GET /api/v1/metrics/objectstore`. A miss does not increment `get_errors`.
 - The worker fragments a get result at 32 KiB and stops on the first `SendControl` error.
 - Disabled storage answers `unavailable` with the matching request ID, so a caller never waits out a timeout.
-- `Session.Close` and control-loop exit stop the handler and release assemblies.
+- `Session.Close` and control-loop exit stop the handler, which waits up to five seconds for the worker and releases assemblies.
 
 `Server.SetObjectStore` must run before any session attaches. `attach` captures the backend pointer before `readControlLoop` starts, so a later change does not reach existing sessions.
 

@@ -264,18 +264,20 @@ func (f *objectStoreForwarder) finish(p *objectStorePending, resp *moduleproto.O
 	close(p.done)
 }
 
-// sendObjectStoreChunk writes one control frame. The control sender
-// logs write failures; the operation then fails by timeout or by
-// generation cleanup.
+// sendObjectStoreChunk writes one control frame. A failed write fails
+// the operation immediately: the control stream is gone, so waiting for
+// a response or a generation cleanup only delays the caller.
 func sendObjectStoreChunk(msg *moduleproto.ObjectStoreMessage, sender controlSender) error {
 	payload, err := json.Marshal(msg)
 	if err != nil {
 		return fmt.Errorf("object store: marshal chunk: %w", err)
 	}
-	sender(&mux.ControlMessage{
+	if err := sender(&mux.ControlMessage{
 		Type:     moduleproto.MsgObjectStoreReq,
 		StreamID: 0,
 		Payload:  payload,
-	})
+	}); err != nil {
+		return fmt.Errorf("object store: send chunk: %w", err)
+	}
 	return nil
 }

@@ -78,7 +78,7 @@ if err != nil {
 | `SSETUNNEL_MODULE_IPC_CREDENTIAL` | Launch credential |
 | `SSETUNNEL_MODULE_ID` | Module identity |
 
-The client presents its configured module ID on every call. The agent replaces any request module ID with the authenticated IPC identity.
+The client presents its configured module ID on every call. The agent replaces any request module ID with the authenticated IPC identity. A call that passes a different module ID returns an error before any network I/O.
 
 `NewObjectStoreWithEndpoint(endpoint, credential, moduleID)` accepts explicit values. Both constructors validate the configuration and perform no network I/O.
 
@@ -102,6 +102,7 @@ Each call opens one authenticated IPC connection. The call closes the connection
 | Active transfers per agent | 8 |
 | Active transfers per session | 8 |
 | IPC frame | 6 MiB |
+| Peak object memory per session | About 80 MiB (eight 6 MiB encoded bodies plus eight 4 MiB decoded objects) |
 
 Keys are flat. A key cannot contain a path separator, whitespace, a control byte, or a traversal form.
 
@@ -150,6 +151,30 @@ The logical key `report.bin` is not visible on disk. To find an object, use the 
 A reader sees the old complete object or the new complete object. A failed write removes the temporary file. The previous object stays in place.
 
 `Get` rejects symlinks, non-regular files, and files above 4 MiB.
+
+The backend trusts the root directory. A local writer who can modify the root can redirect a module namespace, and `Get` has a small window between its check and its open. Keep the root owned by the service user with mode `0700`. Do not give other users write access to it.
+
+## Inspect metrics
+
+The console exposes object-store counters to an admin:
+
+```bash
+curl -H "Authorization: Bearer <admin-token>" \
+  http://127.0.0.1:8081/console/api/v1/metrics/objectstore
+```
+
+The response holds these fields:
+
+| Field | Meaning |
+|-------|---------|
+| `put_total`, `get_total` | Completed operations |
+| `put_errors`, `get_errors` | Backend failures |
+| `not_found` | Expected misses, kept out of `get_errors` |
+| `busy_rejections` | Full transfer slots or full disk queues |
+| `bytes_in`, `bytes_out` | Bytes written and read |
+| `latency_avg_ms`, `latency_samples` | Average backend latency |
+
+Counters are server-scoped and reset when the server restarts.
 
 ## Backup and restore
 

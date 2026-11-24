@@ -11,6 +11,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sync"
 
 	"github.com/wseternal/ssetunnel/sdk"
 )
@@ -19,7 +20,14 @@ import (
 // Every object lives under <root>/<module-id>/<sha256(key)>. The backend
 // confines all access with os.Root, rejects symlinks and non-regular
 // objects, and publishes objects with an atomic same-directory rename.
+//
+// The lock orders every operation against Close: Close waits for active
+// calls, and no call starts after the root closes. The backend trusts the
+// operator-owned 0700 root. A local writer who can modify the root can
+// retarget a module namespace, and Get's Lstat-then-open pair has a
+// window. Both cases need local write access that the root mode denies.
 type FileObjectStore struct {
+	mu   sync.RWMutex
 	root *os.Root
 }
 
@@ -41,9 +49,11 @@ func NewFileObjectStore(dir string) (*FileObjectStore, error) {
 	return &FileObjectStore{root: root}, nil
 }
 
-// Close releases the storage root. The backend accepts no calls after
-// Close returns.
+// Close releases the storage root after active operations return. The
+// backend accepts no calls after Close returns.
 func (s *FileObjectStore) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.root == nil {
 		return nil
 	}
@@ -69,6 +79,8 @@ func (s *FileObjectStore) Put(ctx context.Context, moduleID, key string, data []
 	if len(data) > sdk.MaxObjectSize {
 		return fmt.Errorf("object too large: %d bytes (max %d)", len(data), sdk.MaxObjectSize)
 	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	root := s.root
 	if root == nil {
 		return errors.New("object store is closed")
@@ -125,6 +137,8 @@ func (s *FileObjectStore) Get(ctx context.Context, moduleID, key string) ([]byte
 	if err := sdk.ValidateObjectKey(key); err != nil {
 		return nil, err
 	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	root := s.root
 	if root == nil {
 		return nil, errors.New("object store is closed")

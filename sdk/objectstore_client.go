@@ -88,9 +88,13 @@ func NewObjectStoreWithEndpoint(endpoint, credential, moduleID string) (ObjectSt
 }
 
 // Put stores data under key. The bytes are sent in one IPC frame, and
-// the agent fragments them for the control tunnel.
+// the agent fragments them for the control tunnel. The moduleID must
+// equal the client identity; a mismatch returns an error.
 func (c *objectStoreClient) Put(ctx context.Context, moduleID, key string, data []byte) error {
 	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := c.checkModuleID(moduleID); err != nil {
 		return err
 	}
 	if err := ValidateObjectKey(key); err != nil {
@@ -109,9 +113,13 @@ func (c *objectStoreClient) Put(ctx context.Context, moduleID, key string, data 
 }
 
 // Get returns the object stored under key. A missing object returns an
-// error that satisfies errors.Is(err, ErrObjectNotFound).
+// error that satisfies errors.Is(err, ErrObjectNotFound). The moduleID
+// must equal the client identity; a mismatch returns an error.
 func (c *objectStoreClient) Get(ctx context.Context, moduleID, key string) ([]byte, error) {
 	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := c.checkModuleID(moduleID); err != nil {
 		return nil, err
 	}
 	if err := ValidateObjectKey(key); err != nil {
@@ -129,6 +137,17 @@ func (c *objectStoreClient) Get(ctx context.Context, moduleID, key string) ([]by
 		return []byte{}, nil
 	}
 	return resp.Data, nil
+}
+
+// checkModuleID rejects a namespace that differs from the configured
+// identity. The agent replaces the request module ID with the
+// authenticated IPC identity, so a mismatch has no meaning. Reject it
+// instead of silently writing the caller's own namespace.
+func (c *objectStoreClient) checkModuleID(moduleID string) error {
+	if moduleID != c.moduleID {
+		return fmt.Errorf("object store: module ID %q does not match client identity %q", moduleID, c.moduleID)
+	}
+	return nil
 }
 
 // do performs one request on a fresh authenticated IPC connection.
@@ -228,33 +247,36 @@ func (c *objectStoreClient) connect(ctx context.Context) (net.Conn, *bufio.Reade
 	if err != nil {
 		return fail("object store: read identity response: %w", err)
 	}
-	if string(line) != "OK\n" {
-		_ = conn.Close()
-		if bytes.HasPrefix(line, []byte("OBJECTSTORE_RESP ")) {
-			n, err := parseObjectStoreHeaderLine(line[:len(line)-1], "OBJECTSTORE_RESP ")
-			if err != nil {
-				return nil, nil, err
-			}
-			respBuf := make([]byte, n)
-			if n > 0 {
-				if _, err := io.ReadFull(reader, respBuf); err != nil {
-					return nil, nil, fmt.Errorf("object store: read rejection body: %w", err)
-				}
-			}
-			var resp objectStoreResponse
-			if err := json.Unmarshal(respBuf, &resp); err != nil {
-				return nil, nil, fmt.Errorf("object store: unmarshal rejection: %w", err)
-			}
-			if resp.ErrorCode != "" {
-				return nil, nil, objectStoreResponseError(resp.ErrorCode, resp.Error)
-			}
-			return nil, nil, errors.New("object store: registration rejected")
-		}
-		return nil, nil, fmt.Errorf("object store: unexpected identity response %q", line)
+	if string(line) == "OK\n" {
+		_ = conn.SetDeadline(time.Time{})
+		return conn, reader, nil
 	}
 
-	_ = conn.SetDeadline(time.Time{})
-	return conn, reader, nil
+	// The agent rejected the identity with a framed error. Read the whole
+	// frame before the close: the body can arrive after the header, and a
+	// close first turns the rejection into a closed-connection error.
+	defer conn.Close()
+	if bytes.HasPrefix(line, []byte("OBJECTSTORE_RESP ")) {
+		n, err := parseObjectStoreHeaderLine(line[:len(line)-1], "OBJECTSTORE_RESP ")
+		if err != nil {
+			return nil, nil, err
+		}
+		respBuf := make([]byte, n)
+		if n > 0 {
+			if _, err := io.ReadFull(reader, respBuf); err != nil {
+				return nil, nil, fmt.Errorf("object store: read rejection body: %w", err)
+			}
+		}
+		var resp objectStoreResponse
+		if err := json.Unmarshal(respBuf, &resp); err != nil {
+			return nil, nil, fmt.Errorf("object store: unmarshal rejection: %w", err)
+		}
+		if resp.ErrorCode != "" {
+			return nil, nil, objectStoreResponseError(resp.ErrorCode, resp.Error)
+		}
+		return nil, nil, errors.New("object store: registration rejected")
+	}
+	return nil, nil, fmt.Errorf("object store: unexpected identity response %q", line)
 }
 
 // parseObjectStoreHeaderLine parses one bounded length header line.

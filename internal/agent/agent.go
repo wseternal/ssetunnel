@@ -610,8 +610,7 @@ func (a *Agent) runOnce(ctx context.Context) error {
 				if s == nil {
 					return fmt.Errorf("control stream not available")
 				}
-				s(msg) // controlSender returns no error; failures are logged downstream
-				return nil
+				return s(msg)
 			})
 			// Publish catalog snapshot on connect.
 			if err := a.moduleManager.OnConnect(ctx, conn.SessionID()); err != nil {

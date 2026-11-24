@@ -13,6 +13,7 @@ type ObjectStoreMetrics struct {
 	GetTotal       atomic.Int64
 	PutErrors      atomic.Int64
 	GetErrors      atomic.Int64
+	NotFound       atomic.Int64
 	BusyRejections atomic.Int64
 	BytesIn        atomic.Int64
 	BytesOut       atomic.Int64
@@ -43,7 +44,8 @@ func (m *ObjectStoreMetrics) RecordGet(bytes int, d time.Duration) {
 	m.recordLatency(d)
 }
 
-// RecordFailure records one failed object operation.
+// RecordFailure records one failed object operation. A missing object is
+// an expected result, not a backend failure: callers use RecordMiss.
 func (m *ObjectStoreMetrics) RecordFailure(op string, d time.Duration) {
 	if m == nil {
 		return
@@ -54,6 +56,15 @@ func (m *ObjectStoreMetrics) RecordFailure(op string, d time.Duration) {
 	case "get":
 		m.GetErrors.Add(1)
 	}
+	m.recordLatency(d)
+}
+
+// RecordMiss records one read for a missing object.
+func (m *ObjectStoreMetrics) RecordMiss(d time.Duration) {
+	if m == nil {
+		return
+	}
+	m.NotFound.Add(1)
 	m.recordLatency(d)
 }
 
@@ -87,6 +98,7 @@ func (m *ObjectStoreMetrics) Summary() map[string]any {
 		"get_total":       m.GetTotal.Load(),
 		"put_errors":      m.PutErrors.Load(),
 		"get_errors":      m.GetErrors.Load(),
+		"not_found":       m.NotFound.Load(),
 		"busy_rejections": m.BusyRejections.Load(),
 		"bytes_in":        m.BytesIn.Load(),
 		"bytes_out":       m.BytesOut.Load(),

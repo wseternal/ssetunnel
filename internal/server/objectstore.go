@@ -28,6 +28,11 @@ const (
 
 	// objectStoreOperationTimeout bounds one backend call.
 	objectStoreOperationTimeout = 30 * time.Second
+
+	// objectStoreCloseWait bounds how long Close waits for the worker.
+	// The backend lock, not this wait, protects the root: a worker that
+	// outlives the wait still cannot race a root close.
+	objectStoreCloseWait = 5 * time.Second
 )
 
 // objectStoreBackend is an immutable shared backend holder. Server
@@ -56,6 +61,8 @@ type ObjectStoreHandler struct {
 	closed     bool
 
 	queue chan objectStoreJob
+	// done closes when the worker exits, so Close can wait for it.
+	done chan struct{}
 }
 
 // objectAssemblyKey scopes an upload to its module namespace. A bare
@@ -86,13 +93,17 @@ func newObjectStoreHandler(store sdk.ObjectStore, send func(*mux.ControlMessage)
 		assemblies: make(map[objectAssemblyKey]*moduleproto.ObjectStoreAssembler),
 		assemblyAt: make(map[objectAssemblyKey]time.Time),
 		queue:      make(chan objectStoreJob, objectStoreQueueDepth),
+		done:       make(chan struct{}),
 	}
-	go h.run()
+	go func() {
+		defer close(h.done)
+		h.run()
+	}()
 	return h
 }
 
-// Close cancels the worker and releases queued work and assemblies.
-// Safe to call more than once.
+// Close cancels the worker, releases queued work and assemblies, and
+// waits for the worker to stop. Safe to call more than once.
 func (h *ObjectStoreHandler) Close() {
 	h.mu.Lock()
 	if h.closed {
@@ -104,6 +115,17 @@ func (h *ObjectStoreHandler) Close() {
 	h.assemblyAt = nil
 	h.mu.Unlock()
 	h.cancel()
+	if h.done == nil {
+		// A handler built without the constructor has no worker.
+		return
+	}
+	timer := time.NewTimer(objectStoreCloseWait)
+	defer timer.Stop()
+	select {
+	case <-h.done:
+	case <-timer.C:
+		log.Printf("server: object store worker did not stop within %v", objectStoreCloseWait)
+	}
 }
 
 // handleMessage validates and routes one object store request chunk.
@@ -201,8 +223,15 @@ func (h *ObjectStoreHandler) handlePut(req *moduleproto.ObjectStoreMessage) {
 	}
 }
 
-// handleGet validates one read and queues it.
+// handleGet validates one read and queues it. A get request carries no
+// payload: the agent builds one canonical shape. Reject any other shape
+// instead of ignoring fields the backend will not use.
 func (h *ObjectStoreHandler) handleGet(req *moduleproto.ObjectStoreMessage) {
+	if req.Sequence != 0 || req.ChunkCount != 1 || !req.Final ||
+		req.TotalSize != 0 || req.SHA256 != "" || len(req.Data) != 0 {
+		h.fail(req.RequestID, req.Op, moduleproto.ObjectStoreErrInvalidRequest, "non-canonical get request")
+		return
+	}
 	if !h.enqueue(objectStoreJob{
 		requestID: req.RequestID,
 		op:        req.Op,
@@ -213,12 +242,13 @@ func (h *ObjectStoreHandler) handleGet(req *moduleproto.ObjectStoreMessage) {
 	}
 }
 
-// enqueue submits one bounded job without growing the queue.
+// enqueue submits one bounded job without growing the queue. The send
+// and the closed check share the lock Close takes, so a job is never
+// accepted after the worker has been told to stop.
 func (h *ObjectStoreHandler) enqueue(job objectStoreJob) bool {
 	h.mu.Lock()
-	closed := h.closed
-	h.mu.Unlock()
-	if closed {
+	defer h.mu.Unlock()
+	if h.closed {
 		return false
 	}
 	select {
@@ -287,11 +317,12 @@ func (h *ObjectStoreHandler) execute(job objectStoreJob) {
 	case moduleproto.ObjectStoreGet:
 		data, err := h.store.Get(ctx, job.moduleID, job.key)
 		if err != nil {
-			h.metrics.RecordFailure(job.op, time.Since(start))
 			if errors.Is(err, sdk.ErrObjectNotFound) {
+				h.metrics.RecordMiss(time.Since(start))
 				h.fail(job.requestID, job.op, moduleproto.ObjectStoreErrNotFound, "object not found")
 				return
 			}
+			h.metrics.RecordFailure(job.op, time.Since(start))
 			log.Printf("server: object store get %s failed: %v", job.requestID, err)
 			h.fail(job.requestID, job.op, moduleproto.ObjectStoreErrInternal, "object store read failed")
 			return

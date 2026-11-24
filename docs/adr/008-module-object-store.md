@@ -54,6 +54,8 @@ The hash keeps platform filename rules out of the layout. The backend has these 
 - `Get` checks `Lstat` first. It rejects symlinks and non-regular files.
 - `Get` reads at most `MaxObjectSize + 1` bytes. It rejects an externally enlarged object.
 - A missing file maps to `ErrObjectNotFound`.
+- A read-write lock orders every operation against `Close`. `Close` waits for active calls and rejects new ones.
+- The backend trusts the operator-owned root. A local writer who can modify the root can retarget a module namespace. The `Lstat`-then-open pair in `Get` also has a time-of-check to time-of-use window. The root mode denies both cases to a non-owner.
 
 ### 3. Transport
 
@@ -93,17 +95,23 @@ A 4 MiB object has 128 chunks. An empty object has one final zero-data chunk and
 
 The agent replaces the request `module_id` with the authenticated IPC identity. It discards any caller-supplied `request_id`, generates a fresh random `request_id`, rejects a duplicate ID already pending, and stores the control generation with each pending operation. A stale control stream fails only its own operations and rejects requests that try to register after that generation closed.
 
+The SDK client presents its configured module ID on every call. A caller that passes a different module ID gets an error before any network I/O. The configured identity is authoritative.
+
+A failed control write fails the pending operation at once. The module does not wait for the request timeout or for generation cleanup.
+
 ### 4. Server lifecycle
 
 One `ObjectStoreHandler` serves each session. The control read loop performs decode, validation, and reassembly only. One worker goroutine per session performs backend disk calls. The worker queue holds eight operations. A full queue returns `busy`. Upload assemblies are keyed by module ID and request ID, so two modules cannot collide on a request ID. A one-minute ticker in the worker sweeps expired assemblies.
 
-Server-scoped object-store metrics count completed puts and gets, backend errors, busy rejections, bytes moved, and average backend latency.
+A get request carries no payload. The handler rejects a get that has a nonzero sequence, a chunk count other than one, a false final flag, a nonzero size, a digest, or data.
 
-A session holds at most eight upload assemblies. That caps object memory at 32 MiB plus bounded encoding overhead. Incomplete assemblies expire after five minutes; the worker ticker reclaims them even when the session performs only reads.
+Server-scoped object-store metrics count completed puts and gets, misses, backend errors, busy rejections, bytes moved, and average backend latency. The console exposes them to an admin at `GET /api/v1/metrics/objectstore` on the console port.
+
+A session holds at most eight upload assemblies. Eight decoded objects hold 32 MiB. Eight encoded IPC bodies hold another 48 MiB, so one session can hold about 80 MiB at peak. The agent holds its own copy of the encoded set. Incomplete assemblies expire after five minutes; the worker ticker reclaims them even when the session performs only reads.
 
 The handler returns these structured error codes: `not_found`, `invalid_request`, `too_large`, `busy`, `unavailable`, and `internal`. Disabled storage returns `unavailable` with the matching request ID, so a caller never waits out a timeout.
 
-Session close cancels the worker and releases assemblies. The worker exits after its active filesystem call returns.
+Session close cancels the worker, waits up to five seconds for it to exit, and releases assemblies. The worker exits after its active filesystem call returns. A worker that outlives the wait cannot race the root close: the backend lock orders the two.
 
 ### 5. Configuration
 

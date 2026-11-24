@@ -103,7 +103,7 @@ After the first `Supervisor.Reconcile()`, `InitModules` starts the local module 
 - A get sends one request. The forwarder reassembles bounded response chunks with `moduleproto.ObjectStoreAssembler` and ignores a response whose non-empty `module_id` does not match the pending request.
 - Every pending entry stores its control generation. A stale stream cannot satisfy or clear a newer entry; a monotonic closed-generation watermark rejects requests that try to register after their stream closed.
 - The operation bound is two minutes, or the caller context deadline when shorter.
-- Cleanup paths: terminal response, malformed response, timeout, control stream close (`FailGeneration`), and `Agent.Close` (`FailAll` before the IPC server closes).
+- Cleanup paths: terminal response, malformed response, timeout, control stream close (`FailGeneration`), `Agent.Close` (`FailAll` before the IPC server closes), and a control write error. `controlSender` returns the write error, so a dead stream fails the operation at once instead of waiting for the timeout.
 
 ### Invocation paths
 

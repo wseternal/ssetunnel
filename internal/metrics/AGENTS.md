@@ -42,7 +42,7 @@ Central hub. Maintains per-agent `rollingWindow` structs, periodically flushes a
 **Configuration**: `flushInterval` (default 10s), `retention` (default 7 days). Pass nil store for memory-only mode.
 
 ### `ObjectStoreMetrics`
-Server-scoped, atomic counters for the module object store: completed puts/gets, backend errors, busy rejections, bytes in/out, and average backend latency. It is independent of the per-agent rolling windows and is not persisted; `Server` owns one instance and exposes it through `Server.ObjectStoreMetrics`. All methods are nil-receiver safe.
+Server-scoped, atomic counters for the module object store: completed puts/gets, misses, backend errors, busy rejections, bytes in/out, and average backend latency. A miss is an expected `not_found` result and stays out of `get_errors`. It is independent of the per-agent rolling windows and is not persisted; `Server` owns one instance and exposes it through `Server.ObjectStoreMetrics`. All methods are nil-receiver safe.
 
 ### `Store` (BadgerDB)
 Persists metric samples, tuning decisions, and rolling window state. Keys are lexicographically sorted for chronological prefix scans.
@@ -79,7 +79,7 @@ Periodically evaluates each active agent's performance and pushes transport para
 | `TuningDecision` | One tuner output: old→new params, reason, triggering snapshot |
 | `MetricSnapshot` | Aggregated rolling window view (throughput P50/P95, latency P50/P95, error rate, active conns) |
 | `AgentMetrics` | Per-agent state for console: snapshot + current params + last decision |
-| `ObjectStoreMetrics` | Server-scoped object-store counters: puts/gets, errors, busy, bytes, latency |
+| `ObjectStoreMetrics` | Server-scoped object-store counters: puts/gets, misses, errors, busy, bytes, latency |
 | `Overview` | Global summary: active agents, aggregate throughput, error rate |
 
 ## Rules

@@ -33,6 +33,10 @@ type API struct {
 	reg   *server.Registry
 	mc    *metrics.MetricsCollector // nil when metrics disabled
 
+	// objectStore holds server-scoped object-store counters. Nil when the
+	// router is built without a tunnel server.
+	objectStore *metrics.ObjectStoreMetrics
+
 	// Login rate limiting: password failures per IP.
 	pwRateMu    sync.Mutex
 	pwRateCount map[string]int
@@ -61,6 +65,11 @@ type Router struct {
 // SetMetrics attaches a metrics collector to the API for statistics endpoints.
 func (r *Router) SetMetrics(mc *metrics.MetricsCollector) {
 	r.api.mc = mc
+}
+
+// SetObjectStoreMetrics attaches the server-scoped object-store counters.
+func (r *Router) SetObjectStoreMetrics(m *metrics.ObjectStoreMetrics) {
+	r.api.objectStore = m
 }
 
 func NewRouter(store *auth.Store, reg *server.Registry) *Router {
@@ -123,6 +132,10 @@ func NewRouter(store *auth.Store, reg *server.Registry) *Router {
 	r.Handle("/api/v1/metrics/agents", userAuth(http.HandlerFunc(api.handleMetricsAgents))).Methods("GET")
 	r.Handle("/api/v1/metrics/agents/{agentID}/samples", userAuth(http.HandlerFunc(api.handleMetricsSamples))).Methods("GET")
 	r.Handle("/api/v1/metrics/agents/{agentID}/decisions", userAuth(http.HandlerFunc(api.handleMetricsDecisions))).Methods("GET")
+
+	// Object-store metrics are server-scoped infrastructure counters:
+	// admin only.
+	r.Handle("/api/v1/metrics/objectstore", adminAuth(http.HandlerFunc(api.handleMetricsObjectStore))).Methods("GET")
 
 	// Agent log retrieval: request recent log lines from a connected agent
 	// via the control channel. Any authenticated user (scoped by user_id
@@ -1165,6 +1178,19 @@ func (a *API) handleMetricsOverview(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(overview)
+}
+
+// handleMetricsObjectStore returns the server-scoped object-store
+// counters. It returns an empty object when the router has no tunnel
+// server, the same way an absent metrics collector yields an empty
+// overview.
+func (a *API) handleMetricsObjectStore(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if a.objectStore == nil {
+		_ = json.NewEncoder(w).Encode(map[string]any{})
+		return
+	}
+	_ = json.NewEncoder(w).Encode(a.objectStore.Summary())
 }
 
 func (a *API) handleMetricsAgents(w http.ResponseWriter, r *http.Request) {
