@@ -102,7 +102,7 @@ Each call opens one authenticated IPC connection. The call closes the connection
 | Active transfers per agent | 8 |
 | Active transfers per session | 8 |
 | IPC frame | 6 MiB |
-| Peak object memory per session | About 80 MiB (eight 6 MiB encoded bodies plus eight 4 MiB decoded objects) |
+| Peak object memory per session | About 148 MiB (server: 68 MiB decoded; agent: 80 MiB of decoded buffers and encoded bodies) |
 
 Keys are flat. A key cannot contain a path separator, whitespace, a control byte, or a traversal form.
 

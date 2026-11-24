@@ -70,6 +70,9 @@ func (s *Store) Close() error {
 // then renames it to the digest name. A reader sees the old object or the
 // new object, never a partial write. A failed write removes the
 // temporary file and keeps the previous object. Put has no size limit.
+//
+// A process that dies mid-write can leave a temporary file in the leaf.
+// The store never serves or counts it, and the operator may delete it.
 func (s *Store) Put(key string, data []byte) error {
 	shardDir, name, err := resolveKey(key)
 	if err != nil {
@@ -122,6 +125,7 @@ func (s *Store) Put(key string, data []byte) error {
 // Get returns the object stored under key. An empty object returns a
 // non-nil empty slice. A missing object returns ErrObjectNotFound through
 // errors.Is. Get rejects a symlink or any other non-regular entry.
+// Get reads the whole object and applies no size limit.
 func (s *Store) Get(key string) ([]byte, error) {
 	shardDir, name, err := resolveKey(key)
 	if err != nil {

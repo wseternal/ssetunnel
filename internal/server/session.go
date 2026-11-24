@@ -283,6 +283,9 @@ func (s *Session) Write(b []byte) (int, error) {
 // its recv goroutine which detects the pipe closure; we must NOT call
 // ms.Close() here because yamux's Close() calls s.conn.Close() (this
 // Session), causing a deadlock between closeOnce and yamux's shutdownLock.
+//
+// CloseObjectStore waits up to five seconds for the session's object-store
+// worker to exit, so a slow backend call can delay this path by that bound.
 func (s *Session) Close() error {
 	s.closeOnce.Do(func() {
 		s.up.Close()

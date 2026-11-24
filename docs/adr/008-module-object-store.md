@@ -107,7 +107,7 @@ A get request carries no payload. The handler rejects a get that has a nonzero s
 
 Server-scoped object-store metrics count completed puts and gets, misses, backend errors, busy rejections, bytes moved, and average backend latency. The console exposes them to an admin at `GET /api/v1/metrics/objectstore` on the console port.
 
-A session holds at most eight upload assemblies. Eight decoded objects hold 32 MiB. Eight encoded IPC bodies hold another 48 MiB, so one session can hold about 80 MiB at peak. The agent holds its own copy of the encoded set. Incomplete assemblies expire after five minutes; the worker ticker reclaims them even when the session performs only reads.
+A session holds at most eight upload assemblies (32 MiB decoded) and eight queued jobs (another 32 MiB decoded); one executing job adds 4 MiB, so the server retains about 68 MiB of decoded objects at peak. The agent holds eight decoded request buffers (32 MiB) beside eight encoded IPC bodies (48 MiB), about 80 MiB. One session can therefore hold about 148 MiB across the server and the agent. Incomplete assemblies expire after five minutes; the worker ticker reclaims them even when the session performs only reads.
 
 The handler returns these structured error codes: `not_found`, `invalid_request`, `too_large`, `busy`, `unavailable`, and `internal`. Disabled storage returns `unavailable` with the matching request ID, so a caller never waits out a timeout.
 

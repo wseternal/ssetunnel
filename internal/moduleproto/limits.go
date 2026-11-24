@@ -46,5 +46,6 @@ const EstablishmentDeadline = 3
 const ObjectStoreChunkSize = 32 << 10
 
 // MaxActiveObjectTransfers caps concurrent object transfers per agent or
-// session. Eight 4 MiB transfers cap object memory at 32 MiB.
+// session. Eight simultaneous 4 MiB transfers hold 32 MiB of decoded data;
+// see ADR-008 for the per-session peak across queues and encoded bodies.
 const MaxActiveObjectTransfers = 8

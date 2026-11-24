@@ -31,6 +31,9 @@ func NewShardInspector(store *Store) *ShardInspector {
 // through the store. A separate process can still change the tree, because
 // the root belongs to the operator. An empty tree returns zero values.
 // A closed store returns ErrStoreClosed.
+//
+// The scan holds the write lock, so every Get, Put, Exists, and Delete
+// through the same store waits for it. Call Inspect off the request path.
 func (i *ShardInspector) Inspect() (ShardStats, error) {
 	if i.store == nil {
 		return ShardStats{}, errors.New("shardstore: inspector has no store")

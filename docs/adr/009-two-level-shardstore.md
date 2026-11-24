@@ -115,6 +115,24 @@ The package trusts the operator-owned root. The `Lstat` and open pair in `Get` h
 
 The scan ignores temporary files, malformed names, non-regular entries, empty leaves, and files at other depths. It counts each leaf without a global object index. Empty leaves do not change the statistics. An empty tree returns zero for every field. `AverageObjectsPerLeaf` is `float64(Objects) / float64(LeafDirectories)`.
 
+### 8. Operational limits
+
+`Put` writes `.<digest>.tmp-<random>` in the target leaf and renames it. A process that dies between those steps leaves that temporary file behind. The store never serves or counts it, because its name is not an object name, and `Inspect` skips it. The operator may delete these files. The store does not sweep them itself: a sweep that runs during a concurrent `Put` to the same key can delete the temporary file that writer is still filling, and its rename then fails.
+
+`Inspect` holds the store write lock for the entire walk. Every `Get`, `Put`, `Exists`, and `Delete` through the same store waits for the scan, so the inspector is an administrative call, not a request-path one.
+
+`Get` reads the whole object and applies no size limit. An object enlarged outside the package can therefore consume memory on read.
+
+### 9. Consolidation trigger
+
+`server.FileObjectStore` stays the runtime backend; this package has no callers. Consolidation is due when one of these conditions holds:
+
+- A module needs arbitrary string keys, or an object count that one flat directory cannot hold.
+- The server needs the distribution statistics or the lazy leaf creation this layout provides.
+- A fix lands in one backend and would need a duplicate in the other.
+
+Consolidation needs its own change and data-migration plan. Until then, a fix to either backend states whether the other needs the matching fix.
+
 ## Consequences
 
 ### Positive
