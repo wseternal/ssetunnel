@@ -117,7 +117,7 @@ The scan ignores temporary files, malformed names, non-regular entries, empty le
 
 ### 8. Operational limits
 
-`Put` writes `.<digest>.tmp-<random>` in the target leaf and renames it. A process that dies between those steps leaves that temporary file behind. The store never serves or counts it, because its name is not an object name, and `Inspect` skips it. The operator may delete these files. The store does not sweep them itself: a sweep that runs during a concurrent `Put` to the same key can delete the temporary file that writer is still filling, and its rename then fails.
+`Put` writes `.<digest>.tmp-<random>` in the target leaf and renames it. A process that dies between those steps leaves that temporary file behind. The store never serves or counts it, because its name is not an object name, and `Inspect` skips it. The operator may delete these files. The store does not sweep them itself: a sweep cannot tell an orphan from a temporary file that a concurrent `Put` is still filling, and deleting the latter makes that `Put`'s rename fail.
 
 `Inspect` holds the store write lock for the entire walk. Every `Get`, `Put`, `Exists`, and `Delete` through the same store waits for the scan, so the inspector is an administrative call, not a request-path one.
 

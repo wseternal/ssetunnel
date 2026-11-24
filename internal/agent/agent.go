@@ -344,11 +344,10 @@ func (a *Agent) InitModules(ctx context.Context, dataDir string) error {
 			return nil, fmt.Errorf("unmarshal object store request: %w", err)
 		}
 		req.ModuleID = moduleID // enforce authenticated caller identity
-		// The agent owns correlation IDs. Discard a caller-supplied one
+		// The agent owns correlation IDs: replace a caller-supplied one
 		// so a hand-written IPC client cannot collide with another
-		// module's in-flight request, then generate the ID here so the
-		// internal error path can report the same correlation ID.
-		req.RequestID = ""
+		// module's in-flight request, and generate it here so the
+		// internal error path reports the same correlation ID.
 		id, err := newObjectStoreRequestID()
 		if err != nil {
 			return nil, err
