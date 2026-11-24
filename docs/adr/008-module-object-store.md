@@ -55,7 +55,7 @@ The hash keeps platform filename rules out of the layout. The backend has these 
 - `Get` reads at most `MaxObjectSize + 1` bytes. It rejects an externally enlarged object.
 - A missing file maps to `ErrObjectNotFound`.
 - A read-write lock orders every operation against `Close`. `Close` waits for active calls and rejects new ones.
-- The backend trusts the operator-owned root. A local writer who can modify the root can retarget a module namespace. The `Lstat`-then-open pair in `Get` also has a time-of-check to time-of-use window. The root mode denies both cases to a non-owner.
+- The backend trusts the operator-owned root. A local writer who can modify the root can retarget a module namespace. The `Lstat` and open calls in `Get` also leave a check-to-use gap. The root mode denies both cases to a non-owner.
 
 ### 3. Transport
 
@@ -103,7 +103,7 @@ A failed control write fails the pending operation at once. The module does not 
 
 One `ObjectStoreHandler` serves each session. The control read loop performs decode, validation, and reassembly only. One worker goroutine per session performs backend disk calls. The worker queue holds eight operations. A full queue returns `busy`. Upload assemblies are keyed by module ID and request ID, so two modules cannot collide on a request ID. A one-minute ticker in the worker sweeps expired assemblies.
 
-A get request carries no payload. The handler rejects a get that has a nonzero sequence, a chunk count other than one, a false final flag, a nonzero size, a digest, or data.
+A get request carries no payload. The handler rejects a get that has a nonzero sequence, a chunk count other than one, a final flag set to false, a nonzero size, a digest, or data.
 
 Server-scoped object-store metrics count completed puts and gets, misses, backend errors, busy rejections, bytes moved, and average backend latency. The console exposes them to an admin at `GET /api/v1/metrics/objectstore` on the console port.
 
