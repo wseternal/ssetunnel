@@ -18,8 +18,8 @@ import (
 //   - GET /poll — blocks until a job is available or timeout
 //   - POST /result — extension submits the automation result
 type ExtensionServer struct {
-	jobs    *JobManager
-	server  *http.Server
+	jobs   *JobManager
+	server *http.Server
 }
 
 // NewExtensionServer creates an extension long-polling server backed by
@@ -88,11 +88,31 @@ func (s *ExtensionServer) handlePoll(w http.ResponseWriter, r *http.Request) {
 			s.jobs.Requeue(job.ID)
 			return
 		}
-		// Mark the job as running before sending to the extension.
-		s.jobs.MarkRunning(job.ID)
+		// Restore the attachment bytes before the job leaves the process. A job
+		// whose bytes cannot be read must fail here, not reach the extension.
+		req, err := s.jobs.Hydrate(r.Context(), job.Request)
+		if err != nil {
+			if r.Context().Err() != nil {
+				s.jobs.Requeue(job.ID)
+				return
+			}
+			log.Printf("aiproxy: job %s attachment unavailable: %v", job.ID, err)
+			s.jobs.Complete(job.ID, &AutomationResult{
+				Status: "error",
+				Error:  &AutomationError{Code: "FILE_UNAVAILABLE", Message: err.Error()},
+			})
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		// Mark the job as running before sending to the extension. A job that
+		// timed out during hydration is already terminal and is dropped here.
+		if !s.jobs.MarkRunning(job.ID) {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
 		writeJSON(w, http.StatusOK, pollResponse{
 			JobID:   job.ID,
-			Request: job.Request,
+			Request: req,
 		})
 	case <-time.After(timeout):
 		// No job available — return empty response with 204 No Content.
@@ -105,8 +125,8 @@ func (s *ExtensionServer) handlePoll(w http.ResponseWriter, r *http.Request) {
 
 // resultRequest is the JSON body for POST /result.
 type resultRequest struct {
-	JobID  string              `json:"job_id"`
-	Result *AutomationResult   `json:"result"`
+	JobID  string            `json:"job_id"`
+	Result *AutomationResult `json:"result"`
 }
 
 func (s *ExtensionServer) handleResult(w http.ResponseWriter, r *http.Request) {

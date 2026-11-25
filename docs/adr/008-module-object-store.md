@@ -11,7 +11,8 @@ Modules persist structured records through `sdk.DataStore` and the control tunne
 1. Store the bytes in `module_records`. This mixes structured records and binary data in one table.
 2. Get filesystem or database credentials. This breaks the rule that modules reach data only through the agent.
 
-`ai-automation-proxy` shows the gap. It removes attachment bytes from persisted job history today.
+`ai-automation-proxy` shows the gap. It drops attachment bytes from persisted job history and
+keeps them in memory only. This store holds them instead.
 
 ## Decision
 
@@ -139,6 +140,9 @@ This ADR confirms the same model for the object store. The agent overwrites the 
 - The backend needs no external service and no credentials.
 - Memory is bounded per request, per transfer, and per session.
 - `DataStore`, the schema, and the migration set stay unchanged.
+- `ai-automation-proxy` stores attachments here. The module gzips the bytes before `Put` when
+  that shrinks them and records the encoding in the job reference, so the transfer carries
+  compressed bytes without a protocol change.
 
 ### Negative
 
@@ -146,6 +150,9 @@ This ADR confirms the same model for the object store. The agent overwrites the 
 - V1 has no list, delete, retention, quota, replication, or cloud backend.
 - One shared IPC credential limits isolation to trusted modules.
 - Atomic replacement depends on platform rename semantics. The smoke evidence covers macOS only.
+- Attachment objects stay until an operator removes them: the SDK has no delete. The module
+  uses content-addressed keys (`file-<sha256>` or `file-<sha256>.gz`), so identical files share
+  one object.
 
 ## Rejected alternatives
 

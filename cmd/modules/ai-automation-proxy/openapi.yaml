@@ -26,7 +26,19 @@ paths:
               schema:
                 $ref: "#/components/schemas/SubmitResponse"
         "400":
-          description: Invalid request
+          description: Invalid request, including an invalid file payload
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "413":
+          description: File larger than the 4 MiB limit
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          description: Object storage is not configured or unreachable, so a file cannot be stored
           content:
             application/json:
               schema:
@@ -151,7 +163,13 @@ components:
 
     FilePayload:
       type: object
-      required: [name, mime_type, data_base64, byte_length]
+      description: >
+        A file attached to a job. A submit carries the bytes in
+        data_base64; the job then keeps only a reference to the object
+        store, and the extension poll restores data_base64. Files are
+        gzip-compressed on the agent-to-server transfer when that shrinks
+        them; the encoding field reports which form is stored.
+      required: [name, mime_type, byte_length]
       properties:
         name:
           type: string
@@ -159,9 +177,20 @@ components:
           type: string
         data_base64:
           type: string
-          description: Base64-encoded file bytes
+          description: Base64-encoded file bytes. Accepted on submit and restored in the extension poll.
         byte_length:
           type: integer
+          description: Decoded file size in bytes. The limit is 4 MiB.
+        object_key:
+          type: string
+          description: Object store key that holds the file bytes. Read-only reference.
+        sha256:
+          type: string
+          description: SHA-256 of the decoded file bytes, lowercase hex.
+        encoding:
+          type: string
+          enum: ["gzip"]
+          description: Encoding of the stored object. The field is absent when the bytes are stored as submitted.
 
     SubmitResponse:
       type: object
@@ -212,6 +241,10 @@ components:
 
     PollResponse:
       type: object
+      description: >
+        A job handed to the extension. The attachment is complete here:
+        data_base64 is restored from the object store before the response
+        is written.
       properties:
         job_id:
           type: string
