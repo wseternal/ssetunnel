@@ -26,7 +26,25 @@ paths:
               schema:
                 $ref: "#/components/schemas/SubmitResponse"
         "400":
-          description: Invalid request
+          description: Invalid request, including an invalid file payload
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "413":
+          description: >
+            The decoded file exceeds the 4 MiB limit (`FILE_TOO_LARGE`), or the
+            request body exceeds the 6 MiB cap (`BODY_TOO_LARGE`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          description: >
+            Object storage is not configured or unreachable, so a file cannot be
+            stored (`FILE_STORE_UNAVAILABLE`). This code belongs to submit only.
+            A job result reports `FILE_UNAVAILABLE` instead when a stored
+            attachment cannot be read at poll time.
           content:
             application/json:
               schema:
@@ -151,22 +169,71 @@ components:
 
     FilePayload:
       type: object
-      required: [name, mime_type, data_base64, byte_length]
+      description: >
+        A file on the wire. A submit and the extension poll both carry the
+        bytes in data_base64; the job record keeps FileRef instead. Files are
+        gzip-compressed on the agent-to-server transfer when that shrinks
+        them; the job's encoding field reports which form is stored.
+      required: [name, mime_type, byte_length, data_base64]
       properties:
         name:
           type: string
         mime_type:
           type: string
+          description: MIME type. The module accepts any non-empty value; the extension applies its own allowlist.
         data_base64:
           type: string
-          description: Base64-encoded file bytes
+          description: Base64-encoded file bytes. Required on submit and restored in the extension poll.
         byte_length:
           type: integer
+          description: Decoded file size in bytes, 1 byte to 4 MiB. Must equal the decoded base64 length.
+
+    FileRef:
+      type: object
+      description: >
+        The attachment reference a job keeps. The bytes live in the object
+        store under object_key; the extension poll restores data_base64.
+      required: [name, mime_type, byte_length, object_key, sha256]
+      properties:
+        name:
+          type: string
+        mime_type:
+          type: string
+        byte_length:
+          type: integer
+          description: Decoded file size in bytes.
+        object_key:
+          type: string
+          description: Object store key that holds the file bytes. Set by the module.
+        sha256:
+          type: string
+          description: SHA-256 of the decoded file bytes, lowercase hex. Set by the module.
+        encoding:
+          type: string
+          enum: ["gzip"]
+          description: Encoding of the stored object. The field is absent when the bytes are stored as submitted.
 
     SubmitResponse:
       type: object
       properties:
         job_id:
+          type: string
+
+    JobRecord:
+      type: object
+      description: >
+        The submitted request as the job stores it. The attachment is a
+        reference to the object store, not the bytes.
+      properties:
+        prompt:
+          type: string
+        file:
+          $ref: "#/components/schemas/FileRef"
+        provider_id:
+          type: string
+        timeout_ms:
+          type: integer
+        target_url:
           type: string
 
     Job:
@@ -178,7 +245,7 @@ components:
           type: string
           enum: [pending, running, completed, failed, timeout]
         request:
-          $ref: "#/components/schemas/SubmitRequest"
+          $ref: "#/components/schemas/JobRecord"
         result:
           $ref: "#/components/schemas/AutomationResult"
         created_at:
@@ -203,6 +270,12 @@ components:
           properties:
             code:
               type: string
+              description: >
+                Machine-readable code. `FILE_UNAVAILABLE` means the job's stored
+                attachment could not be read when the extension polled; resubmit
+                the job. It is distinct from the submit-side
+                `FILE_STORE_UNAVAILABLE`, which means object storage is not
+                configured or unreachable.
             message:
               type: string
             step:
@@ -212,6 +285,10 @@ components:
 
     PollResponse:
       type: object
+      description: >
+        A job handed to the extension. The attachment is complete here:
+        data_base64 is restored from the object store before the response
+        is written.
       properties:
         job_id:
           type: string

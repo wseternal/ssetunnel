@@ -19,8 +19,8 @@ const (
 )
 
 // persistedJob is the stored shape of a job. doneCh has no meaning outside the
-// process, and attachment bytes are dropped by snapshotJob, so the row stays
-// small enough to keep indefinitely.
+// process, and the attachment bytes live in the object store, so the row keeps
+// only the file reference and stays small enough to keep indefinitely.
 type persistedJob struct {
 	ID        string            `json:"id"`
 	Status    JobStatus         `json:"status"`
@@ -33,8 +33,9 @@ type persistedJob struct {
 // snapshotJob copies a job into its stored shape. Callers hold the manager
 // lock: the returned value must not observe later mutations.
 //
-// The attachment payload is redacted: history should not duplicate multi-megabyte
-// base64 blobs, and the bytes are only useful while the job is in flight.
+// The base64 payload is dropped: it duplicates bytes that the object store
+// already holds, and the reference fields identify them. The live request is
+// not modified; it carries the reference as well.
 func snapshotJob(job *Job) persistedJob {
 	req := job.Request
 	if req.File != nil {

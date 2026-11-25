@@ -2,6 +2,8 @@ package aiproxy
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -48,7 +50,10 @@ type submitResponse struct {
 	JobID string `json:"job_id"`
 }
 
-const maxProxyBodyBytes = 4 << 20 // 4 MiB
+// maxProxyBodyBytes caps one client or extension request body. It covers the
+// base64 form of a 4 MiB attachment (5.33 MiB) plus the JSON envelope; a
+// smaller cap would make the documented file limit unreachable.
+const maxProxyBodyBytes = 6 << 20
 
 // maxClientWaitTimeout caps how long a client can hold a connection
 // waiting for a job result (W3 fix: prevent indefinite connection pinning).
@@ -63,6 +68,14 @@ func (h *ClientHandler) handleSubmit(w http.ResponseWriter, r *http.Request) {
 
 	var req submitRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		// A body over the cap reaches the decoder as a MaxBytesError. Report it
+		// as the size failure it is, not as malformed JSON.
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			writeError(w, http.StatusRequestEntityTooLarge, "BODY_TOO_LARGE",
+				fmt.Sprintf("request body exceeds %d bytes", maxProxyBodyBytes))
+			return
+		}
 		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid JSON: "+err.Error())
 		return
 	}
@@ -71,7 +84,7 @@ func (h *ClientHandler) handleSubmit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	job, err := h.jobs.Submit(AutomationRequest{
+	job, err := h.jobs.Submit(r.Context(), AutomationRequest{
 		Prompt:     req.Prompt,
 		File:       req.File,
 		ProviderID: req.ProviderID,
@@ -79,7 +92,7 @@ func (h *ClientHandler) handleSubmit(w http.ResponseWriter, r *http.Request) {
 		TargetURL:  req.TargetURL,
 	})
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", err.Error())
+		writeSubmitError(w, err)
 		return
 	}
 
@@ -137,4 +150,20 @@ func writeError(w http.ResponseWriter, status int, code, message string) {
 	resp.Error.Code = code
 	resp.Error.Message = message
 	writeJSON(w, status, resp)
+}
+
+// writeSubmitError maps an attachment failure to its client status. A submit
+// fails before a job exists, so the caller learns the reason instead of polling
+// a job that never had usable bytes.
+func writeSubmitError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, errInvalidFile):
+		writeError(w, http.StatusBadRequest, "INVALID_FILE", err.Error())
+	case errors.Is(err, errFileTooLarge):
+		writeError(w, http.StatusRequestEntityTooLarge, "FILE_TOO_LARGE", err.Error())
+	case errors.Is(err, errFileStoreUnavailable):
+		writeError(w, http.StatusServiceUnavailable, "FILE_STORE_UNAVAILABLE", err.Error())
+	default:
+		writeError(w, http.StatusInternalServerError, "INTERNAL", err.Error())
+	}
 }

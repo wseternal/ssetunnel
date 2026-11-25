@@ -65,8 +65,19 @@ func main() {
 		log.Printf("aiproxy: job history persisted via data store")
 	}
 
+	// Attachment bytes go to the server object store, which the operator enables
+	// with --object-store-dir. A missing client rejects file submissions; jobs
+	// without a file keep working.
+	var objects sdk.ObjectStore
+	if store, err := sdk.NewObjectStore(); err != nil {
+		log.Printf("aiproxy: object store unavailable, file attachments are rejected: %v", err)
+	} else {
+		objects = store
+		log.Printf("aiproxy: attachments stored in the module object store")
+	}
+
 	// Create job manager shared by both HTTP surfaces.
-	jobs := aiproxy.NewJobManager(*jobTimeout, dataStore, m.ModuleID)
+	jobs := aiproxy.NewJobManager(*jobTimeout, dataStore, objects, m.ModuleID)
 	defer jobs.Close()
 
 	// Start the extension long-polling server on a separate port.

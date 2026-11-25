@@ -36,12 +36,20 @@ type AutomationRequest struct {
 	TargetURL  string       `json:"target_url,omitempty"`
 }
 
-// FilePayload is a base64-encoded file attached to the automation request.
+// FilePayload is a file attached to the automation request. A submit supplies
+// the bytes as base64 and leaves the reference fields empty. A stored job keeps
+// only the reference: object_key names the bytes in the module object store,
+// sha256 names their content, and encoding says whether the stored object is
+// gzip-compressed. The extension poll restores data_base64 from that object, so
+// the extension sees the original shape.
 type FilePayload struct {
 	Name       string `json:"name"`
 	MimeType   string `json:"mime_type"`
-	DataBase64 string `json:"data_base64"`
+	DataBase64 string `json:"data_base64,omitempty"`
 	ByteLength int    `json:"byte_length"`
+	ObjectKey  string `json:"object_key,omitempty"`
+	SHA256     string `json:"sha256,omitempty"`
+	Encoding   string `json:"encoding,omitempty"`
 }
 
 // AutomationResult is the extension-returned job result.
@@ -85,7 +93,13 @@ type JobManager struct {
 
 	// store persists terminal jobs so history outlives the in-memory
 	// retention window and process restarts. Nil means memory-only.
-	store    *sdk.DataStore
+	store *sdk.DataStore
+
+	// objects holds attachment bytes outside the job record, so a multi-megabyte
+	// file never lives in the in-memory job or the persisted row. Nil rejects
+	// submissions that carry a file.
+	objects sdk.ObjectStore
+
 	moduleID string
 
 	persistWG sync.WaitGroup
@@ -93,9 +107,11 @@ type JobManager struct {
 }
 
 // NewJobManager creates a job manager with the given default timeout.
-// A nil store keeps jobs in memory only, which is what happens when the
-// data store is not reachable at startup.
-func NewJobManager(timeout time.Duration, store *sdk.DataStore, moduleID string) *JobManager {
+// A nil store keeps terminal job history in memory only, which is what happens
+// when the data store is not reachable at startup. A nil objects keeps the
+// module usable for prompt-only jobs; a submit that carries a file is rejected
+// because the bytes have nowhere to go.
+func NewJobManager(timeout time.Duration, store *sdk.DataStore, objects sdk.ObjectStore, moduleID string) *JobManager {
 	if timeout <= 0 {
 		timeout = 5 * time.Minute
 	}
@@ -105,6 +121,7 @@ func NewJobManager(timeout time.Duration, store *sdk.DataStore, moduleID string)
 		timeout:      timeout,
 		retentionTTL: 10 * time.Minute,
 		store:        store,
+		objects:      objects,
 		moduleID:     moduleID,
 	}
 }
@@ -158,11 +175,61 @@ func (m *JobManager) writeSnapshot(snap *persistedJob) {
 	}()
 }
 
-// Submit creates a new job and enqueues it for the extension.
-// Returns the job ID.
-func (m *JobManager) Submit(req AutomationRequest) (*Job, error) {
+// storeFile moves the attachment bytes into the object store and returns the
+// reference the job keeps. A missing store or a failed put rejects the
+// submission: the module has no memory-only path for file bytes.
+func (m *JobManager) storeFile(ctx context.Context, file *FilePayload) (*FilePayload, error) {
+	if m.objects == nil {
+		return nil, fmt.Errorf("%w: object store is not configured", errFileStoreUnavailable)
+	}
+	data, ref, err := prepareFile(file)
+	if err != nil {
+		return nil, err
+	}
+
+	putCtx, cancel := context.WithTimeout(ctx, fileOpTimeout)
+	defer cancel()
+	if err := m.objects.Put(putCtx, m.moduleID, ref.ObjectKey, data); err != nil {
+		log.Printf("aiproxy: store attachment %q as %s: %v", ref.Name, ref.ObjectKey, err)
+		return nil, fmt.Errorf("%w: %w", errFileStoreUnavailable, err)
+	}
+	log.Printf("aiproxy: attachment %q stored as %s (%d bytes, encoding=%q)",
+		ref.Name, ref.ObjectKey, ref.ByteLength, ref.Encoding)
+	return ref, nil
+}
+
+// Hydrate restores the attachment bytes for a job that is about to reach the
+// extension. The extension contract carries base64 inline, so the bytes are
+// read back from the object store and verified before use.
+func (m *JobManager) Hydrate(ctx context.Context, req AutomationRequest) (AutomationRequest, error) {
+	if req.File == nil || req.File.ObjectKey == "" {
+		return req, nil
+	}
+	getCtx, cancel := context.WithTimeout(ctx, hydrateTimeout)
+	defer cancel()
+	file, err := loadFile(getCtx, m.objects, m.moduleID, req.File)
+	if err != nil {
+		return req, err
+	}
+	req.File = file
+	return req, nil
+}
+
+// Submit stores any attachment, creates a new job, and enqueues it for the
+// extension. The file is stored before the job is enqueued, so a job the
+// extension can see always has its bytes in the object store.
+func (m *JobManager) Submit(ctx context.Context, req AutomationRequest) (*Job, error) {
 	id := generateJobID()
 	now := time.Now().UTC()
+
+	if req.File != nil {
+		ref, err := m.storeFile(ctx, req.File)
+		if err != nil {
+			return nil, err
+		}
+		req.File = ref
+	}
+
 	job := &Job{
 		ID:        id,
 		Status:    JobPending,
@@ -192,7 +259,12 @@ func (m *JobManager) Submit(req AutomationRequest) (*Job, error) {
 		close(job.doneCh)
 		snap := m.schedulePersist(job)
 		m.mu.Unlock()
-		log.Printf("aiproxy: job %s rejected (queue full)", id)
+		if req.File != nil {
+			log.Printf("aiproxy: job %s rejected (queue full); attachment %s stays in the object store",
+				id, req.File.ObjectKey)
+		} else {
+			log.Printf("aiproxy: job %s rejected (queue full)", id)
+		}
 		m.writeSnapshot(snap)
 		m.scheduleEviction(id)
 	}
@@ -250,17 +322,28 @@ func (m *JobManager) PendingChan() <-chan *Job {
 	return m.pending
 }
 
-// MarkRunning transitions a job from pending to running.
-// Called by the long-poll server when the extension picks up the job.
-func (m *JobManager) MarkRunning(id string) {
+// MarkRunning transitions a job from pending to running and reports whether it
+// did, plus the status observed under the same lock. Called by the long-poll
+// server when the extension picks up the job. A job that reached a terminal
+// state while its attachment was being read stays terminal and must not be
+// handed to the extension.
+func (m *JobManager) MarkRunning(id string) (bool, JobStatus) {
 	m.mu.Lock()
 	job := m.jobs[id]
-	if job != nil && job.Status == JobPending {
+	var status JobStatus
+	if job != nil {
+		status = job.Status
+	}
+	ran := job != nil && status == JobPending
+	if ran {
 		job.Status = JobRunning
 		job.UpdatedAt = time.Now().UTC()
 	}
 	m.mu.Unlock()
-	log.Printf("aiproxy: job %s running", id)
+	if ran {
+		log.Printf("aiproxy: job %s running", id)
+	}
+	return ran, status
 }
 
 // Requeue moves a job back to pending if it was not delivered to the

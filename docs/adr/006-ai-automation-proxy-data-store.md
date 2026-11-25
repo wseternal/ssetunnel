@@ -132,9 +132,17 @@ its own `module_id`. Semantics:
 - **Terminal states only.** `completed`, `failed`, and `timeout` are written once; `pending`
   and `running` stay in memory. In-flight jobs are not resumable after a restart, so writing
   intermediate states would only create rows that no reader can act on.
-- **Attachment bytes are redacted.** The stored request keeps `name`, `mime_type`, and
-  `byte_length` but clears `file.data_base64`. History must not duplicate multi-megabyte
-  blobs; the bytes are only useful while the job is in flight.
+- **Attachment bytes live in the object store.** A submit requires `byte_length`, checks the
+  4 MiB limit, gzips the bytes when that shrinks them, and writes them to the module object
+  store (ADR-008). The job keeps `object_key`, `sha256`, and `encoding` plus the file
+  metadata, never the bytes. The extension poll reads the object back and restores
+  `data_base64`, so the extension contract does not change. A poll makes up to three read
+  attempts on transport errors inside a 5-second delivery budget; a missing object or a
+  digest mismatch fails at once. A submit that carries a file fails when object storage is
+  unavailable; the module has no memory-only path for attachment bytes.
+- **MIME filtering is extension-only.** The module checks file shape and size, not the
+  extension's allowlist. A submit can succeed for a type the extension rejects at dispatch,
+  and that object then stays in the store, which has no delete.
 - **Read-through on miss.** `GET /jobs/{id}` checks memory first (in-flight work plus the
   10-minute retention window), then reads the row back. A stored non-terminal status can
   only come from a process that stopped mid-job, so it is reported as `failed` with code
@@ -218,7 +226,8 @@ unchanged. Long-polling is additive and only active when explicitly enabled.
   under any `module_id`. Mitigation: acceptable for trusted modules; add
   `module_id` validation or row-level security if untrusted modules are
   introduced.
-- Job payloads (prompts, file attachments) are transmitted in plaintext
-  through the control tunnel. The tunnel itself is encrypted (HTTPS to
-  server, yamux over HTTP), so this is not a concern unless the agent's
-  host is compromised.
+- Job payloads and attachment bytes travel through the control tunnel. Attachment bytes are
+  gzip-compressed before the object-store transfer but not encrypted, and stored objects are
+  plaintext files under the operator-owned `0700` root. The tunnel itself is encrypted
+  (HTTPS to server, yamux over HTTP), so this is not a concern unless the agent's host is
+  compromised.

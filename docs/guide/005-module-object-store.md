@@ -121,6 +121,29 @@ A module that exceeds the transfer slots receives `busy` for the extra call. The
 
 The SDK maps `not_found` to `sdk.ErrObjectNotFound`. Other codes become plain errors.
 
+### AI automation proxy integration
+
+`ai-automation-proxy` stores attachment bytes here. Start the server with
+`--object-store-dir` before you submit a job with a file; a submit that carries a file fails
+with `FILE_STORE_UNAVAILABLE` when storage is disabled.
+
+The module applies these rules:
+
+- One attachment is limited to 4 MiB of decoded bytes. An empty, malformed, or oversized file is
+  rejected: `INVALID_FILE` (400) or `FILE_TOO_LARGE` (413).
+- The bytes are gzip-compressed when that shrinks them. The stored object is then smaller than
+  the file, and `file.encoding` in the job says `gzip`; otherwise the bytes are stored as
+  submitted and `file.encoding` is absent.
+- The object key is content-addressed: `file-<sha256-hex>` or `file-<sha256-hex>.gz`. Two jobs
+  with the same file share one object.
+- The job record holds `object_key`, `sha256`, and `byte_length`, never the base64 payload.
+- The extension poll reads the object, checks the digest and length, and restores
+  `data_base64`. A transport error is retried within a 5-second delivery budget, with at most
+  three read attempts in total; a missing object or a failed check rejects the job with
+  `FILE_UNAVAILABLE`.
+- MIME filtering happens in the extension, not in the module. A submit can succeed for a type
+  the extension rejects at dispatch, and that object remains until an operator removes it.
+
 ## Filesystem layout
 
 ```text
@@ -231,9 +254,6 @@ This version does not provide these items:
 - S3 or any network object store.
 - Replication or multi-server consistency.
 - Console or frontend behavior.
-- An `ai-automation-proxy` integration.
-
-The `ai-automation-proxy` module keeps its current behavior. It is a possible future consumer only.
 
 ## Evidence limits
 
