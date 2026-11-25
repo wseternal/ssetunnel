@@ -129,7 +129,8 @@ with `FILE_STORE_UNAVAILABLE` when storage is disabled.
 
 The module applies these rules:
 
-- One attachment is limited to 4 MiB of decoded bytes.
+- One attachment is limited to 4 MiB of decoded bytes. An empty, malformed, or oversized file is
+  rejected: `INVALID_FILE` (400) or `FILE_TOO_LARGE` (413).
 - The bytes are gzip-compressed when that shrinks them. The stored object is then smaller than
   the file, and `file.encoding` in the job says `gzip`; otherwise the bytes are stored as
   submitted and `file.encoding` is absent.
