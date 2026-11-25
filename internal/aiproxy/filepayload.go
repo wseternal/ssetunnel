@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"time"
 
 	"github.com/wseternal/ssetunnel/sdk"
@@ -26,6 +27,20 @@ const gzipEncoding = "gzip"
 // fileOpTimeout bounds one object store round trip. A submit runs inside the
 // agent's 30-second module exchange, so its put must finish inside that window.
 const fileOpTimeout = 20 * time.Second
+
+// hydrateTimeout bounds the delivery path: one object read, the integrity
+// checks, and the response write. The extension aborts its poll fetch 10
+// seconds after the advertised window, so hydration keeps a budget of its own
+// instead of reusing the submit-side timeout.
+const hydrateTimeout = 5 * time.Second
+
+// maxFileReadAttempts bounds how many times one delivery attempt reads the
+// object. A missing object is permanent; transport errors are worth another try.
+const maxFileReadAttempts = 3
+
+// fileRetryDelay is the pause before the second read attempt. Each further
+// attempt waits one more delay.
+const fileRetryDelay = 500 * time.Millisecond
 
 // Typed attachment failures. The client handler maps each to one status.
 var (
@@ -66,7 +81,10 @@ func prepareFile(file *FilePayload) (data []byte, ref *FilePayload, err error) {
 	if len(raw) > maxFileBytes {
 		return nil, nil, fmt.Errorf("%w: %d bytes (max %d)", errFileTooLarge, len(raw), maxFileBytes)
 	}
-	if file.ByteLength > 0 && file.ByteLength != len(raw) {
+	if file.ByteLength <= 0 {
+		return nil, nil, fmt.Errorf("%w: byte_length is required", errInvalidFile)
+	}
+	if file.ByteLength != len(raw) {
 		return nil, nil, fmt.Errorf("%w: byte_length %d does not match %d decoded bytes",
 			errInvalidFile, file.ByteLength, len(raw))
 	}
@@ -113,9 +131,15 @@ func loadFile(ctx context.Context, store sdk.ObjectStore, moduleID string, ref *
 	if ref.ObjectKey == "" {
 		return nil, fmt.Errorf("%w: missing object key", errInvalidFile)
 	}
-	data, err := store.Get(ctx, moduleID, ref.ObjectKey)
+	if ref.SHA256 == "" || ref.ByteLength <= 0 {
+		// Every reference comes from prepareFile, which sets both fields. A
+		// reference without them is corrupt, and skipping the checks would
+		// weaken the verified-before-use guarantee.
+		return nil, fmt.Errorf("file object %s is missing its digest or length", ref.ObjectKey)
+	}
+	data, err := readObject(ctx, store, moduleID, ref.ObjectKey)
 	if err != nil {
-		return nil, fmt.Errorf("read file object %s: %w", ref.ObjectKey, err)
+		return nil, err
 	}
 
 	if ref.Encoding == gzipEncoding {
@@ -127,16 +151,14 @@ func loadFile(ctx context.Context, store sdk.ObjectStore, moduleID string, ref *
 		return nil, fmt.Errorf("unknown file encoding %q", ref.Encoding)
 	}
 
-	if ref.SHA256 != "" {
-		sum := sha256.Sum256(data)
-		if hex.EncodeToString(sum[:]) != ref.SHA256 {
-			return nil, fmt.Errorf("file object %s digest mismatch", ref.ObjectKey)
-		}
+	sum := sha256.Sum256(data)
+	if hex.EncodeToString(sum[:]) != ref.SHA256 {
+		return nil, fmt.Errorf("file object %s digest mismatch", ref.ObjectKey)
 	}
 	if len(data) > maxFileBytes {
 		return nil, fmt.Errorf("%w: stored file is %d bytes (max %d)", errFileTooLarge, len(data), maxFileBytes)
 	}
-	if ref.ByteLength > 0 && ref.ByteLength != len(data) {
+	if ref.ByteLength != len(data) {
 		return nil, fmt.Errorf("file object %s length mismatch: got %d, want %d",
 			ref.ObjectKey, len(data), ref.ByteLength)
 	}
@@ -166,4 +188,40 @@ func gunzipBytes(data []byte) ([]byte, error) {
 		return nil, fmt.Errorf("%w: decompressed file exceeds %d bytes", errFileTooLarge, maxFileBytes)
 	}
 	return raw, nil
+}
+
+// readObject reads one object, retrying transport failures a bounded number of
+// times. A missing object is permanent: no retry can bring it back.
+func readObject(ctx context.Context, store sdk.ObjectStore, moduleID, key string) ([]byte, error) {
+	var lastErr error
+	for attempt := 1; attempt <= maxFileReadAttempts; attempt++ {
+		data, err := store.Get(ctx, moduleID, key)
+		if err == nil {
+			return data, nil
+		}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
+		if isPermanentStoreError(err) {
+			return nil, fmt.Errorf("read file object %s: %w", key, err)
+		}
+		lastErr = err
+		if attempt == maxFileReadAttempts {
+			break
+		}
+		log.Printf("aiproxy: read file object %s attempt %d/%d: %v", key, attempt, maxFileReadAttempts, err)
+		select {
+		case <-time.After(time.Duration(attempt) * fileRetryDelay):
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	return nil, fmt.Errorf("read file object %s after %d attempts: %w", key, maxFileReadAttempts, lastErr)
+}
+
+// isPermanentStoreError reports whether a store error cannot be fixed by
+// retrying. Only a missing object qualifies; transport and timeout errors are
+// worth another attempt.
+func isPermanentStoreError(err error) bool {
+	return errors.Is(err, sdk.ErrObjectNotFound)
 }

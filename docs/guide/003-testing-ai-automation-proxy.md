@@ -281,7 +281,8 @@ Attachment bytes go to the server object store, so the server must run with a st
 ./local.sh server --disable-auth --object-store-dir /tmp/ssetunnel-objects
 ```
 
-Then send the file as base64. The limit is 4 MiB of decoded bytes.
+Then send the file as base64. The limit is 4 MiB of decoded bytes, and `byte_length` is
+required: it must equal the decoded size.
 
 ```bash
 BASE64=$(base64 -i /tmp/report.txt | tr -d '\n')
@@ -293,7 +294,8 @@ curl -X POST http://localhost:8081/api/v1/modules/invoke/test-agent/com.wseterna
 The module gzips the bytes when that shrinks them and stores them under a content-addressed
 key. `GET /jobs/{id}` then shows `file.object_key`, `file.sha256`, and `file.byte_length`
 instead of `file.data_base64`. Without `--object-store-dir`, the submit returns
-`503 FILE_STORE_UNAVAILABLE`.
+`503 FILE_STORE_UNAVAILABLE`. A job whose stored attachment cannot be read later fails with
+`FILE_UNAVAILABLE`; the two codes describe different conditions.
 
 ### 4.5 Poll for Job Status
 

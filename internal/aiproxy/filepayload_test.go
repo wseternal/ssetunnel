@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"testing"
 	"time"
@@ -130,24 +131,46 @@ func TestPrepareFile_RejectsOversize(t *testing.T) {
 	}
 }
 
-func TestPrepareFile_FillsMissingByteLength(t *testing.T) {
-	file := &FilePayload{
-		Name:       "a.txt",
-		MimeType:   "text/plain",
-		DataBase64: base64.StdEncoding.EncodeToString([]byte("hello")),
-	}
-	_, ref, err := prepareFile(file)
-	if err != nil {
-		t.Fatalf("prepareFile: %v", err)
-	}
-	if ref.ByteLength != 5 {
-		t.Errorf("byte_length = %d, want 5", ref.ByteLength)
+// TestPrepareFile_RequiresByteLength pins byte_length as a submit requirement,
+// matching the published schema and the extension's positive-integer check.
+func TestPrepareFile_RequiresByteLength(t *testing.T) {
+	encoded := base64.StdEncoding.EncodeToString([]byte("hello"))
+	for _, length := range []int{0, -1} {
+		file := &FilePayload{
+			Name:       "a.txt",
+			MimeType:   "text/plain",
+			DataBase64: encoded,
+			ByteLength: length,
+		}
+		if _, _, err := prepareFile(file); !errors.Is(err, errInvalidFile) {
+			t.Errorf("byte_length %d: error = %v, want %v", length, err, errInvalidFile)
+		}
 	}
 }
 
-func TestFileOpTimeoutStaysBelowModuleExchange(t *testing.T) {
+func TestFileTimeoutsStayBelowModuleExchange(t *testing.T) {
 	if fileOpTimeout >= 30*time.Second {
 		t.Errorf("fileOpTimeout = %v, must stay below the 30 s module exchange", fileOpTimeout)
+	}
+	if hydrateTimeout >= 10*time.Second {
+		t.Errorf("hydrateTimeout = %v, must leave room under the extension's 10 s post-window budget", hydrateTimeout)
+	}
+	// The retry backoff alone must not exhaust the hydrate budget.
+	var backoff time.Duration
+	for attempt := 1; attempt < maxFileReadAttempts; attempt++ {
+		backoff += time.Duration(attempt) * fileRetryDelay
+	}
+	if backoff >= hydrateTimeout {
+		t.Errorf("retry backoff %v does not fit in hydrateTimeout %v", backoff, hydrateTimeout)
+	}
+}
+
+func TestIsPermanentStoreError(t *testing.T) {
+	if !isPermanentStoreError(fmt.Errorf("get object: %w", sdk.ErrObjectNotFound)) {
+		t.Error("a wrapped ErrObjectNotFound must be permanent")
+	}
+	if isPermanentStoreError(errors.New("ipc: connection reset")) {
+		t.Error("a transport error must stay retryable")
 	}
 }
 

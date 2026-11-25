@@ -137,7 +137,11 @@ The module applies these rules:
 - The object key is content-addressed: `file-<sha256-hex>` or `file-<sha256-hex>.gz`. Two jobs
   with the same file share one object.
 - The job record holds `object_key`, `sha256`, and `byte_length`, never the base64 payload.
-- The extension poll reads the object, checks the digest, and restores `data_base64`.
+- The extension poll reads the object, checks the digest and length, and restores
+  `data_base64`. A transport error is retried up to three attempts inside a 5-second delivery
+  budget; a missing object or a failed check rejects the job with `FILE_UNAVAILABLE`.
+- MIME filtering happens in the extension, not in the module. A submit can succeed for a type
+  the extension rejects at dispatch, and that object remains until an operator removes it.
 
 ## Filesystem layout
 

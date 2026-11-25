@@ -191,7 +191,7 @@ func (m *JobManager) storeFile(ctx context.Context, file *FilePayload) (*FilePay
 	defer cancel()
 	if err := m.objects.Put(putCtx, m.moduleID, ref.ObjectKey, data); err != nil {
 		log.Printf("aiproxy: store attachment %q as %s: %v", ref.Name, ref.ObjectKey, err)
-		return nil, fmt.Errorf("%w: %v", errFileStoreUnavailable, err)
+		return nil, fmt.Errorf("%w: %w", errFileStoreUnavailable, err)
 	}
 	log.Printf("aiproxy: attachment %q stored as %s (%d bytes, encoding=%q)",
 		ref.Name, ref.ObjectKey, ref.ByteLength, ref.Encoding)
@@ -205,7 +205,7 @@ func (m *JobManager) Hydrate(ctx context.Context, req AutomationRequest) (Automa
 	if req.File == nil || req.File.ObjectKey == "" {
 		return req, nil
 	}
-	getCtx, cancel := context.WithTimeout(ctx, fileOpTimeout)
+	getCtx, cancel := context.WithTimeout(ctx, hydrateTimeout)
 	defer cancel()
 	file, err := loadFile(getCtx, m.objects, m.moduleID, req.File)
 	if err != nil {
@@ -259,7 +259,12 @@ func (m *JobManager) Submit(ctx context.Context, req AutomationRequest) (*Job, e
 		close(job.doneCh)
 		snap := m.schedulePersist(job)
 		m.mu.Unlock()
-		log.Printf("aiproxy: job %s rejected (queue full)", id)
+		if req.File != nil {
+			log.Printf("aiproxy: job %s rejected (queue full); attachment %s stays in the object store",
+				id, req.File.ObjectKey)
+		} else {
+			log.Printf("aiproxy: job %s rejected (queue full)", id)
+		}
 		m.writeSnapshot(snap)
 		m.scheduleEviction(id)
 	}
@@ -318,13 +323,18 @@ func (m *JobManager) PendingChan() <-chan *Job {
 }
 
 // MarkRunning transitions a job from pending to running and reports whether it
-// did. Called by the long-poll server when the extension picks up the job. A
-// job that reached a terminal state while its attachment was being read stays
-// terminal and must not be handed to the extension.
-func (m *JobManager) MarkRunning(id string) bool {
+// did, plus the status observed under the same lock. Called by the long-poll
+// server when the extension picks up the job. A job that reached a terminal
+// state while its attachment was being read stays terminal and must not be
+// handed to the extension.
+func (m *JobManager) MarkRunning(id string) (bool, JobStatus) {
 	m.mu.Lock()
 	job := m.jobs[id]
-	ran := job != nil && job.Status == JobPending
+	var status JobStatus
+	if job != nil {
+		status = job.Status
+	}
+	ran := job != nil && status == JobPending
 	if ran {
 		job.Status = JobRunning
 		job.UpdatedAt = time.Now().UTC()
@@ -333,7 +343,7 @@ func (m *JobManager) MarkRunning(id string) bool {
 	if ran {
 		log.Printf("aiproxy: job %s running", id)
 	}
-	return ran
+	return ran, status
 }
 
 // Requeue moves a job back to pending if it was not delivered to the

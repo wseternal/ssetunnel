@@ -10,6 +10,10 @@ import (
 	"time"
 )
 
+// fileUnavailableMessage is what a client sees when a job's stored attachment
+// cannot be read. The detail, including the object key, stays in the server log.
+const fileUnavailableMessage = "file attachment is unavailable; resubmit the job"
+
 // ExtensionServer serves HTTP long-polling endpoints for the WXT browser
 // extension. The extension connects to this server to receive pending
 // automation jobs and return results.
@@ -99,14 +103,18 @@ func (s *ExtensionServer) handlePoll(w http.ResponseWriter, r *http.Request) {
 			log.Printf("aiproxy: job %s attachment unavailable: %v", job.ID, err)
 			s.jobs.Complete(job.ID, &AutomationResult{
 				Status: "error",
-				Error:  &AutomationError{Code: "FILE_UNAVAILABLE", Message: err.Error()},
+				Error: &AutomationError{
+					Code:    "FILE_UNAVAILABLE",
+					Message: fileUnavailableMessage,
+				},
 			})
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
 		// Mark the job as running before sending to the extension. A job that
 		// timed out during hydration is already terminal and is dropped here.
-		if !s.jobs.MarkRunning(job.ID) {
+		if ok, status := s.jobs.MarkRunning(job.ID); !ok {
+			log.Printf("aiproxy: job %s not delivered (status=%s)", job.ID, status)
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}

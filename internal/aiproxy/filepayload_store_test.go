@@ -113,6 +113,37 @@ func TestHydrateDetectsCorruptObject(t *testing.T) {
 	}
 }
 
+// TestLoadFileRequiresIntegrityFields proves a reference without the digest or
+// length is rejected instead of skipping verification.
+func TestLoadFileRequiresIntegrityFields(t *testing.T) {
+	manager, store := newTestManager(t)
+	job, err := manager.Submit(context.Background(), AutomationRequest{
+		Prompt: "summarise",
+		File:   textFile(t, "a.txt", []byte("original bytes")),
+	})
+	if err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	ref := *job.Request.File
+
+	cases := []struct {
+		name   string
+		mutate func(*FilePayload)
+	}{
+		{name: "missing digest", mutate: func(r *FilePayload) { r.SHA256 = "" }},
+		{name: "missing length", mutate: func(r *FilePayload) { r.ByteLength = 0 }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			candidate := ref
+			tc.mutate(&candidate)
+			if _, err := loadFile(context.Background(), store, testModuleID, &candidate); err == nil {
+				t.Error("loadFile accepted a reference without integrity fields")
+			}
+		})
+	}
+}
+
 // TestSubmitAndPollRoundTrip drives the client and extension HTTP surfaces with
 // the real object store and asserts the extension sees the original payload.
 func TestSubmitAndPollRoundTrip(t *testing.T) {
@@ -183,6 +214,15 @@ func TestPollFailsJobWithUnreadableAttachment(t *testing.T) {
 	}
 	if failed.Result == nil || failed.Result.Error == nil || failed.Result.Error.Code != "FILE_UNAVAILABLE" {
 		t.Errorf("result = %+v, want FILE_UNAVAILABLE", failed.Result)
+	}
+	if failed.Result != nil && failed.Result.Error != nil {
+		const generic = "file attachment is unavailable; resubmit the job"
+		if failed.Result.Error.Message != generic {
+			t.Errorf("message = %q, want the generic %q", failed.Result.Error.Message, generic)
+		}
+		if key := job.Request.File.ObjectKey; key != "" && strings.Contains(failed.Result.Error.Message, key) {
+			t.Error("message leaks the object key")
+		}
 	}
 }
 
