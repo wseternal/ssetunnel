@@ -82,7 +82,7 @@ func prepareFile(file *FilePayload) (data []byte, ref *FilePayload, err error) {
 		return nil, nil, fmt.Errorf("%w: %d bytes (max %d)", errFileTooLarge, len(raw), maxFileBytes)
 	}
 	if file.ByteLength <= 0 {
-		return nil, nil, fmt.Errorf("%w: byte_length is required", errInvalidFile)
+		return nil, nil, fmt.Errorf("%w: byte_length must be a positive integer", errInvalidFile)
 	}
 	if file.ByteLength != len(raw) {
 		return nil, nil, fmt.Errorf("%w: byte_length %d does not match %d decoded bytes",
