@@ -58,6 +58,11 @@ func prepareFile(file *FilePayload) (data []byte, ref *FilePayload, err error) {
 	if decodeErr != nil {
 		return nil, nil, fmt.Errorf("%w: data_base64 is not valid base64", errInvalidFile)
 	}
+	if len(raw) == 0 {
+		// The extension requires a positive byte length, so an empty file would
+		// only store an object that no job can use.
+		return nil, nil, fmt.Errorf("%w: file is empty", errInvalidFile)
+	}
 	if len(raw) > maxFileBytes {
 		return nil, nil, fmt.Errorf("%w: %d bytes (max %d)", errFileTooLarge, len(raw), maxFileBytes)
 	}

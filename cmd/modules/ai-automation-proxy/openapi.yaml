@@ -180,7 +180,7 @@ components:
           description: Base64-encoded file bytes. Accepted on submit and restored in the extension poll.
         byte_length:
           type: integer
-          description: Decoded file size in bytes. The limit is 4 MiB.
+          description: Decoded file size in bytes, 1 byte to 4 MiB.
         object_key:
           type: string
           description: Object store key that holds the file bytes. Read-only reference.

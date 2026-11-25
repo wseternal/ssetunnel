@@ -190,6 +190,7 @@ func (m *JobManager) storeFile(ctx context.Context, file *FilePayload) (*FilePay
 	putCtx, cancel := context.WithTimeout(ctx, fileOpTimeout)
 	defer cancel()
 	if err := m.objects.Put(putCtx, m.moduleID, ref.ObjectKey, data); err != nil {
+		log.Printf("aiproxy: store attachment %q as %s: %v", ref.Name, ref.ObjectKey, err)
 		return nil, fmt.Errorf("%w: %v", errFileStoreUnavailable, err)
 	}
 	log.Printf("aiproxy: attachment %q stored as %s (%d bytes, encoding=%q)",

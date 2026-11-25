@@ -102,6 +102,11 @@ func TestPrepareFile_RejectsInvalidInput(t *testing.T) {
 			file: &FilePayload{Name: "a.txt", MimeType: "text/plain", DataBase64: valid, ByteLength: 4},
 			want: errInvalidFile,
 		},
+		{
+			name: "empty file",
+			file: &FilePayload{Name: "a.txt", MimeType: "text/plain", DataBase64: "", ByteLength: 0},
+			want: errInvalidFile,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

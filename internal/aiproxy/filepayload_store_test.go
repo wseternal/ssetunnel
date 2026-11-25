@@ -155,6 +155,37 @@ func TestSubmitAndPollRoundTrip(t *testing.T) {
 	}
 }
 
+// TestPollFailsJobWithUnreadableAttachment proves a job whose object cannot be
+// verified never reaches the extension.
+func TestPollFailsJobWithUnreadableAttachment(t *testing.T) {
+	manager, store := newTestManager(t)
+	job, err := manager.Submit(context.Background(), AutomationRequest{
+		Prompt: "summarise",
+		File:   textFile(t, "a.txt", []byte("original bytes")),
+	})
+	if err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	if err := store.Put(context.Background(), testModuleID, job.Request.File.ObjectKey, []byte("different")); err != nil {
+		t.Fatalf("replace object: %v", err)
+	}
+
+	ext := NewExtensionServer(manager)
+	rec := httptest.NewRecorder()
+	ext.server.Handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/poll?timeout=1", nil))
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("poll status = %d, want 204 (body %s)", rec.Code, rec.Body)
+	}
+
+	failed := manager.Get(job.ID)
+	if failed == nil || failed.Status != JobFailed {
+		t.Fatalf("job = %+v, want failed", failed)
+	}
+	if failed.Result == nil || failed.Result.Error == nil || failed.Result.Error.Code != "FILE_UNAVAILABLE" {
+		t.Errorf("result = %+v, want FILE_UNAVAILABLE", failed.Result)
+	}
+}
+
 // TestSubmitFileStatusMapping pins the status a client sees for each attachment
 // failure.
 func TestSubmitFileStatusMapping(t *testing.T) {

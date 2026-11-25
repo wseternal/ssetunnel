@@ -3,6 +3,7 @@ package aiproxy
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -67,6 +68,14 @@ func (h *ClientHandler) handleSubmit(w http.ResponseWriter, r *http.Request) {
 
 	var req submitRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		// A body over the cap reaches the decoder as a MaxBytesError. Report it
+		// as the size failure it is, not as malformed JSON.
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			writeError(w, http.StatusRequestEntityTooLarge, "BODY_TOO_LARGE",
+				fmt.Sprintf("request body exceeds %d bytes", maxProxyBodyBytes))
+			return
+		}
 		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid JSON: "+err.Error())
 		return
 	}

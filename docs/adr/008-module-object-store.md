@@ -150,9 +150,10 @@ This ADR confirms the same model for the object store. The agent overwrites the 
 - V1 has no list, delete, retention, quota, replication, or cloud backend.
 - One shared IPC credential limits isolation to trusted modules.
 - Atomic replacement depends on platform rename semantics. The smoke evidence covers macOS only.
-- Attachment objects stay until an operator removes them: the SDK has no delete. The module
-  uses content-addressed keys (`file-<sha256>` or `file-<sha256>.gz`), so identical files share
-  one object.
+- Attachment objects stay until an operator removes them: the SDK has no delete. This includes
+  attachments for jobs that never run: a full queue, or an MIME type the extension rejects. The
+  module uses content-addressed keys (`file-<sha256>` or `file-<sha256>.gz`), so identical files
+  share one object.
 
 ## Rejected alternatives
 
