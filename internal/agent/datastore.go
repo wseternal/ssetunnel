@@ -62,7 +62,12 @@ func (f *dataStoreForwarder) Send(req moduleproto.DataStoreRequestPayload, sende
 		Payload:  payload,
 	}
 
-	sender(msg)
+	if err := sender(msg); err != nil {
+		f.mu.Lock()
+		delete(f.pending, req.RequestID)
+		f.mu.Unlock()
+		return nil, fmt.Errorf("send request: %w", err)
+	}
 
 	// Wait for the response with a timeout.
 	timer := time.NewTimer(dataStoreTimeout)

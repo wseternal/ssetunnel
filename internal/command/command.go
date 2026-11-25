@@ -98,6 +98,7 @@ func RunServer(ctx context.Context, args []string) error {
 	metricsRetention := fs.Duration("metrics-retention", 7*24*time.Hour, "How long to retain metrics data (default: 7 days)")
 	metricsFlush := fs.Duration("metrics-flush", 10*time.Second, "Interval for flushing metrics to disk (default: 10s)")
 	tunerInterval := fs.Duration("tuner-interval", 30*time.Second, "Interval for auto-tuner evaluation (default: 30s)")
+	objectStoreDir := fs.String("object-store-dir", "", "Server-local module object storage root (empty = disabled)")
 	// Accept --totp-secret for backward compatibility (silently ignored).
 	_ = fs.String("totp-secret", "", "DEPRECATED: per-user TOTP is now used; this flag is ignored")
 	base := AcceptDeprecatedBaseFlag(fs)
@@ -120,6 +121,23 @@ func RunServer(ctx context.Context, args []string) error {
 	// TODO: re-read config files, refresh auth pepper, etc.
 
 	srv := server.NewServer(*heartbeat)
+
+	// Object storage is independent of authentication and PostgreSQL. Open
+	// it before any listener serves, so every attached session captures the
+	// backend. The defer keeps the root open for the HTTP server lifetime.
+	var objectStore *server.FileObjectStore
+	if *objectStoreDir != "" {
+		var err error
+		objectStore, err = server.NewFileObjectStore(*objectStoreDir)
+		if err != nil {
+			return fmt.Errorf("object store: %w", err)
+		}
+		defer objectStore.Close()
+		srv.SetObjectStore(objectStore)
+		log.Printf("server: object store enabled, dir=%s", *objectStoreDir)
+	} else {
+		log.Printf("server: object store disabled (--object-store-dir is empty)")
+	}
 
 	// Metrics and auto-tuner setup (optional, enabled by --metrics-dir).
 	if *metricsDir != "" {

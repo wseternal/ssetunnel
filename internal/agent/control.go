@@ -2,6 +2,7 @@ package agent
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"net"
 	"sync"
@@ -55,8 +56,9 @@ func (r *streamRegistry) Lookup(id uint32) (RegisteredStream, bool) {
 
 // controlSender is a function that sends a control message. The agent's
 // control handler installs this so data stream handlers (e.g., shell)
-// can send trace events back to the server.
-type controlSender func(msg *mux.ControlMessage)
+// can send trace events back to the server. A write error means the
+// control stream is gone; the caller decides how to surface it.
+type controlSender func(msg *mux.ControlMessage) error
 
 // openControlStream opens a dedicated control stream from the agent to
 // the server. The agent writes the control marker so the server can
@@ -89,12 +91,13 @@ func (a *Agent) openControlStream(sess *yamux.Session) {
 	a.controlMu.Lock()
 	a.controlGen++
 	gen := a.controlGen
-	a.sendControl = func(msg *mux.ControlMessage) {
+	a.sendControl = func(msg *mux.ControlMessage) error {
 		writeMu.Lock()
 		defer writeMu.Unlock()
 		if err := mux.WriteControlMessage(cs, msg); err != nil {
-			log.Printf("agent: control send failed: %v", err)
+			return fmt.Errorf("write control message: %w", err)
 		}
+		return nil
 	}
 	a.traceDropLogged.Store(false)
 	a.controlMu.Unlock()
@@ -113,6 +116,9 @@ func (a *Agent) handleControlStream(stream net.Conn, gen int) {
 			a.sendControl = nil
 		}
 		a.controlMu.Unlock()
+		if a.objectStoreFwd != nil {
+			a.objectStoreFwd.FailGeneration(gen, errObjectStoreStreamClosed)
+		}
 	}()
 
 	log.Printf("agent: control stream established")
@@ -124,14 +130,28 @@ func (a *Agent) handleControlStream(stream net.Conn, gen int) {
 			log.Printf("agent: control stream closed: %v", err)
 			return
 		}
-		a.dispatchControlMessage(msg)
+		a.dispatchControlMessageForGen(msg, gen)
 	}
 }
 
-// dispatchControlMessage routes one control message to the target
-// data stream handler based on stream ID. Agent-level messages
-// (log_req) are handled before the stream registry lookup.
+// dispatchControlMessage routes one control message with the current
+// control generation. Tests and non-stream callers use it.
 func (a *Agent) dispatchControlMessage(msg *mux.ControlMessage) {
+	a.dispatchControlMessageForGen(msg, a.currentControlGen())
+}
+
+// currentControlGen reports the live control stream generation.
+func (a *Agent) currentControlGen() int {
+	a.controlMu.RLock()
+	defer a.controlMu.RUnlock()
+	return a.controlGen
+}
+
+// dispatchControlMessageForGen routes one control message to the target
+// data stream handler based on stream ID. Agent-level messages
+// (log_req) are handled before the stream registry lookup. The gen
+// parameter identifies the control stream that delivered the message.
+func (a *Agent) dispatchControlMessageForGen(msg *mux.ControlMessage, gen int) {
 	if a.Verbose {
 		verboseTrace("control recv: type=%s stream_id=%d payload_len=%d",
 			msg.Type, msg.StreamID, len(msg.Payload))
@@ -162,6 +182,11 @@ func (a *Agent) dispatchControlMessage(msg *mux.ControlMessage) {
 	case mux.MsgDataStoreResp:
 		if a.dataStoreFwd != nil {
 			a.dataStoreFwd.HandleResponse(msg)
+		}
+		return
+	case moduleproto.MsgObjectStoreResp:
+		if a.objectStoreFwd != nil {
+			a.objectStoreFwd.HandleResponse(msg, gen)
 		}
 		return
 	}
@@ -238,10 +263,12 @@ func (a *Agent) handleLogRequest(msg *mux.ControlMessage) {
 	a.controlMu.RLock()
 	send := a.sendControl
 	a.controlMu.RUnlock()
-	if send != nil {
-		send(respMsg)
-	} else {
+	if send == nil {
 		log.Printf("agent: log response dropped (control stream unavailable): request_id=%s", payload.RequestID)
+		return
+	}
+	if err := send(respMsg); err != nil {
+		log.Printf("agent: log response dropped: request_id=%s: %v", payload.RequestID, err)
 	}
 }
 
@@ -270,5 +297,9 @@ func (a *Agent) SendTrace(streamID uint32, eventType string, durationMs int64, b
 		Bytes:      bytes,
 		Message:    message,
 	}
-	send(mux.NewTraceMessage(streamID, event))
+	if err := send(mux.NewTraceMessage(streamID, event)); err != nil {
+		if !a.traceDropLogged.Swap(true) {
+			log.Printf("agent: trace send failed: stream=%d event=%s: %v", streamID, eventType, err)
+		}
+	}
 }

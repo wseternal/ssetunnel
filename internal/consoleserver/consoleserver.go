@@ -244,6 +244,9 @@ func NewConsoleHandler(ctx context.Context, store *auth.Store, reg *server.Regis
 	// API routes catch-all.
 	apiRouter := consoleapi.NewRouter(store, reg)
 	apiRouter.SetMetrics(mc)
+	if srv != nil {
+		apiRouter.SetObjectStoreMetrics(srv.ObjectStoreMetrics())
+	}
 	r.PathPrefix("/api/v1/").Handler(apiRouter)
 
 	// Content-hashed static assets, with immutable caching. Registered before

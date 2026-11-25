@@ -54,6 +54,18 @@ type IPCServer struct {
 	// request bytes, and returns JSON response bytes.
 	// Returns nil if data store is not configured.
 	onDataStore func(moduleID string, requestJSON []byte) ([]byte, error)
+
+	// onObjectStore is called when a module sends an OBJECTSTORE request.
+	// The handler receives the authenticated module ID and the raw JSON
+	// request bytes, and returns JSON response bytes.
+	onObjectStore func(moduleID string, requestJSON []byte) ([]byte, error)
+
+	// objSlots bounds concurrent object store request and response bodies.
+	objSlots chan struct{}
+
+	// objConns tracks live object store IPC connections so Close can
+	// unblock them.
+	objConns map[net.Conn]struct{}
 }
 
 // Registration represents a live module registration from a connected process.
@@ -84,6 +96,8 @@ func NewIPCServer() (*IPCServer, error) {
 	return &IPCServer{
 		credential: cred,
 		modules:    make(map[string]*Registration),
+		objSlots:   make(chan struct{}, maxObjectStoreIPCTransfers),
+		objConns:   make(map[net.Conn]struct{}),
 		ctx:        ctx,
 		cancel:     cancel,
 	}, nil
@@ -119,6 +133,16 @@ func (s *IPCServer) SetOnDataStore(fn func(moduleID string, requestJSON []byte) 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.onDataStore = fn
+}
+
+// SetOnObjectStore sets the handler for object store requests from
+// modules. The handler receives the authenticated module ID and raw
+// JSON request bytes, and returns JSON response bytes. If not set,
+// object store requests return an unavailable error.
+func (s *IPCServer) SetOnObjectStore(fn func(moduleID string, requestJSON []byte) ([]byte, error)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.onObjectStore = fn
 }
 
 // SetListener attaches a listener to the IPC server for accepting
@@ -249,6 +273,15 @@ func (s *IPCServer) handleConnection(conn net.Conn) {
 	}
 	firstLine = strings.TrimSuffix(firstLine, "\n")
 
+	// Object store proxy mode: module opens a dedicated connection for
+	// object store requests only (no REG, no health loop).
+	// Format: OBJECTSTORE <module_id> — identifies the calling module.
+	if strings.HasPrefix(firstLine, "OBJECTSTORE ") {
+		moduleID := strings.TrimPrefix(firstLine, "OBJECTSTORE ")
+		s.handleObjectStoreConnection(conn, reader, moduleID)
+		return
+	}
+
 	// Data store proxy mode: module opens a dedicated connection for
 	// data store requests only (no REG, no health loop).
 	// Format: DATASTORE <module_id> — identifies the calling module.
@@ -261,7 +294,7 @@ func (s *IPCServer) handleConnection(conn net.Conn) {
 	// Normal module registration flow.
 	regLine := firstLine
 	if !strings.HasPrefix(regLine, "REG ") {
-		log.Printf("ipc: expected REG or DATASTORE, got %q", regLine)
+		log.Printf("ipc: expected REG, DATASTORE, or OBJECTSTORE, got %q", regLine)
 		return
 	}
 
@@ -464,6 +497,10 @@ func (s *IPCServer) Close() error {
 			reg.Conn.Close()
 		}
 		delete(s.modules, id)
+	}
+	for conn := range s.objConns {
+		conn.Close()
+		delete(s.objConns, conn)
 	}
 	if s.listener != nil {
 		return s.listener.Close()

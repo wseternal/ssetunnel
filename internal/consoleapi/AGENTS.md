@@ -26,6 +26,7 @@ JSON management API for the admin console. Mounted at `/api/v1/` under the conso
 | GET | `/api/v1/metrics/agents` | User | Per-agent current metrics with snapshot + params + last decision |
 | GET | `/api/v1/metrics/agents/{agentID}/samples` | User | Historical metric samples (query: `from`, `to` RFC3339) |
 | GET | `/api/v1/metrics/agents/{agentID}/decisions` | User | Historical tuning decisions (query: `limit`) |
+| GET | `/api/v1/metrics/objectstore` | Admin | Server-scoped object-store counters |
 
 ## Key Endpoints
 
@@ -52,7 +53,9 @@ Admin sees all sessions; non-admin users see only sessions attributed to their o
 Returns deduplicated agent IDs from the live session registry. Scoped by user.
 
 ### Metrics Endpoints
-All metrics endpoints are user-scoped: non-admin users see only agents from their own sessions. The `MetricsCollector` may be nil (metrics disabled); endpoints return empty arrays in that case.
+Transport metrics endpoints are user-scoped: non-admin users see only agents from their own sessions. The `MetricsCollector` may be nil (metrics disabled); endpoints return empty arrays in that case.
+
+`/api/v1/metrics/objectstore` is admin-only. It returns the server-scoped object-store counters from `Server.ObjectStoreMetrics`, or an empty object when the router has no tunnel server.
 
 ## Login Rate Limiting
 

@@ -28,7 +28,19 @@ Module identity and validation. Reverse-DNS module IDs, OpenAPI YAML, UI descrip
 ### Errors (`errors.go`)
 Structured error types with HTTP status codes for consumer-facing error handling.
 
+### Object Store (`objectstore.go`, `objectstore_client.go`)
+Binary module objects through the agent IPC path.
+
+- `ObjectStore` interface with `Put` and `Get`.
+- Limits: `MaxObjectSize` 4 MiB, `MaxObjectKeyLen` 128 bytes, flat keys that match `[A-Za-z0-9][A-Za-z0-9._-]*`.
+- `ErrObjectNotFound` marks a missing object. `Get` returns a non-nil empty slice for a found empty object.
+- `NewObjectStore` reads the three module environment variables. `NewObjectStoreWithEndpoint` accepts explicit values. Both validate configuration without network I/O.
+- Each call opens one authenticated IPC connection (`OBJECTSTORE <module-id>`), waits for the agent's `OK` acknowledgment, performs one operation, and closes the connection.
+- The client always presents its configured module ID. The agent replaces the request module ID with the authenticated identity.
+- A framed rejection can arrive instead of `OK`. The client surfaces it as the matching Go error without sending a request.
+
 ## Rules
 - Provider and DataStore reconnection are automatic — a poisoned IPC connection is dropped and redialed on the next call, so module authors should not manage connection state.
+- Object store calls have no persistent client state: one connection per call, no reconnection logic.
 - Consumers must use the catalog epoch from `Discover` for subsequent invocations (stale epochs → 409).
 - SDK constants are intentionally duplicated from `internal/moduleproto` (public API isolation from internal types).

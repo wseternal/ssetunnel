@@ -16,6 +16,7 @@ import (
 	"github.com/wseternal/ssetunnel/internal/moduleproto"
 	"github.com/wseternal/ssetunnel/internal/mux"
 	"github.com/wseternal/ssetunnel/internal/transport"
+	"github.com/wseternal/ssetunnel/sdk"
 )
 
 // Pipe capacities: big enough to absorb bench-scale bursts, small
@@ -94,6 +95,11 @@ type Session struct {
 	// the control tunnel. May be nil if no database is configured.
 	dataStore *DataStore
 
+	// Object store handler for module object requests forwarded through
+	// the control tunnel. May be nil if object storage is disabled.
+	objectStore   *ObjectStoreHandler
+	objectStoreMu sync.Mutex
+
 	closeOnce sync.Once
 	closeCh   chan struct{} // closed by Close(); for monitor goroutines
 }
@@ -102,6 +108,32 @@ type Session struct {
 // Called by Server.attach() after the control stream is accepted.
 func (s *Session) SetDataStore(ds *DataStore) {
 	s.dataStore = ds
+}
+
+// SetObjectStore installs an object store backend for this session.
+// A nil backend leaves object storage disabled. Called by
+// Server.attach() before the control read loop starts.
+func (s *Session) SetObjectStore(store sdk.ObjectStore, metrics *metrics.ObjectStoreMetrics) {
+	if store == nil {
+		return
+	}
+	s.objectStoreMu.Lock()
+	defer s.objectStoreMu.Unlock()
+	if s.objectStore == nil {
+		s.objectStore = newObjectStoreHandler(store, s.SendControl, metrics)
+	}
+}
+
+// CloseObjectStore stops the session object store worker. Called when
+// the control loop exits or the session closes.
+func (s *Session) CloseObjectStore() {
+	s.objectStoreMu.Lock()
+	h := s.objectStore
+	s.objectStore = nil
+	s.objectStoreMu.Unlock()
+	if h != nil {
+		h.Close()
+	}
 }
 
 // defaultWriteTimeout keeps POST handlers short-lived when the consumer
@@ -251,10 +283,14 @@ func (s *Session) Write(b []byte) (int, error) {
 // its recv goroutine which detects the pipe closure; we must NOT call
 // ms.Close() here because yamux's Close() calls s.conn.Close() (this
 // Session), causing a deadlock between closeOnce and yamux's shutdownLock.
+//
+// CloseObjectStore waits up to five seconds for the session's object-store
+// worker to exit, so a slow backend call can delay this path by that bound.
 func (s *Session) Close() error {
 	s.closeOnce.Do(func() {
 		s.up.Close()
 		s.down.Close()
+		s.CloseObjectStore()
 		close(s.closeCh)
 	})
 	return nil
@@ -347,6 +383,17 @@ func (s *Session) handleControlMessage(msg *mux.ControlMessage) {
 			}
 		} else {
 			log.Printf("server: data_store_req received but no data store configured")
+		}
+	case moduleproto.MsgObjectStoreReq:
+		s.objectStoreMu.Lock()
+		h := s.objectStore
+		s.objectStoreMu.Unlock()
+		if h != nil {
+			h.handleMessage(msg)
+		} else if resp := objectStoreUnavailableResponse(msg); resp != nil {
+			if err := s.SendControl(resp); err != nil {
+				log.Printf("server: object store unavailable response failed: %v", err)
+			}
 		}
 	default:
 		log.Printf("server: unexpected control message type=%s from agent session %s",
