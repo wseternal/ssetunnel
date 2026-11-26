@@ -261,8 +261,10 @@ curl -s http://localhost:8081/api/v1/modules?agent=test-agent | jq .
 A submit succeeds only while an automation client is connected. If no extension polls
 the module, the module answers `503 NO_AUTOMATION_CLIENT`. A queued job would never run
 and would end at its own timeout. Set up the extension first (Part 5.1 to 5.4) when you
-test a submit here. `GET /health` reports the same state as `extension_connected`. Check
-it before you submit:
+test a submit here. `GET /health` reports the same state as `extension_connected`. That
+field follows the submit rule exactly: a client counts for 90 s after its last poll or
+result, and any running job counts as connected, so the field can stay true briefly after
+the extension disappears. Check it before you submit:
 
 ```bash
 curl -s http://localhost:8081/api/v1/modules/invoke/test-agent/com.wseternal.ai-automation-proxy/health | jq .

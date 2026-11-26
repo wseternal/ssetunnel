@@ -63,8 +63,8 @@ const maxProxyBodyBytes = 6 << 20
 
 // maxClientWaitTimeout caps how long a client can hold a GET /jobs/{id}
 // connection. The agent aborts a module exchange after sdk.InvocationTimeout,
-// so a longer wait would be cut off with no response at all. The headroom
-// covers the request read and the data-store lookup that can precede the wait.
+// so a longer wait would be cut off with no response at all. The 10 s reserve
+// covers the request read and the response write around the wait itself.
 const maxClientWaitTimeout = sdk.InvocationTimeout - 10*time.Second
 
 func (h *ClientHandler) handleSubmit(w http.ResponseWriter, r *http.Request) {

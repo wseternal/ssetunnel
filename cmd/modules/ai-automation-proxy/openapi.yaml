@@ -111,7 +111,10 @@ paths:
                     description: >
                       True when an automation client is connected and `POST
                       /jobs` would accept a submit. False means `POST /jobs`
-                      answers `503 NO_AUTOMATION_CLIENT`.
+                      answers `503 NO_AUTOMATION_CLIENT`. The field follows the
+                      submit rule exactly: a client counts for 90 s after its
+                      last poll or result, and any running job counts as
+                      connected.
 
   /poll:
     get:
