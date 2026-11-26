@@ -18,12 +18,8 @@ import (
 	"github.com/wseternal/ssetunnel/internal/agentmod"
 	"github.com/wseternal/ssetunnel/internal/moduleproto"
 	"github.com/wseternal/ssetunnel/internal/mux"
+	"github.com/wseternal/ssetunnel/sdk"
 )
-
-// ModuleInvocationTimeout bounds one module exchange. It is applied to both the
-// IPC connection and the tunnel stream so a module that stops answering cannot
-// hold a slot forever.
-const ModuleInvocationTimeout = 30 * time.Second
 
 var (
 	// ErrModuleNotFound reports a module the agent has no live registration for.
@@ -334,9 +330,9 @@ func (mi *ModuleInvoker) proxyInvocation(ctx context.Context, inv *Invocation, r
 }
 
 // invocationDeadline returns the exchange deadline: the caller's context
-// deadline when it is sooner than the module timeout.
+// deadline when it is sooner than sdk.InvocationTimeout.
 func invocationDeadline(ctx context.Context) time.Time {
-	deadline := time.Now().Add(ModuleInvocationTimeout)
+	deadline := time.Now().Add(sdk.InvocationTimeout)
 	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
 		deadline = d
 	}

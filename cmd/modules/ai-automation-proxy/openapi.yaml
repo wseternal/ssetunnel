@@ -20,7 +20,7 @@ paths:
               $ref: "#/components/schemas/SubmitRequest"
       responses:
         "202":
-          description: Job accepted
+          description: Job accepted and queued for the connected automation client
           content:
             application/json:
               schema:
@@ -41,10 +41,12 @@ paths:
                 $ref: "#/components/schemas/Error"
         "503":
           description: >
-            Object storage is not configured or unreachable, so a file cannot be
-            stored (`FILE_STORE_UNAVAILABLE`). This code belongs to submit only.
-            A job result reports `FILE_UNAVAILABLE` instead when a stored
-            attachment cannot be read at poll time.
+            `NO_AUTOMATION_CLIENT` means no automation client (the browser
+            extension) is connected, so the job could never run. Start the
+            extension and retry. `FILE_STORE_UNAVAILABLE` means object storage
+            is not configured or unreachable, so an attached file cannot be
+            stored. A job result reports `FILE_UNAVAILABLE` instead when a
+            stored attachment cannot be read at poll time.
           content:
             application/json:
               schema:
@@ -62,18 +64,24 @@ paths:
             type: string
         - name: wait
           in: query
-          description: Block until the job completes (true/false)
+          description: >
+            Block until the job completes. The module caps the wait at 20 s,
+            below the agent's 30 s module-invocation deadline, so the response
+            always reaches the caller. A job that is still pending while no
+            automation client is connected returns at once.
           schema:
             type: string
             enum: ["true"]
         - name: wait_timeout
           in: query
-          description: Maximum wait duration (e.g. "120s")
+          description: >
+            Maximum wait duration (e.g. "10s"). The module answers with the
+            20 s cap for unparsable, zero, and oversized values.
           schema:
             type: string
       responses:
         "200":
-          description: Job status and result
+          description: Job status and result at the end of the wait
           content:
             application/json:
               schema:
@@ -98,6 +106,12 @@ paths:
                 properties:
                   status:
                     type: string
+                  extension_connected:
+                    type: boolean
+                    description: >
+                      True when an automation client is connected and `POST
+                      /jobs` would accept a submit. False means `POST /jobs`
+                      answers `503 NO_AUTOMATION_CLIENT`.
 
   /poll:
     get:

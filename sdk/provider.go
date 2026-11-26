@@ -12,6 +12,12 @@ import (
 	"time"
 )
 
+// InvocationTimeout bounds one module exchange. The agent applies this deadline
+// to every invocation connection, so a handler that blocks longer never writes
+// a response: the caller sees a failed invocation, not a status. Keep slow work
+// off the request path and return a state the caller can poll instead.
+const InvocationTimeout = 30 * time.Second
+
 // Provider serves a module through the agent's IPC endpoint. The provider
 // supplies a manifest and an HTTP handler; the SDK handles IPC registration,
 // health reporting, and request routing. Automatic reconnection with

@@ -102,6 +102,13 @@ type JobManager struct {
 
 	moduleID string
 
+	// pollers counts extension polls that are currently blocked waiting for a
+	// job. lastClientAt is the most recent contact from an automation client,
+	// whether from a poll or from a posted result. Together they tell a submit
+	// whether anything can ever run the job.
+	pollers      int
+	lastClientAt time.Time
+
 	persistWG sync.WaitGroup
 	closing   bool
 }
@@ -218,6 +225,10 @@ func (m *JobManager) Hydrate(ctx context.Context, req AutomationRequest) (Automa
 // Submit stores any attachment, creates a new job, and enqueues it for the
 // extension. The file is stored before the job is enqueued, so a job the
 // extension can see always has its bytes in the object store.
+//
+// Submit does not check client presence: the client API admits a submit only
+// while HasClient reports a connected extension, because a job nobody can take
+// can only end at its timeout.
 func (m *JobManager) Submit(ctx context.Context, req AutomationRequest) (*Job, error) {
 	id := generateJobID()
 	now := time.Now().UTC()
@@ -320,6 +331,68 @@ func (m *JobManager) WaitForResult(job *Job, timeout time.Duration) *Job {
 // server reads pending jobs.
 func (m *JobManager) PendingChan() <-chan *Job {
 	return m.pending
+}
+
+// PollOpened records an extension poll that is about to wait for a job. The
+// returned function records the end of that poll and must always be called.
+// Presence is taken from the poll itself, not from the job queue, because a
+// client can only take a job while it is polling.
+func (m *JobManager) PollOpened() (closed func()) {
+	m.mu.Lock()
+	m.pollers++
+	m.lastClientAt = time.Now()
+	m.mu.Unlock()
+
+	return func() {
+		m.mu.Lock()
+		m.pollers--
+		m.lastClientAt = time.Now()
+		m.mu.Unlock()
+	}
+}
+
+// ClientContacted records a contact from an automation client other than a
+// poll, such as a posted result. A client that is busy running a job stops
+// polling, and its result post is what proves it is still there.
+func (m *JobManager) ClientContacted() {
+	m.mu.Lock()
+	m.lastClientAt = time.Now()
+	m.mu.Unlock()
+}
+
+// HasClient reports whether an automation client can take a job now. A submit
+// that finds no client has no path to completion, so the caller rejects it
+// instead of queueing a job that can only time out.
+func (m *JobManager) HasClient() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.hasClientLocked(time.Now())
+}
+
+// hasClientLocked implements HasClient under the manager lock. Callers hold
+// m.mu.
+func (m *JobManager) hasClientLocked(now time.Time) bool {
+	if m.pollers > 0 {
+		return true
+	}
+	if now.Sub(m.lastClientAt) <= clientGrace {
+		return true
+	}
+	for _, job := range m.jobs {
+		if job.Status == JobRunning {
+			return true
+		}
+	}
+	return false
+}
+
+// View returns a copy of the job's fields for a reader outside the manager.
+// Terminal transitions mutate a live job under the manager lock, so handlers
+// serialize a copy and never the job itself.
+func (m *JobManager) View(job *Job) Job {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return *job
 }
 
 // MarkRunning transitions a job from pending to running and reports whether it
@@ -451,6 +524,13 @@ func isTerminal(s JobStatus) bool {
 
 // jobIDLength is the hex length of a generated job id.
 const jobIDLength = 32
+
+// clientGrace keeps an automation client counted as connected after its last
+// contact. The extension re-polls 500 ms after an idle poll ends, a suspended
+// MV3 worker revives on a one-minute alarm, and a transport failure backs off
+// for at most 30 s, so this window covers every gap that is not a real
+// disconnect.
+const clientGrace = 90 * time.Second
 
 // closeGrace bounds how long Close waits for persistence writes at shutdown.
 const closeGrace = 5 * time.Second
