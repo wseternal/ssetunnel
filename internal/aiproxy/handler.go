@@ -129,14 +129,12 @@ func (h *ClientHandler) handleGet(w http.ResponseWriter, r *http.Request) {
 	}
 	view := h.jobs.View(job)
 
-	// If the client passes ?wait=true, block until the job is done or the wait
-	// budget expires. A pending job cannot progress while no automation client
-	// is connected, so report its state now instead of pinning the connection.
-	if r.URL.Query().Get("wait") == "true" {
-		if view.Status != JobPending || h.jobs.HasClient() {
-			waitTimeout := resolveWaitTimeout(r.URL.Query().Get("wait_timeout"))
-			view = h.jobs.View(h.jobs.WaitForResult(job, waitTimeout))
-		}
+	// Block until the job is done or the wait budget expires. A pending job
+	// cannot progress while no automation client is connected, so report its
+	// state now instead of pinning the connection.
+	if r.URL.Query().Get("wait") == "true" && (view.Status != JobPending || h.jobs.HasClient()) {
+		waitTimeout := resolveWaitTimeout(r.URL.Query().Get("wait_timeout"))
+		view = h.jobs.View(h.jobs.WaitForResult(job, waitTimeout))
 	}
 
 	writeJSON(w, http.StatusOK, view)
