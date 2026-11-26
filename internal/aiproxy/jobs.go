@@ -360,9 +360,9 @@ func (m *JobManager) ClientContacted() {
 	m.mu.Unlock()
 }
 
-// HasClient reports whether an automation client can take a job now. A submit
-// that finds no client has no path to completion, so the caller rejects it
-// instead of queueing a job that can only time out.
+// HasClient reports whether an automation client is connected. A submit that
+// finds no client has no path to completion, so the caller rejects it instead
+// of queueing a job that can only time out.
 func (m *JobManager) HasClient() bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
