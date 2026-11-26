@@ -122,3 +122,54 @@ func TestResolveWaitTimeout(t *testing.T) {
 		}
 	}
 }
+
+// TestPollThroughExtensionServerAdmitsSubmit pins the poll side of the presence
+// wiring: the gate must open because the extension actually polled the module,
+// not because a test set the manager's state directly.
+func TestPollThroughExtensionServerAdmitsSubmit(t *testing.T) {
+	manager := NewJobManager(time.Minute, nil, nil, testModuleID)
+	client := NewClientHandler(manager)
+	ext := NewExtensionServer(manager)
+
+	// An empty queue answers 204 once the one-second wait is up; the poll
+	// itself is what proves a client is present.
+	rec := httptest.NewRecorder()
+	ext.server.Handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/poll?timeout=1", nil))
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("poll status = %d, want %d", rec.Code, http.StatusNoContent)
+	}
+
+	rec = httptest.NewRecorder()
+	client.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/jobs", strings.NewReader(`{"prompt":"summarise"}`)))
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("submit after poll status = %d, want %d (body %s)", rec.Code, http.StatusAccepted, rec.Body)
+	}
+}
+
+// TestResultThroughExtensionServerRestoresPresence pins the result side of the
+// presence wiring: a client that stopped polling to run a job proves it is
+// still there by posting its result.
+func TestResultThroughExtensionServerRestoresPresence(t *testing.T) {
+	manager := NewJobManager(time.Minute, nil, nil, testModuleID)
+	client := NewClientHandler(manager)
+	ext := NewExtensionServer(manager)
+
+	// Push the last contact past the grace window so only a real /result post
+	// can reopen the gate.
+	manager.mu.Lock()
+	manager.lastClientAt = time.Now().Add(-2 * clientGrace)
+	manager.mu.Unlock()
+
+	rec := httptest.NewRecorder()
+	body := `{"job_id":"` + strings.Repeat("0", jobIDLength) + `","result":{"status":"ok","text":"done"}}`
+	ext.server.Handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/result", strings.NewReader(body)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("result status = %d, want 200 (body %s)", rec.Code, rec.Body)
+	}
+
+	rec = httptest.NewRecorder()
+	client.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/jobs", strings.NewReader(`{"prompt":"summarise"}`)))
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("submit after result status = %d, want %d (body %s)", rec.Code, http.StatusAccepted, rec.Body)
+	}
+}
