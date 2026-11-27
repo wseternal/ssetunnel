@@ -66,10 +66,10 @@ The base is `<console-url>/api/v1`. A console behind a path prefix must include 
 
 - `--method` and `--path` are one form. `--path` carries the query string and percent escapes unchanged.
 - `--operation <id>` is the other form. It resolves method and path from the operation document. Using both forms is an error. An operation with a templated path asks for `--method` and `--path` with concrete values.
-- `-H "Name: value"` repeats. `-d` accepts inline text, `@file`, and `@-`. A body without `Content-Type` defaults to `application/json`.
+- `-H "Name: value"` repeats. `-d` accepts inline text, `@file`, and `@-`. A body without `Content-Type` defaults to `application/json`. A `@file` or `@-` body is capped at 32 MiB.
 - The response body goes to stdout. A JSON body under 8 MiB is indented only when stdout is a terminal. Piped output stays raw and byte-exact.
 - `-i` prints the status line and response headers before the body.
-- 2xx exits 0. A non-2xx status prints the body on stdout, writes `HTTP <status>` to stderr, and exits 1. A transport error exits 1.
+- 2xx exits 0. A non-2xx status prints the body on stdout, writes the method, path, agent, module, status, console host and correlation ID to stderr, and exits 1. A 401 adds the re-login step. A transport error exits 1.
 
 ### 6. Apply one security contract
 
@@ -123,7 +123,7 @@ Rejected. It would forward the bearer token to whatever host the console names.
 - No server endpoint, schema, migration, or configuration key is added. Rollback is binary-only.
 - The command needs a reachable console and a saved session. It has no offline mode.
 - When a session token exists, `-H Authorization` cannot override it. Module calls also strip credentials through `moduleapi`, by design.
-- The HTTP client has a 10 s dial timeout and a 60 s response-header timeout, and no total timeout. A module that streams forever keeps the CLI alive. This is deliberate so large responses can stream.
+- The HTTP client has a 10 s dial timeout, a 10 s TLS handshake timeout and a 60 s response-header timeout, and no total timeout. A module that streams forever keeps the CLI alive. This is deliberate so large responses can stream.
 - Bodies over 8 MiB stay raw on a terminal.
 - Agent inference costs one extra `connected-agents` request per command.
 - `cmd/ssetunnel` does not expose `console`. Users of the legacy binary must use `cli`.

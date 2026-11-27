@@ -313,8 +313,9 @@ func consoleModulePath(agentID, moduleID string) string {
 
 // NewConsoleStatusError builds the error for a console status answer. The body
 // is the bounded snippet the caller read; `call` prints its body first and
-// passes none. Host and correlation ID come from the response, so a failure can
-// be matched to the console's invocation log.
+// passes none. Host and correlation ID come from the response: the echoed
+// header, or the ID the request carried when the route does not echo it. Both
+// let a failure be matched to the console's invocation log.
 func NewConsoleStatusError(resp *http.Response, body string) *ConsoleStatusError {
 	e := &ConsoleStatusError{
 		StatusCode: resp.StatusCode,
@@ -325,6 +326,11 @@ func NewConsoleStatusError(resp *http.Response, body string) *ConsoleStatusError
 		e.Host = resp.Request.URL.Host
 	}
 	e.CorrelationID = resp.Header.Get(moduleapi.CorrelationHeader)
+	if e.CorrelationID == "" && resp.Request != nil {
+		// Catalog routes do not echo the header, but the request that produced
+		// the failure carries the ID the CLI generated.
+		e.CorrelationID = resp.Request.Header.Get(moduleapi.CorrelationHeader)
+	}
 	return e
 }
 
