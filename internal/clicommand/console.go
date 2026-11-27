@@ -575,23 +575,27 @@ func consoleFlagSet(name string) *flag.FlagSet {
 	return fs
 }
 
-// parseConsoleFlags parses flags and reports a help request as a clean stop,
-// printing the defaults the flag package would otherwise echo to a discarded
-// stream.
-func parseConsoleFlags(fs *flag.FlagSet, flags []string) (help bool, err error) {
+// parseConsoleFlags parses flags and reports a help request as a clean stop.
+func parseConsoleFlags(fs *flag.FlagSet, flags []string) (bool, error) {
 	if err := fs.Parse(flags); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
-			var buf bytes.Buffer
-			fmt.Fprintf(&buf, "usage of %s:\n", fs.Name())
-			fs.SetOutput(&buf)
-			fs.PrintDefaults()
-			fs.SetOutput(io.Discard)
-			_, _ = os.Stdout.Write(buf.Bytes())
+			printFlagDefaults(fs)
 			return true, nil
 		}
 		return false, err
 	}
 	return false, nil
+}
+
+// printFlagDefaults prints a subcommand's flag defaults to stdout and leaves the
+// set silent again, matching consoleFlagSet.
+func printFlagDefaults(fs *flag.FlagSet) {
+	var buf bytes.Buffer
+	fmt.Fprintf(&buf, "usage of %s:\n", fs.Name())
+	fs.SetOutput(&buf)
+	fs.PrintDefaults()
+	fs.SetOutput(io.Discard)
+	_, _ = os.Stdout.Write(buf.Bytes())
 }
 
 // splitConsoleArgs separates flags from positionals so flags may follow the
