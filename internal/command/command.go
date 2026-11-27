@@ -55,7 +55,7 @@ commands:
             service actions: run, start, stop, restart, status, uninstall
   probe     measure a server's POST path (body cap, throttling)
   module    manage agent modules (install, start, stop, restart, status, remove, list)
-  console   list live agents and modules, and call module operations
+  console   inspect module schema and OpenAPI, and call module operations
   ui        serve the client UI on a secured loopback URL
   version   print the build version and git revision
 `

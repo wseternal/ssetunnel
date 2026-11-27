@@ -22,6 +22,10 @@ import (
 // streams raw so a long response is never buffered whole.
 const maxPrettyJSON = 8 << 20
 
+// maxRequestBody bounds a request body read from a file or stdin. A larger body
+// is refused rather than buffered whole.
+const maxRequestBody = 32 << 20
+
 // consoleUsage returns the help text for the console subcommand group.
 func consoleUsage() string {
 	return fmt.Sprintf(`usage: %s console <subcommand> [flags]
@@ -41,8 +45,7 @@ All commands use the saved login session. Run '%s login' first.
 // RunConsole reads the live console module surface with the saved session.
 func RunConsole(ctx context.Context, args []string) error {
 	if len(args) == 0 {
-		fmt.Fprint(os.Stderr, consoleUsage())
-		return errors.New("no subcommand specified")
+		return fmt.Errorf("no subcommand specified\n\n%s", consoleUsage())
 	}
 	if args[0] == "-h" || args[0] == "--help" {
 		fmt.Fprint(os.Stdout, consoleUsage())
@@ -51,18 +54,17 @@ func RunConsole(ctx context.Context, args []string) error {
 
 	switch args[0] {
 	case "list-agents":
-		return consoleListAgents(ctx, args[1:])
+		return consoleError(consoleListAgents(ctx, args[1:]))
 	case "list-modules":
-		return consoleListModules(ctx, args[1:])
+		return consoleError(consoleListModules(ctx, args[1:]))
 	case "schema":
-		return consoleSchema(ctx, args[1:])
+		return consoleError(consoleSchema(ctx, args[1:]))
 	case "openapi":
-		return consoleOpenAPI(ctx, args[1:])
+		return consoleError(consoleOpenAPI(ctx, args[1:]))
 	case "call":
-		return consoleCall(ctx, args[1:])
+		return consoleError(consoleCall(ctx, args[1:]))
 	default:
-		fmt.Fprintf(os.Stderr, "unknown console subcommand %q\n%s", args[0], consoleUsage())
-		return fmt.Errorf("unknown subcommand: %s", args[0])
+		return fmt.Errorf("unknown console subcommand %q\n\n%s", args[0], consoleUsage())
 	}
 }
 
@@ -324,10 +326,9 @@ func consoleCall(ctx context.Context, args []string) error {
 		return fmt.Errorf("read response body: %w", err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		if resp.StatusCode == http.StatusUnauthorized {
-			return fmt.Errorf("HTTP %s: session rejected; run login", resp.Status)
-		}
-		return fmt.Errorf("HTTP %s", resp.Status)
+		return fmt.Errorf("%s %s on agent %q, module %q: %w",
+			requestMethod, requestPath, agentID, moduleID,
+			clientapp.NewConsoleStatusError(resp, ""))
 	}
 	return nil
 }
@@ -368,6 +369,17 @@ func resolveConsoleAgent(ctx context.Context, client *clientapp.ConsoleClient, e
 		}
 		return "", fmt.Errorf("%d agents are connected; pass <agent-id> explicitly: %s", len(agents), strings.Join(ids, ", "))
 	}
+}
+
+// consoleError adds the recovery step when the console rejected the session.
+// Every console subcommand reports failures through it, so 401 guidance exists
+// once and every other error passes through unchanged.
+func consoleError(err error) error {
+	var statusErr *clientapp.ConsoleStatusError
+	if errors.As(err, &statusErr) && statusErr.StatusCode == http.StatusUnauthorized {
+		return fmt.Errorf("%w; the session was rejected, run '%s login'", err, BinaryName)
+	}
+	return err
 }
 
 // matchConsoleOperation resolves one operation ID to its method and path.
@@ -426,7 +438,8 @@ func buildConsoleHeaders(lines []string) (http.Header, error) {
 	return header, nil
 }
 
-// readConsoleBody returns an inline body, a file body, or a stdin body.
+// readConsoleBody returns an inline body, a file body, or a stdin body. File and
+// stdin sources are read through the request-body cap.
 func readConsoleBody(value string) ([]byte, error) {
 	if value == "" {
 		return nil, nil
@@ -436,11 +449,33 @@ func readConsoleBody(value string) ([]byte, error) {
 	}
 	source := strings.TrimPrefix(value, "@")
 	if source == "-" {
-		return io.ReadAll(os.Stdin)
+		data, err := readBoundedBody(os.Stdin)
+		if err != nil {
+			return nil, fmt.Errorf("read body from stdin: %w", err)
+		}
+		return data, nil
 	}
-	data, err := os.ReadFile(source)
+	file, err := os.Open(source)
 	if err != nil {
 		return nil, fmt.Errorf("read body file: %w", err)
+	}
+	defer file.Close()
+	data, err := readBoundedBody(file)
+	if err != nil {
+		return nil, fmt.Errorf("read body file: %w", err)
+	}
+	return data, nil
+}
+
+// readBoundedBody reads a request body up to the cap. A larger body is refused
+// so a long input never buffers whole in memory.
+func readBoundedBody(r io.Reader) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(r, maxRequestBody+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > maxRequestBody {
+		return nil, fmt.Errorf("request body exceeds the %d MiB limit", maxRequestBody>>20)
 	}
 	return data, nil
 }
@@ -487,21 +522,32 @@ func writeConsoleCallBody(resp *http.Response) error {
 	return err
 }
 
-// writeIndentedJSON prints JSON with two-space indentation.
+// writeIndentedJSON prints JSON with two-space indentation. A document above the
+// pretty cap, or one that is not valid JSON, is written raw so a long response
+// is never buffered a second time.
 func writeIndentedJSON(raw []byte) error {
+	if len(raw) > maxPrettyJSON {
+		return writeRawJSON(raw)
+	}
 	var buf bytes.Buffer
 	if err := json.Indent(&buf, raw, "", "  "); err != nil {
-		if _, err := os.Stdout.Write(raw); err != nil {
-			return err
-		}
-		if len(raw) > 0 && raw[len(raw)-1] != '\n' {
-			_, err = os.Stdout.Write([]byte("\n"))
-		}
-		return err
+		return writeRawJSON(raw)
 	}
 	buf.WriteByte('\n')
 	_, err := os.Stdout.Write(buf.Bytes())
 	return err
+}
+
+// writeRawJSON writes a document unindented, ending in exactly one newline.
+func writeRawJSON(raw []byte) error {
+	if _, err := os.Stdout.Write(raw); err != nil {
+		return err
+	}
+	if len(raw) == 0 || raw[len(raw)-1] != '\n' {
+		_, err := os.Stdout.Write([]byte("\n"))
+		return err
+	}
+	return nil
 }
 
 // printJSON prints any value as indented JSON.
@@ -521,17 +567,26 @@ func stdoutIsTerminal() bool {
 	return err == nil && info.Mode()&os.ModeCharDevice != 0
 }
 
-// consoleFlagSet builds a flag set that reports errors without exiting.
+// consoleFlagSet builds a flag set that reports errors without exiting. Its own
+// error echo is discarded, because main prints the returned error once.
 func consoleFlagSet(name string) *flag.FlagSet {
 	fs := flag.NewFlagSet(name, flag.ContinueOnError)
-	fs.SetOutput(os.Stderr)
+	fs.SetOutput(io.Discard)
 	return fs
 }
 
-// parseConsoleFlags parses flags and reports a help request as a clean stop.
+// parseConsoleFlags parses flags and reports a help request as a clean stop,
+// printing the defaults the flag package would otherwise echo to a discarded
+// stream.
 func parseConsoleFlags(fs *flag.FlagSet, flags []string) (help bool, err error) {
 	if err := fs.Parse(flags); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
+			var buf bytes.Buffer
+			fmt.Fprintf(&buf, "usage of %s:\n", fs.Name())
+			fs.SetOutput(&buf)
+			fs.PrintDefaults()
+			fs.SetOutput(io.Discard)
+			_, _ = os.Stdout.Write(buf.Bytes())
 			return true, nil
 		}
 		return false, err

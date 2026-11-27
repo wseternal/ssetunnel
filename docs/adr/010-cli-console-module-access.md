@@ -74,7 +74,8 @@ The base is `<console-url>/api/v1`. A console behind a path prefix must include 
 ### 6. Apply one security contract
 
 - Every console URL passes `auth.ValidateConsoleURL`. Non-loopback hosts need HTTPS. Link-local hosts are refused.
-- The saved token is only used when the resolved host matches a stored session. A foreign `--server` gets no token.
+- The saved token is used only when the resolved host matches a stored session. The match is by hostname, not by origin: a console on the same host but another port or path prefix still receives the stored bearer, because `login` stores the entry under the derived tunnel URL while `console_url` carries the console port. A different host gets no token at all.
+- An explicit `--server` selects the base URL only. It never becomes the session's stored server URL, so a refresh triggered by a console command writes back the tunnel endpoint rather than the console endpoint.
 - Redirects are refused. A bearer token never follows a `Location` header to another host.
 - Custom headers are copied first, then the session bearer is set. When a session token exists, `-H Authorization` cannot replace it.
 - Transport errors unwrap `*url.Error`, so query values do not appear in error text.

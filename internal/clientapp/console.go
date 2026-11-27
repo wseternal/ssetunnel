@@ -40,6 +40,7 @@ var consoleHTTPClient = &http.Client{
 		MaxIdleConns:          4,
 		IdleConnTimeout:       60 * time.Second,
 		ResponseHeaderTimeout: 60 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
 	},
 	CheckRedirect: func(*http.Request, []*http.Request) error {
 		return http.ErrUseLastResponse
@@ -89,29 +90,41 @@ type InvokeRequest struct {
 }
 
 // ConsoleStatusError reports a non-success console answer. It carries the
-// status and a bounded body snippet, never a request header.
+// status, the console host, the correlation ID the console echoed, and a
+// bounded body snippet — never a request header.
 type ConsoleStatusError struct {
-	StatusCode int
-	Status     string
-	Body       string
+	StatusCode    int
+	Status        string
+	Host          string
+	CorrelationID string
+	Body          string
 }
 
 // Error implements error.
 func (e *ConsoleStatusError) Error() string {
-	if e.Body != "" {
-		return fmt.Sprintf("console returned HTTP %s: %s", e.Status, e.Body)
+	text := "console returned HTTP " + e.Status
+	if e.Host != "" {
+		text += " from " + e.Host
 	}
-	return fmt.Sprintf("console returned HTTP %s", e.Status)
+	if e.CorrelationID != "" {
+		text += " (correlation " + e.CorrelationID + ")"
+	}
+	if e.Body != "" {
+		text += ": " + e.Body
+	}
+	return text
 }
 
 // NewConsoleClient resolves the saved session and builds a client for the
 // console API. An explicit serverURL is the console base URL and wins over the
-// stored one. The token is optional: an auth-disabled server needs none, and an
-// auth-enabled server answers 401, which the caller maps to a login hint.
+// stored one, but it is only a selector: the session entry keeps its stored
+// server URL, so a refresh cannot rewrite the tunnel endpoint. The token is
+// optional: an auth-disabled server needs none, and an auth-enabled server
+// answers 401, which every status error maps to a login hint.
 func NewConsoleClient(serverURL string) (*ConsoleClient, error) {
 	serverURL = strings.TrimRight(serverURL, "/")
 
-	info, err := ResolveSession(serverURL, "console")
+	info, err := resolveConsoleSession(serverURL)
 	if err != nil {
 		return nil, err
 	}
@@ -132,10 +145,32 @@ func NewConsoleClient(serverURL string) (*ConsoleClient, error) {
 		return nil, err
 	}
 	if info.Token == "" {
-		log.Printf("console: no saved token for %s; the request is unauthenticated", consoleURL)
+		log.Printf("no saved token for %s; the request is unauthenticated", consoleURL)
 	}
 
 	return &ConsoleClient{baseURL: base, token: info.Token, http: consoleHTTPClient}, nil
+}
+
+// resolveConsoleSession resolves the saved session for a console command. A
+// console URL selects the base and the session lookup key, but it never becomes
+// the session's persisted identity: the write-back targets the entry's stored
+// server URL, which is the tunnel endpoint agent and connect resolve. A host
+// with no saved entry stays unauthenticated instead of borrowing another host's
+// token.
+func resolveConsoleSession(consoleURL string) (*SessionInfo, error) {
+	if consoleURL == "" {
+		return ResolveSession("", "console")
+	}
+	_, storedServer, _, _, err := auth.LoadSession(consoleURL)
+	if err != nil {
+		// An unreadable session file holds no token, so no refresh can run and
+		// the plain resolve cannot rewrite anything.
+		return ResolveSession(consoleURL, "console")
+	}
+	if storedServer == "" {
+		return &SessionInfo{URL: consoleURL}, nil
+	}
+	return ResolveSession(storedServer, "console")
 }
 
 // ListAgents returns the agents the current session can reach.
@@ -167,7 +202,7 @@ func (c *ConsoleClient) Operations(ctx context.Context, agentID, moduleID string
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, nil, newConsoleStatusError(resp)
+		return nil, nil, NewConsoleStatusError(resp, readConsoleErrorBody(resp))
 	}
 
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, consoleJSONLimit))
@@ -191,7 +226,7 @@ func (c *ConsoleClient) OpenAPI(ctx context.Context, agentID, moduleID string) (
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, newConsoleStatusError(resp)
+		return nil, NewConsoleStatusError(resp, readConsoleErrorBody(resp))
 	}
 	data, err := io.ReadAll(io.LimitReader(resp.Body, consoleJSONLimit))
 	if err != nil {
@@ -230,7 +265,7 @@ func (c *ConsoleClient) getJSON(ctx context.Context, path string, out any) error
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return newConsoleStatusError(resp)
+		return NewConsoleStatusError(resp, readConsoleErrorBody(resp))
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, consoleJSONLimit)).Decode(out); err != nil {
 		return fmt.Errorf("decode console response: %w", err)
@@ -261,12 +296,12 @@ func (c *ConsoleClient) do(ctx context.Context, method, path string, header http
 	resp, err := c.http.Do(req)
 	if err != nil {
 		// A *url.Error repeats the full URL, including any query values. Report
-		// the transport cause only.
+		// the host and the transport cause only.
 		var urlErr *url.Error
 		if errors.As(err, &urlErr) {
 			err = urlErr.Err
 		}
-		return nil, fmt.Errorf("console request failed: %w", err)
+		return nil, fmt.Errorf("console request to %s failed: %w", req.URL.Host, err)
 	}
 	return resp, nil
 }
@@ -276,13 +311,25 @@ func consoleModulePath(agentID, moduleID string) string {
 	return "/modules/" + url.PathEscape(agentID) + "/" + url.PathEscape(moduleID)
 }
 
-// newConsoleStatusError consumes a non-success response body and builds the
-// status error.
-func newConsoleStatusError(resp *http.Response) error {
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, consoleErrorBodyLimit))
-	return &ConsoleStatusError{
+// NewConsoleStatusError builds the error for a console status answer. The body
+// is the bounded snippet the caller read; `call` prints its body first and
+// passes none. Host and correlation ID come from the response, so a failure can
+// be matched to the console's invocation log.
+func NewConsoleStatusError(resp *http.Response, body string) *ConsoleStatusError {
+	e := &ConsoleStatusError{
 		StatusCode: resp.StatusCode,
 		Status:     resp.Status,
-		Body:       strings.TrimSpace(string(body)),
+		Body:       strings.TrimSpace(body),
 	}
+	if resp.Request != nil && resp.Request.URL != nil {
+		e.Host = resp.Request.URL.Host
+	}
+	e.CorrelationID = resp.Header.Get(moduleapi.CorrelationHeader)
+	return e
+}
+
+// readConsoleErrorBody consumes the diagnostic snippet of a failed answer.
+func readConsoleErrorBody(resp *http.Response) string {
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, consoleErrorBodyLimit))
+	return string(body)
 }
