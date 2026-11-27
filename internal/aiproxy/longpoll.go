@@ -69,6 +69,12 @@ func (s *ExtensionServer) handlePoll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Record presence before the first wait: a submit that arrives while this
+	// poll is open must be accepted, and the client stays connected when the
+	// poll ends and it re-polls.
+	closed := s.jobs.PollOpened()
+	defer closed()
+
 	// Parse timeout (default 30s).
 	timeout := 30 * time.Second
 	if v := r.URL.Query().Get("timeout"); v != "" {
@@ -162,6 +168,7 @@ func (s *ExtensionServer) handleResult(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.jobs.ClientContacted()
 	s.jobs.Complete(req.JobID, req.Result)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "accepted"})
 }

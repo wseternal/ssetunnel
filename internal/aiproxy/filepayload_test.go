@@ -149,8 +149,8 @@ func TestPrepareFile_RequiresByteLength(t *testing.T) {
 }
 
 func TestFileTimeoutsStayBelowModuleExchange(t *testing.T) {
-	if fileOpTimeout >= 30*time.Second {
-		t.Errorf("fileOpTimeout = %v, must stay below the 30 s module exchange", fileOpTimeout)
+	if fileOpTimeout >= sdk.InvocationTimeout {
+		t.Errorf("fileOpTimeout = %v, must stay below the %v module exchange", fileOpTimeout, sdk.InvocationTimeout)
 	}
 	if hydrateTimeout >= 10*time.Second {
 		t.Errorf("hydrateTimeout = %v, must leave room under the extension's 10 s post-window budget", hydrateTimeout)

@@ -62,11 +62,15 @@ JobManager.Submit() → pending queue (chan *Job, capacity 256)
 JobManager.Complete() → terminal state (completed/failed/timeout)
     │
     ▼
-Client GET /jobs/{id}?wait=true → returns final result
+Client GET /jobs/{id}?wait=true → final result, or the current state once the wait budget expires
 ```
 
 **Key design points:**
 - Async job submission: clients receive a job ID and poll for results
+- Submit admission: `POST /jobs` answers `503 NO_AUTOMATION_CLIENT` unless an
+  automation client is connected; a queued job would only wait for its timeout
+- Client wait: `GET /jobs/{id}?wait=true` is capped at `sdk.InvocationTimeout`
+  minus 10 s (20 s); a pending job with no client returns its state immediately
 - Pending queue capacity 256; full queue returns `QUEUE_FULL` error
 - Per-job timeout goroutine (default 5 min, configurable per-job via `timeout_ms`)
 - Extension long-polling with configurable timeout (default 30s, max 5 min)

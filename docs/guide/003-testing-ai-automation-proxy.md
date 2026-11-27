@@ -258,6 +258,19 @@ curl -s http://localhost:8081/api/v1/modules?agent=test-agent | jq .
 
 ### 4.4 Test Job Submission (Client API)
 
+A submit succeeds only while an automation client is connected. If no extension polls
+the module, the module answers `503 NO_AUTOMATION_CLIENT`. A queued job would never run
+and would end at its own timeout. Set up the extension first (Part 5.1 to 5.4) when you
+test a submit here. `GET /health` reports the same state as `extension_connected`. That
+field follows the submit rule exactly: a client counts for 90 s after its last poll or
+result, and any running job counts as connected, so the field can stay true briefly after
+the extension disappears. Check it before you submit:
+
+```bash
+curl -s http://localhost:8081/api/v1/modules/invoke/test-agent/com.wseternal.ai-automation-proxy/health | jq .
+# {"status": "healthy", "extension_connected": false}   # true after the extension connects
+```
+
 ```bash
 # Submit a job through the tunnel (invoke the module):
 curl -X POST http://localhost:8081/api/v1/modules/invoke/test-agent/com.wseternal.ai-automation-proxy/jobs \
@@ -305,9 +318,14 @@ JOB_ID="<job_id_from_above>"
 # Check status (will be "pending" until extension picks it up):
 curl -s "http://localhost:8081/api/v1/modules/invoke/test-agent/com.wseternal.ai-automation-proxy/jobs/${JOB_ID}" | jq .
 
-# Or use long-polling (wait up to 60s for completion):
+# Or use long-polling (wait up to 20s for completion):
 curl -s "http://localhost:8081/api/v1/modules/invoke/test-agent/com.wseternal.ai-automation-proxy/jobs/${JOB_ID}?wait=true" | jq .
 ```
+
+The module caps a wait at 20 s. The agent aborts a module exchange after 30 s. A longer
+wait would end before the module can answer, so the module clamps `wait_timeout` values
+above the cap. A job that is still pending while no extension is connected returns at
+once and does not hold the connection.
 
 **Expected output (before extension runs):**
 ```json

@@ -4,9 +4,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/wseternal/ssetunnel/sdk"
 )
 
 // ClientHandler serves the client-facing API endpoints through the SDK
@@ -30,7 +33,10 @@ func (h *ClientHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/jobs/"):
 		h.handleGet(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/health":
-		writeJSON(w, http.StatusOK, map[string]string{"status": "healthy"})
+		writeJSON(w, http.StatusOK, map[string]any{
+			"status":              "healthy",
+			"extension_connected": h.jobs.HasClient(),
+		})
 	default:
 		http.NotFound(w, r)
 	}
@@ -55,9 +61,11 @@ type submitResponse struct {
 // smaller cap would make the documented file limit unreachable.
 const maxProxyBodyBytes = 6 << 20
 
-// maxClientWaitTimeout caps how long a client can hold a connection
-// waiting for a job result (W3 fix: prevent indefinite connection pinning).
-const maxClientWaitTimeout = 5 * time.Minute
+// maxClientWaitTimeout caps how long a client can hold a GET /jobs/{id}
+// connection. The agent aborts a module exchange after sdk.InvocationTimeout,
+// so a longer wait would be cut off with no response at all. The 10 s reserve
+// covers the request read and the response write around the wait itself.
+const maxClientWaitTimeout = sdk.InvocationTimeout - 10*time.Second
 
 func (h *ClientHandler) handleSubmit(w http.ResponseWriter, r *http.Request) {
 	if r.Body == nil {
@@ -81,6 +89,14 @@ func (h *ClientHandler) handleSubmit(w http.ResponseWriter, r *http.Request) {
 	}
 	if strings.TrimSpace(req.Prompt) == "" {
 		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "prompt is required")
+		return
+	}
+	// No automation client means no path to completion: queueing the job would
+	// only make the caller poll a job that can never leave pending.
+	if !h.jobs.HasClient() {
+		log.Printf("aiproxy: submit rejected: no automation client connected")
+		writeError(w, http.StatusServiceUnavailable, "NO_AUTOMATION_CLIENT",
+			"no automation client is connected; start the automation extension and retry")
 		return
 	}
 
@@ -111,23 +127,27 @@ func (h *ClientHandler) handleGet(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "NOT_FOUND", "job not found")
 		return
 	}
+	view := h.jobs.View(job)
 
-	// If the client passes ?wait=true, block until the job is done
-	// or the wait timeout expires.
-	if r.URL.Query().Get("wait") == "true" {
-		waitTimeout := 60 * time.Second
-		if v := r.URL.Query().Get("wait_timeout"); v != "" {
-			if d, err := time.ParseDuration(v); err == nil && d > 0 {
-				waitTimeout = d
-			}
-		}
-		if waitTimeout > maxClientWaitTimeout {
-			waitTimeout = maxClientWaitTimeout
-		}
-		job = h.jobs.WaitForResult(job, waitTimeout)
+	// Block until the job is done or the wait budget expires. A pending job
+	// cannot progress while no automation client is connected, so report its
+	// state now instead of pinning the connection.
+	if r.URL.Query().Get("wait") == "true" && (view.Status != JobPending || h.jobs.HasClient()) {
+		waitTimeout := resolveWaitTimeout(r.URL.Query().Get("wait_timeout"))
+		view = h.jobs.View(h.jobs.WaitForResult(job, waitTimeout))
 	}
 
-	writeJSON(w, http.StatusOK, job)
+	writeJSON(w, http.StatusOK, view)
+}
+
+// resolveWaitTimeout turns the optional wait_timeout query value into the wait
+// budget. It defaults to and never exceeds maxClientWaitTimeout, so the wait
+// always leaves room for the module exchange to finish.
+func resolveWaitTimeout(raw string) time.Duration {
+	if d, err := time.ParseDuration(raw); err == nil && d > 0 && d < maxClientWaitTimeout {
+		return d
+	}
+	return maxClientWaitTimeout
 }
 
 // writeJSON writes a JSON response with the given status code.

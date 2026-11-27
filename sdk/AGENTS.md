@@ -8,6 +8,7 @@ Public Go SDK for module authors (Provider) and consumers (Consumer/Discovery).
 Module authors embed the Provider to register with the agent's IPC server, report health, and serve HTTP invocations.
 
 - `Serve(ctx, manifest, handler)` — connects to IPC, registers, sends OpenAPI, and serves invocations.
+- `InvocationTimeout` (30 s) — the deadline the agent applies to every invocation connection. A handler that blocks longer never writes a response; keep slow work off the request path.
 - Auto-reconnect with two-phase backoff: 2s × 5 fast phase, then exponential 1s → 30s cap.
 - `IPCClient` handles AUTH → REG → OPENAPI → HEALTH protocol.
 - Platform-specific network: `ipc_unix.go` (`"unix"`), `ipc_windows.go` (`"unix"` via go-winio).

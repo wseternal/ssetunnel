@@ -152,6 +152,11 @@ func TestSubmitAndPollRoundTrip(t *testing.T) {
 	handler := NewClientHandler(manager)
 	ext := NewExtensionServer(manager)
 
+	// The client API only accepts a submit while an extension is connected;
+	// admission itself is covered by the handler tests.
+	closed := manager.PollOpened()
+	defer closed()
+
 	body, err := json.Marshal(submitRequest{Prompt: "summarise", File: textFile(t, "a.txt", raw)})
 	if err != nil {
 		t.Fatalf("marshal submit: %v", err)
@@ -265,6 +270,11 @@ func TestSubmitFileStatusMapping(t *testing.T) {
 				manager = NewJobManager(time.Minute, nil, nil, testModuleID)
 			}
 			handler := NewClientHandler(manager)
+
+			// Keep a client connected so the submit reaches file validation
+			// instead of the admission gate.
+			closed := manager.PollOpened()
+			defer closed()
 
 			body, err := json.Marshal(submitRequest{Prompt: "summarise", File: tc.file})
 			if err != nil {
