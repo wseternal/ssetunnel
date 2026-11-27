@@ -1,5 +1,6 @@
 // Command cli provides the client-side tunnel workflows: login, agent,
-// connect, probe, module management, and version information.
+// connect, probe, module management, console module access, and version
+// information.
 package main
 
 import (
@@ -62,6 +63,8 @@ func main() {
 		err = clicommand.RunProbe(ctx, os.Args[2:])
 	case "module":
 		err = clicommand.RunModule(os.Args[2:])
+	case "console":
+		err = clicommand.RunConsole(ctx, os.Args[2:])
 	case "version":
 		fmt.Println(command.BuildVersion())
 		return
