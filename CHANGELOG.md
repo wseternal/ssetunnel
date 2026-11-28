@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.16.0](https://github.com/wseternal/ssetunnel/compare/v1.15.0...v1.16.0) (2026-11-28)
+
+
+### Features
+
+* **cli:** add console module commands ([#105](https://github.com/wseternal/ssetunnel/issues/105)) ([ef4ed33](https://github.com/wseternal/ssetunnel/commit/ef4ed33587dfc82933957168e9c60a90258f8f8c))
+* **modules:** agent-owned module API with console and cli ui parity ([#100](https://github.com/wseternal/ssetunnel/issues/100)) ([c408dc7](https://github.com/wseternal/ssetunnel/commit/c408dc7acc76591561dc5981b7a96a72174f0b13))
+* **modules:** store ai-automation-proxy attachments in the object store ([#103](https://github.com/wseternal/ssetunnel/issues/103)) ([3bc941f](https://github.com/wseternal/ssetunnel/commit/3bc941f79d56bc76e59c124cdc477123cc0b7aa3))
+* **sdk:** module object store contract and chunk codec ([#102](https://github.com/wseternal/ssetunnel/issues/102)) ([8935c2b](https://github.com/wseternal/ssetunnel/commit/8935c2b3f6e8257a95194528131e648f4f634c28))
+
+
+### Bug Fixes
+
+* **modules:** reject ai-automation-proxy submits without a connected client ([#104](https://github.com/wseternal/ssetunnel/issues/104)) ([d19625c](https://github.com/wseternal/ssetunnel/commit/d19625ce54697232a0035fe71c2ff0c82e9ecca4))
+
 ## [1.15.0](https://github.com/wseternal/ssetunnel/compare/v1.14.0...v1.15.0) (2026-11-22)
 
 
