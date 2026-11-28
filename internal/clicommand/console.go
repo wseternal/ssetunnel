@@ -386,7 +386,7 @@ func consoleDisplayPath(path string) string {
 }
 
 // consoleError adds the recovery step when a catalog route rejected the
-// session. A module 401 is a module status, not a console session rejection, so
+// session. A 401 from the invoke route is not a catalog rejection, so
 // FromInvoke errors keep their own cause. Every other error passes through
 // unchanged.
 func consoleError(err error) error {

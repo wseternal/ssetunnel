@@ -46,7 +46,7 @@ cli console call    [<agent-id>] <module-id> (--operation <id> | --method <m> --
 
 ### 2. Use the console API with the saved login session
 
-The CLI talks to the console, not to the agent's loopback API. It resolves the session with `clientapp.ResolveSession`. `--server` sets the console base URL and wins over the stored `console_url`. A missing token is allowed, because an auth-disabled dev server needs none. An auth-enabled server answers 401 on a catalog route, and the CLI tells the user to run login. A module 401 passes through the invoke route as a module status. It does not add that hint.
+The CLI talks to the console, not to the agent's loopback API. It resolves the session with `clientapp.ResolveSession`. `--server` sets the console base URL and wins over the stored `console_url`. A missing token is allowed, because an auth-disabled dev server needs none. An auth-enabled server answers 401 on a catalog route, and the CLI tells the user to run login. A 401 from the invoke route keeps its own status. It does not add that hint.
 
 The base is `<console-url>/api/v1`. A console behind a path prefix must include that prefix in the URL, for example `https://host/console`. This matches `consoleAPIBase`, which the login flow already uses.
 
@@ -69,7 +69,7 @@ The base is `<console-url>/api/v1`. A console behind a path prefix must include 
 - `-H "Name: value"` repeats. `-d` accepts inline text, `@file`, and `@-`. A body without `Content-Type` defaults to `application/json`. A `@file` or `@-` body is capped at 32 MiB.
 - The response body goes to stdout. A JSON body under 8 MiB is indented only when stdout is a terminal. Piped output stays raw and byte-exact.
 - `-i` prints the status line and response headers before the body.
-- 2xx exits 0. A non-2xx status prints the body on stdout, writes the method, path without query values, agent, module, status, console host and correlation ID to stderr, and exits 1. A 401 on a catalog route adds the re-login step. A module 401 keeps its own status. A transport error exits 1.
+- 2xx exits 0. A non-2xx status prints the body on stdout, writes the method, path without query values, agent, module, status, console host and correlation ID to stderr, and exits 1. A 401 on a catalog route adds the re-login step. A 401 from the invoke route keeps its own status. A transport error exits 1.
 
 ### 6. Apply one security contract
 

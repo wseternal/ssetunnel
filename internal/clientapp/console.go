@@ -99,8 +99,8 @@ type ConsoleStatusError struct {
 	// CorrelationID is the ID the console echoed, or the ID the request carried.
 	CorrelationID string
 	Body          string
-	// FromInvoke marks a module response passed through the invoke route. A 401
-	// on that path is a module status, not a console session rejection.
+	// FromInvoke marks a response from the invoke route. A 401 on that path is
+	// not treated as a catalog session rejection.
 	FromInvoke bool
 }
 
@@ -124,7 +124,7 @@ func (e *ConsoleStatusError) Error() string {
 // stored one, but it is only a selector: the session entry keeps its stored
 // server URL, so a refresh cannot rewrite the tunnel endpoint. The token is
 // optional: an auth-disabled server needs none. A 401 from a catalog route
-// becomes a login hint in the CLI. A module 401 does not.
+// becomes a login hint in the CLI. A 401 from the invoke route does not.
 func NewConsoleClient(serverURL string) (*ConsoleClient, error) {
 	serverURL = strings.TrimRight(serverURL, "/")
 	if serverURL != "" {
