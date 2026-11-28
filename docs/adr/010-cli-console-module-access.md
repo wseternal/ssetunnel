@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted. Implemented in `67f8474`.
+Accepted. Implemented in `67f8474` and refined in `f9fd394`, `c051e10`, and `f0a87b3`.
 
 ## Date
 
@@ -46,7 +46,7 @@ cli console call    [<agent-id>] <module-id> (--operation <id> | --method <m> --
 
 ### 2. Use the console API with the saved login session
 
-The CLI talks to the console, not to the agent's loopback API. It resolves the session with `clientapp.ResolveSession`. `--server` sets the console base URL and wins over the stored `console_url`. A missing token is allowed, because an auth-disabled dev server needs none. An auth-enabled server answers 401, and the CLI tells the user to run login.
+The CLI talks to the console, not to the agent's loopback API. It resolves the session with `clientapp.ResolveSession`. `--server` sets the console base URL and wins over the stored `console_url`. A missing token is allowed, because an auth-disabled dev server needs none. An auth-enabled server answers 401 on a catalog route, and the CLI tells the user to run login. A module 401 passes through the invoke route as a module status. It does not add that hint.
 
 The base is `<console-url>/api/v1`. A console behind a path prefix must include that prefix in the URL, for example `https://host/console`. This matches `consoleAPIBase`, which the login flow already uses.
 
@@ -69,16 +69,16 @@ The base is `<console-url>/api/v1`. A console behind a path prefix must include 
 - `-H "Name: value"` repeats. `-d` accepts inline text, `@file`, and `@-`. A body without `Content-Type` defaults to `application/json`. A `@file` or `@-` body is capped at 32 MiB.
 - The response body goes to stdout. A JSON body under 8 MiB is indented only when stdout is a terminal. Piped output stays raw and byte-exact.
 - `-i` prints the status line and response headers before the body.
-- 2xx exits 0. A non-2xx status prints the body on stdout, writes the method, path, agent, module, status, console host and correlation ID to stderr, and exits 1. A 401 adds the re-login step. A transport error exits 1.
+- 2xx exits 0. A non-2xx status prints the body on stdout, writes the method, path without query values, agent, module, status, console host and correlation ID to stderr, and exits 1. A 401 on a catalog route adds the re-login step. A module 401 keeps its own status. A transport error exits 1.
 
 ### 6. Apply one security contract
 
-- Every console URL passes `auth.ValidateConsoleURL`. Non-loopback hosts need HTTPS. Link-local hosts are refused.
+- Every console URL passes `auth.ValidateConsoleURL`. Non-loopback hosts need HTTPS. Link-local hosts are refused. The console client also rejects a missing host, userinfo, a query, and a fragment before a request or a log. A rejected credential never appears in the error.
 - The saved token is used only when the resolved host matches a stored session. The match is by hostname, not by origin: a console on the same host but another port or path prefix still receives the stored bearer, because `login` stores the entry under the derived tunnel URL while `console_url` carries the console port. A different host gets no token at all.
 - An explicit `--server` selects the base URL only. It never becomes the session's stored server URL, so a refresh triggered by a console command writes back the tunnel endpoint rather than the console endpoint.
 - Redirects are refused. A bearer token never follows a `Location` header to another host.
 - Custom headers are copied first, then the session bearer is set. When a session token exists, `-H Authorization` cannot replace it.
-- Transport errors unwrap `*url.Error`, so query values do not appear in error text.
+- Transport errors unwrap `*url.Error`, so query values do not appear in error text. Status errors print the path without query values.
 - Console error bodies are capped at 8 KiB. JSON reads are capped at 32 MiB.
 - Every request carries `X-Correlation-Id`, either caller-supplied or generated.
 
@@ -127,10 +127,11 @@ Rejected. It would forward the bearer token to whatever host the console names.
 - Bodies over 8 MiB stay raw on a terminal.
 - Agent inference costs one extra `connected-agents` request per command.
 - `cmd/ssetunnel` does not expose `console`. Users of the legacy binary must use `cli`.
-- The project testing policy defaults to zero new tests. Verification used a real stack: server, agent, and an echo module. It covered discovery, schema, OpenAPI, GET and POST invocation, header and body forwarding, agent counts, status errors, and transport errors.
+- The project testing policy defaults to zero new tests. Feature verification used a real stack: server, agent, and an echo module. It covered discovery, schema, OpenAPI, GET and POST invocation, header and body forwarding, agent counts, status errors, and transport errors. Focused pure tests cover the review fixes: module 401 scope, console base validation, and query-free error paths.
 
 ## Evidence
 
-- Commit `67f8474` adds `internal/clientapp/console.go`, `internal/clicommand/console.go`, the `cmd/cli` dispatch, one `CLIUsage` line, and the AGENTS updates.
+- Commit `67f8474` adds `internal/clientapp/console.go`, `internal/clicommand/console.go`, the `cmd/cli` dispatch, one `CLIUsage` line, and the AGENTS updates. Review fixes `f9fd394`, `c051e10`, and `f0a87b3` refine failure reporting, help, and flag parsing.
 - `go build ./...`, `go vet ./...`, and `gofmt` pass. `go list -deps ./cmd/server` contains no client package.
 - End-to-end checks confirmed JSON and OpenAPI parity, exact header and body delivery, the targeting rules, stdout and stderr separation, and exit codes 0 and 1.
+- Focused tests cover the console base shape, the catalog-versus-module 401 scope, and query removal from status errors.

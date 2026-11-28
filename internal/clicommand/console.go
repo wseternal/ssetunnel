@@ -38,7 +38,8 @@ subcommands:
   call [<agent-id>] <module-id>     invoke a module operation
 
 The agent ID is optional when exactly one agent is connected.
-All commands use the saved login session. Run '%s login' first.
+By default, commands use the saved login session. Run '%s login' first.
+--server selects another console base. An auth-disabled server needs no token.
 `, BinaryName, BinaryName)
 }
 
@@ -53,6 +54,9 @@ func RunConsole(ctx context.Context, args []string) error {
 	}
 
 	switch args[0] {
+	case "help":
+		fmt.Fprint(os.Stdout, consoleUsage())
+		return nil
 	case "list-agents":
 		return consoleError(consoleListAgents(ctx, args[1:]))
 	case "list-modules":
@@ -271,6 +275,15 @@ func consoleCall(ctx context.Context, args []string) error {
 		return errors.New("--method and --path are required unless --operation is given")
 	}
 
+	requestHeaders, err := buildConsoleHeaders(headers)
+	if err != nil {
+		return err
+	}
+	body, err := readConsoleBody(*data)
+	if err != nil {
+		return err
+	}
+
 	client, err := clientapp.NewConsoleClient(*server)
 	if err != nil {
 		return err
@@ -299,15 +312,6 @@ func consoleCall(ctx context.Context, args []string) error {
 		return errors.New("--method and --path are required unless --operation is given")
 	}
 
-	requestHeaders, err := buildConsoleHeaders(headers)
-	if err != nil {
-		return err
-	}
-	body, err := readConsoleBody(*data)
-	if err != nil {
-		return err
-	}
-
 	resp, err := client.Invoke(ctx, agentID, moduleID, clientapp.InvokeRequest{
 		Method: requestMethod,
 		Path:   requestPath,
@@ -326,9 +330,10 @@ func consoleCall(ctx context.Context, args []string) error {
 		return fmt.Errorf("read response body: %w", err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		statusErr := clientapp.NewConsoleStatusError(resp, "")
+		statusErr.FromInvoke = true
 		return fmt.Errorf("%s %s on agent %q, module %q: %w",
-			requestMethod, requestPath, agentID, moduleID,
-			clientapp.NewConsoleStatusError(resp, ""))
+			requestMethod, consoleDisplayPath(requestPath), agentID, moduleID, statusErr)
 	}
 	return nil
 }
@@ -371,12 +376,22 @@ func resolveConsoleAgent(ctx context.Context, client *clientapp.ConsoleClient, e
 	}
 }
 
-// consoleError adds the recovery step when the console rejected the session.
-// Every console subcommand reports failures through it, so 401 guidance exists
-// once and every other error passes through unchanged.
+// consoleDisplayPath removes the query and fragment from a request path for
+// error text. The module still receives the full path.
+func consoleDisplayPath(path string) string {
+	if i := strings.IndexAny(path, "?#"); i >= 0 {
+		return path[:i]
+	}
+	return path
+}
+
+// consoleError adds the recovery step when a catalog route rejected the
+// session. A module 401 is a module status, not a console session rejection, so
+// FromInvoke errors keep their own cause. Every other error passes through
+// unchanged.
 func consoleError(err error) error {
 	var statusErr *clientapp.ConsoleStatusError
-	if errors.As(err, &statusErr) && statusErr.StatusCode == http.StatusUnauthorized {
+	if errors.As(err, &statusErr) && statusErr.StatusCode == http.StatusUnauthorized && !statusErr.FromInvoke {
 		return fmt.Errorf("%w; the session was rejected, run '%s login'", err, BinaryName)
 	}
 	return err

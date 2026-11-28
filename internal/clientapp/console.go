@@ -93,11 +93,15 @@ type InvokeRequest struct {
 // status, the console host, the correlation ID the console echoed, and a
 // bounded body snippet — never a request header.
 type ConsoleStatusError struct {
-	StatusCode    int
-	Status        string
-	Host          string
+	StatusCode int
+	Status     string
+	Host       string
+	// CorrelationID is the ID the console echoed, or the ID the request carried.
 	CorrelationID string
 	Body          string
+	// FromInvoke marks a module response passed through the invoke route. A 401
+	// on that path is a module status, not a console session rejection.
+	FromInvoke bool
 }
 
 // Error implements error.
@@ -119,10 +123,15 @@ func (e *ConsoleStatusError) Error() string {
 // console API. An explicit serverURL is the console base URL and wins over the
 // stored one, but it is only a selector: the session entry keeps its stored
 // server URL, so a refresh cannot rewrite the tunnel endpoint. The token is
-// optional: an auth-disabled server needs none, and an auth-enabled server
-// answers 401, which every status error maps to a login hint.
+// optional: an auth-disabled server needs none. A 401 from a catalog route
+// becomes a login hint in the CLI. A module 401 does not.
 func NewConsoleClient(serverURL string) (*ConsoleClient, error) {
 	serverURL = strings.TrimRight(serverURL, "/")
+	if serverURL != "" {
+		if err := validateConsoleBaseURL(serverURL); err != nil {
+			return nil, err
+		}
+	}
 
 	info, err := resolveConsoleSession(serverURL)
 	if err != nil {
@@ -136,8 +145,10 @@ func NewConsoleClient(serverURL string) (*ConsoleClient, error) {
 	if consoleURL == "" {
 		return nil, errors.New("the saved session has no console URL; run login or pass --server")
 	}
-	if err := auth.ValidateConsoleURL(consoleURL); err != nil {
-		return nil, fmt.Errorf("console URL %q: %w", consoleURL, err)
+	if serverURL == "" {
+		if err := validateConsoleBaseURL(consoleURL); err != nil {
+			return nil, err
+		}
 	}
 
 	base, err := consoleAPIBase(consoleURL)
@@ -149,6 +160,30 @@ func NewConsoleClient(serverURL string) (*ConsoleClient, error) {
 	}
 
 	return &ConsoleClient{baseURL: base, token: info.Token, http: consoleHTTPClient}, nil
+}
+
+// validateConsoleBaseURL checks the console base before a request or a log.
+// The console base is an origin and an optional path prefix. Credentials, a
+// query, and a fragment do not belong in it. Errors never include the raw URL,
+// so a rejected credential cannot reach stderr.
+func validateConsoleBaseURL(rawURL string) error {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return errors.New("the console URL is malformed")
+	}
+	if u.Host == "" {
+		return errors.New("the console URL must include a host")
+	}
+	if u.User != nil {
+		return errors.New("the console URL must not contain credentials")
+	}
+	if u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
+		return errors.New("the console URL must not contain a query or a fragment")
+	}
+	if err := auth.ValidateConsoleURL(rawURL); err != nil {
+		return fmt.Errorf("invalid console URL: %w", err)
+	}
+	return nil
 }
 
 // resolveConsoleSession resolves the saved session for a console command. A
@@ -170,7 +205,9 @@ func resolveConsoleSession(consoleURL string) (*SessionInfo, error) {
 	if storedServer == "" {
 		return &SessionInfo{URL: consoleURL}, nil
 	}
-	return ResolveSession(storedServer, "console")
+	// The log shows the console base, while the session identity and any
+	// refresh write-back stay on the stored tunnel URL.
+	return resolveSessionWithDisplay(storedServer, consoleURL, "console")
 }
 
 // ListAgents returns the agents the current session can reach.
