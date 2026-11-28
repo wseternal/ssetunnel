@@ -35,6 +35,17 @@ type SessionInfo struct {
 // If serverURL is empty, it loads the first saved session.
 // Proactively refreshes the token if it is near expiration.
 func ResolveSession(serverURL, prefix string) (*SessionInfo, error) {
+	return resolveSession(serverURL, "", prefix)
+}
+
+// resolveSessionWithDisplay resolves a session and uses displayURL in the
+// saved-session log. The display URL never becomes the session identity, so a
+// refresh still writes back to serverURL.
+func resolveSessionWithDisplay(serverURL, displayURL, prefix string) (*SessionInfo, error) {
+	return resolveSession(serverURL, displayURL, prefix)
+}
+
+func resolveSession(serverURL, displayURL, prefix string) (*SessionInfo, error) {
 	serverURL = strings.TrimRight(serverURL, "/")
 	token, resolvedServer, consoleURL, expiresAt, sessErr := auth.LoadSession(serverURL)
 
@@ -45,15 +56,21 @@ func ResolveSession(serverURL, prefix string) (*SessionInfo, error) {
 		}
 		if resolvedServer != "" {
 			url = resolvedServer
-			log.Printf("%s: using saved session for %s", prefix, url)
+			if displayURL == "" {
+				displayURL = url
+			}
+			log.Printf("%s: using saved session for %s", prefix, displayURL)
 		} else {
 			return nil, fmt.Errorf("--server is required (no saved session found; run login first)")
 		}
 	} else {
+		if displayURL == "" {
+			displayURL = url
+		}
 		if sessErr != nil {
-			log.Printf("%s: warning: failed to load session for %s: %v (proceeding without saved token)", prefix, url, sessErr)
+			log.Printf("%s: warning: failed to load session for %s: %v (proceeding without saved token)", prefix, displayURL, sessErr)
 		} else if token != "" {
-			log.Printf("%s: using saved session for %s", prefix, url)
+			log.Printf("%s: using saved session for %s", prefix, displayURL)
 		}
 	}
 
